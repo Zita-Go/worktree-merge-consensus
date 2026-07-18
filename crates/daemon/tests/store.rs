@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use consensus_core::state::{RunFacts, RunState, RunStatus};
 use consensus_daemon::store::SqliteRunStore;
+use rusqlite::{Connection, params};
+use serde_json::Value;
 use uuid::Uuid;
 
 const RUN_ID: &str = "4b230bd8-d870-4ef4-bf20-05a4c61020af";
@@ -62,6 +64,42 @@ fn run_state_round_trips_as_structured_state() {
     let loaded = store.load_run(RUN_ID).unwrap().unwrap();
 
     assert_eq!(loaded, run);
+}
+
+#[test]
+fn legacy_state_without_schema_version_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+    drop(store);
+
+    let connection = Connection::open(&path).unwrap();
+    let encoded: String = connection
+        .query_row(
+            "SELECT state_json FROM runs WHERE run_id = ?1",
+            [RUN_ID],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut value = serde_json::from_str::<Value>(&encoded).unwrap();
+    value.as_object_mut().unwrap().remove("schema_version");
+    connection
+        .execute(
+            "UPDATE runs SET state_json = ?1 WHERE run_id = ?2",
+            params![serde_json::to_string(&value).unwrap(), RUN_ID],
+        )
+        .unwrap();
+    drop(connection);
+
+    let error = SqliteRunStore::open(path)
+        .unwrap()
+        .load_run(RUN_ID)
+        .unwrap_err();
+
+    assert_eq!(error.code(), "INCOMPATIBLE_STATE");
 }
 
 #[test]

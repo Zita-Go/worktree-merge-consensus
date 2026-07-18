@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use consensus_core::{
+    canonical_json_hash,
     protocol::{ProtocolMessage, validate_message},
     state::{NextAction, Phase, Role, RunFacts, RunState, RunStatus},
 };
@@ -18,6 +19,40 @@ fn integration_is_impossible_before_plan_approval() {
     let error = state.request_integration().unwrap_err();
 
     assert_eq!(error.code(), "PLAN_NOT_APPROVED");
+}
+
+#[test]
+fn integration_requires_an_isolated_verification_turn_before_result_review() {
+    let integration_sha = "cccccccccccccccccccccccccccccccccccccccc";
+    let mut state = fixture_plan_state();
+    let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
+    state.apply_message(approved_plan(&plan_hash)).unwrap();
+
+    let next = state
+        .apply_message(integration_created(integration_sha))
+        .unwrap();
+
+    assert_eq!(next, NextAction::RequestPrimaryVerification);
+    assert_eq!(state.phase, Phase::Verify);
+    assert!(state.test_evidence.is_empty());
+
+    let next = state
+        .apply_message(integration_ready(integration_sha))
+        .unwrap();
+    assert_eq!(next, NextAction::RequestReviewerResultVerdict);
+    assert_eq!(state.phase, Phase::ResultReview);
+}
+
+#[test]
+fn plan_approval_is_bound_to_the_exact_canonical_plan_hash() {
+    let mut state = fixture_plan_state();
+    let error = state
+        .apply_message(approved_plan(
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        ))
+        .unwrap_err();
+
+    assert_eq!(error.code(), "STALE_PLAN_HASH");
 }
 
 #[test]
@@ -76,6 +111,84 @@ fn exact_result_approval_requires_read_only_revalidation_before_acceptance() {
     assert_eq!(state.status, RunStatus::Running);
     state.accept_after_revalidation().unwrap();
     assert_eq!(state.status, RunStatus::Accepted);
+    let accepted = state.accepted_result.as_ref().unwrap();
+    assert_eq!(accepted.integration_branch, "consensus/test-run");
+    assert_eq!(accepted.integration_sha, integration_sha);
+    assert_eq!(accepted.tests.len(), 1);
+    assert_eq!(accepted.tests[0].command, "cargo test");
+    assert_eq!(accepted.tests[0].exit_code, 0);
+    assert_eq!(accepted.tests[0].turn_id, "verification-turn");
+    assert_eq!(accepted.tests[0].item_id, "test-command-1");
+    assert!(accepted.source_refs_unchanged);
+    assert!(accepted.publication.local_only);
+    assert!(!accepted.publication.pushed);
+    assert!(!accepted.publication.pull_request_created);
+    assert!(!accepted.publication.merged_into_existing_branch);
+}
+
+#[test]
+fn acceptance_rechecks_nonempty_successful_test_evidence() {
+    let integration_sha = "cccccccccccccccccccccccccccccccccccccccc";
+    let mut state = fixture_result_state(integration_sha);
+    state
+        .apply_message(approved_result(integration_sha))
+        .unwrap();
+    state.test_evidence.clear();
+
+    let error = state.accept_after_revalidation().unwrap_err();
+
+    assert_eq!(error.code(), "TEST_FAILURE");
+    assert_eq!(state.status, RunStatus::Running);
+}
+
+#[test]
+fn acceptance_requires_exactly_one_evidence_item_per_frozen_command() {
+    let integration_sha = "cccccccccccccccccccccccccccccccccccccccc";
+    let mut state = fixture_result_state(integration_sha);
+    state
+        .apply_message(approved_result(integration_sha))
+        .unwrap();
+    state.test_evidence.push(state.test_evidence[0].clone());
+
+    let error = state.accept_after_revalidation().unwrap_err();
+
+    assert_eq!(error.code(), "TEST_FAILURE");
+    assert_eq!(state.status, RunStatus::Running);
+}
+
+#[test]
+fn persisted_accepted_result_must_match_authoritative_state_and_publication_boundary() {
+    let integration_sha = "cccccccccccccccccccccccccccccccccccccccc";
+    let mut state = fixture_result_state(integration_sha);
+    state
+        .apply_message(approved_result(integration_sha))
+        .unwrap();
+    state.accept_after_revalidation().unwrap();
+    state.accepted_result.as_mut().unwrap().publication.pushed = true;
+
+    let error = state.validate_persisted().unwrap_err();
+
+    assert_eq!(error.code(), "INCOMPATIBLE_STATE");
+}
+
+#[test]
+fn stale_blocked_message_cannot_terminate_the_current_round() {
+    let mut state = fixture_plan_state();
+    let blocked = message(json!({
+        "message_type": "BLOCKED",
+        "phase": "CONTRACT",
+        "round": 99,
+        "plan_revision": null,
+        "integration_branch": null,
+        "integration_sha": null,
+        "reason_code": "MODEL_BLOCKED",
+        "payload": {"detail": "stale"}
+    }));
+
+    let error = state.apply_message(blocked).unwrap_err();
+
+    assert_eq!(error.code(), "WRONG_PHASE");
+    assert_eq!(state.status, RunStatus::Running);
 }
 
 #[test]
@@ -91,30 +204,93 @@ fn pause_and_resume_preserve_the_pending_action() {
     assert_eq!(state.status, RunStatus::Running);
 }
 
+#[test]
+fn incompatible_adapter_has_a_distinct_terminal_status() {
+    let mut state = RunState::new(facts());
+
+    state.mark_incompatible("INCOMPATIBLE_CODEX");
+
+    assert_eq!(state.status, RunStatus::IncompatibleCodex);
+    assert_eq!(state.phase, Phase::Blocked);
+    assert_eq!(state.next_action, NextAction::Stop);
+}
+
+#[test]
+fn user_contract_and_plan_tests_are_frozen_before_integration() {
+    let mut state = RunState::new(facts());
+    state
+        .configure_integration(
+            "consensus/test-run",
+            vec!["cargo test -p user-required".into()],
+        )
+        .unwrap();
+    state
+        .apply_message(contract_ready(
+            Role::Primary,
+            json!({"goal": "primary", "tests": ["cargo test -p primary"]}),
+        ))
+        .unwrap();
+    state
+        .apply_message(contract_ready(
+            Role::Reviewer,
+            json!({"goal": "reviewer", "tests": ["cargo test -p reviewer"]}),
+        ))
+        .unwrap();
+    state
+        .record_plan(json!({"test_commands": ["cargo test -p integration"]}))
+        .unwrap();
+
+    assert_eq!(
+        state.required_test_commands,
+        vec![
+            "cargo test -p user-required",
+            "cargo test -p primary",
+            "cargo test -p reviewer",
+            "cargo test -p integration"
+        ]
+    );
+}
+
 fn fixture_plan_state() -> RunState {
     let mut state = RunState::new(facts());
     assert_eq!(
         state
-            .apply_message(contract_ready(Role::Primary, json!({"goal": "primary"})))
+            .apply_message(contract_ready(
+                Role::Primary,
+                json!({"goal": "primary", "tests": ["cargo test"]}),
+            ))
             .unwrap(),
         NextAction::RequestReviewerContract
     );
     assert_eq!(
         state
-            .apply_message(contract_ready(Role::Reviewer, json!({"goal": "reviewer"})))
+            .apply_message(contract_ready(
+                Role::Reviewer,
+                json!({"goal": "reviewer", "tests": ["cargo test"]}),
+            ))
             .unwrap(),
         NextAction::RequestPrimaryPlan
     );
     state
-        .record_plan(json!({"revision": 1, "coverage": ["primary", "reviewer"]}))
+        .record_plan(json!({
+            "revision": 1,
+            "coverage": ["primary", "reviewer"],
+            "test_commands": ["cargo test"]
+        }))
         .unwrap();
+    assert_eq!(state.required_test_commands, vec!["cargo test"]);
     assert_eq!(state.phase, Phase::PlanReview);
     state
 }
 
 fn fixture_result_state(integration_sha: &str) -> RunState {
     let mut state = fixture_plan_state();
-    state.apply_message(approved_plan()).unwrap();
+    let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
+    state.apply_message(approved_plan(&plan_hash)).unwrap();
+    state
+        .apply_message(integration_created(integration_sha))
+        .unwrap();
+    assert_eq!(state.phase, Phase::Verify);
     state
         .apply_message(integration_ready(integration_sha))
         .unwrap();
@@ -150,7 +326,7 @@ fn contract_ready(role: Role, payload: Value) -> ProtocolMessage {
     }))
 }
 
-fn approved_plan() -> ProtocolMessage {
+fn approved_plan(plan_hash: &str) -> ProtocolMessage {
     message(json!({
         "message_type": "APPROVED_PLAN",
         "phase": "PLAN_REVIEW",
@@ -163,7 +339,24 @@ fn approved_plan() -> ProtocolMessage {
             "approved_plan_revision": 1,
             "approved_primary_sha": PRIMARY_SHA,
             "approved_reviewer_sha": REVIEWER_SHA,
+            "approved_plan_hash": plan_hash,
             "uncovered_items": []
+        }
+    }))
+}
+
+fn integration_created(integration_sha: &str) -> ProtocolMessage {
+    message(json!({
+        "message_type": "INTEGRATION_READY",
+        "phase": "INTEGRATE",
+        "round": 1,
+        "plan_revision": 1,
+        "integration_branch": "consensus/test-run",
+        "integration_sha": integration_sha,
+        "reason_code": null,
+        "payload": {
+            "changed_files": ["combined.txt"],
+            "integration_evidence": {"summary": "created"}
         }
     }))
 }
@@ -194,7 +387,17 @@ fn integration_ready(integration_sha: &str) -> ProtocolMessage {
         "integration_branch": "consensus/test-run",
         "integration_sha": integration_sha,
         "reason_code": null,
-        "payload": {"tests": [{"command": "cargo test", "exit_code": 0}]}
+        "payload": {
+            "changed_files": ["combined.txt"],
+            "integration_evidence": {"summary": "created"},
+            "test_evidence": [{
+                "command": "cargo test",
+                "exit_code": 0,
+                "turn_id": "verification-turn",
+                "item_id": "test-command-1",
+                "cwd": "/state/verification/run"
+            }]
+        }
     }))
 }
 

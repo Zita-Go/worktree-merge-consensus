@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use consensus_core::{
+    canonical_json_hash,
     prompts::build_turn_prompt,
     protocol::{ProtocolMessage, validate_message},
     state::{NextAction, Role, RunFacts, RunState},
@@ -54,7 +55,9 @@ fn plan_verdict_prompt_contains_both_contracts_plan_and_coverage() {
         "coverage_matrix": [
             {"contract_item": "primary API", "plan_step": "merge"},
             {"contract_item": "retry semantics", "plan_step": "verify"}
-        ]
+        ],
+        "test_commands": ["cargo test"],
+        "plan_hash": "0000000000000000000000000000000000000000000000000000000000000000"
     });
 
     let prompt = build_turn_prompt(
@@ -99,11 +102,12 @@ fn plan_state() -> RunState {
 
 fn result_state() -> RunState {
     let mut state = plan_state();
-    state
-        .record_plan(json!({"steps": ["merge", "verify"]}))
-        .unwrap();
-    state.apply_message(approved_plan()).unwrap();
-    state.apply_message(integration_ready()).unwrap();
+    let plan = json!({"steps": ["merge", "verify"]});
+    let plan_hash = canonical_json_hash(&plan);
+    state.record_plan(plan).unwrap();
+    state.apply_message(approved_plan(&plan_hash)).unwrap();
+    state.apply_message(integration_created()).unwrap();
+    state.apply_message(integration_verified()).unwrap();
     state
 }
 
@@ -131,11 +135,14 @@ fn contract_ready(role: &str, goal: &str) -> ProtocolMessage {
         "integration_branch": null,
         "integration_sha": null,
         "reason_code": null,
-        "payload": {"role": role, "contract": {"goal": goal}}
+        "payload": {
+            "role": role,
+            "contract": {"goal": goal, "tests": ["cargo test"]}
+        }
     }))
 }
 
-fn approved_plan() -> ProtocolMessage {
+fn approved_plan(plan_hash: &str) -> ProtocolMessage {
     message(json!({
         "message_type": "APPROVED_PLAN",
         "phase": "PLAN_REVIEW",
@@ -148,12 +155,29 @@ fn approved_plan() -> ProtocolMessage {
             "approved_plan_revision": 1,
             "approved_primary_sha": PRIMARY_SHA,
             "approved_reviewer_sha": REVIEWER_SHA,
+            "approved_plan_hash": plan_hash,
             "uncovered_items": []
         }
     }))
 }
 
-fn integration_ready() -> ProtocolMessage {
+fn integration_created() -> ProtocolMessage {
+    message(json!({
+        "message_type": "INTEGRATION_READY",
+        "phase": "INTEGRATE",
+        "round": 1,
+        "plan_revision": 1,
+        "integration_branch": "consensus/test-run",
+        "integration_sha": INTEGRATION_SHA,
+        "reason_code": null,
+        "payload": {
+            "changed_files": ["combined.txt"],
+            "integration_evidence": {"summary": "both changes integrated"}
+        }
+    }))
+}
+
+fn integration_verified() -> ProtocolMessage {
     message(json!({
         "message_type": "INTEGRATION_READY",
         "phase": "VERIFY",
@@ -162,7 +186,17 @@ fn integration_ready() -> ProtocolMessage {
         "integration_branch": "consensus/test-run",
         "integration_sha": INTEGRATION_SHA,
         "reason_code": null,
-        "payload": {"tests": [{"command": "cargo test", "exit_code": 0}]}
+        "payload": {
+            "changed_files": ["combined.txt"],
+            "integration_evidence": {"summary": "both changes integrated"},
+            "test_evidence": [{
+                "command": "cargo test",
+                "exit_code": 0,
+                "turn_id": "turn-verify",
+                "item_id": "command-1",
+                "cwd": "/state/verification/run"
+            }]
+        }
     }))
 }
 

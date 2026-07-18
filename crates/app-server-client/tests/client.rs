@@ -1,4 +1,8 @@
-use app_server_client::{AppServer, CodexAppServer, transport::JsonRpcTransport};
+use std::path::PathBuf;
+
+use app_server_client::{
+    AppServer, CodexAppServer, TurnExecutionPolicy, transport::JsonRpcTransport,
+};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex, split};
 
@@ -27,7 +31,12 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
         respond(
             &mut server_write,
             &initialize,
-            json!({"userAgent": "codex-cli/0.144.5"}),
+            json!({
+                "codexHome": "/home/test/.codex",
+                "platformFamily": "unix",
+                "platformOs": "linux",
+                "userAgent": "codex-cli/0.144.5"
+            }),
         )
         .await;
         let initialized = read_request(&mut lines).await;
@@ -91,10 +100,77 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
             json!([{"type": "text", "text": "review this", "text_elements": []}])
         );
         assert_eq!(turn["params"]["outputSchema"]["type"], "object");
+        assert_eq!(turn["params"]["approvalPolicy"], "never");
+        assert_eq!(turn["params"]["approvalsReviewer"], "user");
+        assert_eq!(turn["params"]["environments"], json!([]));
+        assert_eq!(turn["params"]["cwd"], "/repo/reviewer");
+        assert_eq!(
+            turn["params"]["runtimeWorkspaceRoots"],
+            json!(["/repo/reviewer"])
+        );
+        assert_eq!(
+            turn["params"]["sandboxPolicy"],
+            json!({"type": "readOnly", "networkAccess": false})
+        );
         respond(
             &mut server_write,
             &turn,
             json!({"turn": {"id": "turn-2", "status": "inProgress", "items": []}}),
+        )
+        .await;
+
+        let integration_turn = read_request(&mut lines).await;
+        assert_eq!(integration_turn["method"], "turn/start");
+        assert_eq!(integration_turn["params"]["approvalPolicy"], "untrusted");
+        assert_eq!(integration_turn["params"]["environments"], json!([]));
+        assert_eq!(integration_turn["params"]["cwd"], "/repo/primary");
+        assert_eq!(
+            integration_turn["params"]["runtimeWorkspaceRoots"],
+            json!(["/repo/primary"])
+        );
+        assert_eq!(
+            integration_turn["params"]["sandboxPolicy"],
+            json!({
+                "type": "workspaceWrite",
+                "writableRoots": ["/repo/primary", "/repo/.git"],
+                "networkAccess": false,
+                "excludeSlashTmp": true,
+                "excludeTmpdirEnvVar": true
+            })
+        );
+        respond(
+            &mut server_write,
+            &integration_turn,
+            json!({"turn": {"id": "turn-3", "status": "inProgress", "items": []}}),
+        )
+        .await;
+
+        let verification_turn = read_request(&mut lines).await;
+        assert_eq!(verification_turn["method"], "turn/start");
+        assert_eq!(verification_turn["params"]["approvalPolicy"], "untrusted");
+        assert_eq!(verification_turn["params"]["environments"], json!([]));
+        assert_eq!(
+            verification_turn["params"]["cwd"],
+            "/state/verification/run"
+        );
+        assert_eq!(
+            verification_turn["params"]["runtimeWorkspaceRoots"],
+            json!(["/state/verification/run"])
+        );
+        assert_eq!(
+            verification_turn["params"]["sandboxPolicy"],
+            json!({
+                "type": "workspaceWrite",
+                "writableRoots": ["/state/verification/run"],
+                "networkAccess": false,
+                "excludeSlashTmp": false,
+                "excludeTmpdirEnvVar": false
+            })
+        );
+        respond(
+            &mut server_write,
+            &verification_turn,
+            json!({"turn": {"id": "turn-4", "status": "inProgress", "items": []}}),
         )
         .await;
     });
@@ -107,10 +183,110 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
     assert_eq!(detail.turns.len(), 1);
     client.resume_thread("t-1").await.unwrap();
     let turn = client
-        .start_turn("t-1", "review this", json!({"type": "object"}))
+        .start_turn(
+            "t-1",
+            "review this",
+            json!({"type": "object"}),
+            &TurnExecutionPolicy::ReadOnly {
+                cwd: PathBuf::from("/repo/reviewer"),
+            },
+        )
         .await
         .unwrap();
     assert_eq!(turn.id, "turn-2");
+    let turn = client
+        .start_turn(
+            "t-1",
+            "integrate this",
+            json!({"type": "object"}),
+            &TurnExecutionPolicy::PrimaryIntegration {
+                cwd: PathBuf::from("/repo/primary"),
+                git_common_dir: PathBuf::from("/repo/.git"),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(turn.id, "turn-3");
+    let turn = client
+        .start_turn(
+            "t-1",
+            "verify this",
+            json!({"type": "object"}),
+            &TurnExecutionPolicy::PrimaryVerification {
+                cwd: PathBuf::from("/state/verification/run"),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(turn.id, "turn-4");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn malformed_initialize_handshake_fails_closed() {
+    let (client_side, server_side) = duplex(16 * 1024);
+    let (client_read, client_write) = split(client_side);
+    let client = CodexAppServer::from_transport(JsonRpcTransport::new(client_read, client_write));
+    let (server_read, mut server_write) = split(server_side);
+    let mut lines = BufReader::new(server_read).lines();
+
+    let server = tokio::spawn(async move {
+        let initialize = read_request(&mut lines).await;
+        respond(
+            &mut server_write,
+            &initialize,
+            json!({"userAgent": "codex-cli/0.144.5"}),
+        )
+        .await;
+    });
+
+    let error = client.initialize().await.unwrap_err();
+    assert!(error.to_string().contains("INCOMPATIBLE_CODEX"));
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn missing_required_method_is_reported_as_incompatible_codex() {
+    let (client_side, server_side) = duplex(16 * 1024);
+    let (client_read, client_write) = split(client_side);
+    let client = CodexAppServer::from_transport(JsonRpcTransport::new(client_read, client_write));
+    let (server_read, mut server_write) = split(server_side);
+    let mut lines = BufReader::new(server_read).lines();
+
+    let server = tokio::spawn(async move {
+        let request = read_request(&mut lines).await;
+        server_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&json!({
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "error": {"code": -32601, "message": "Method not found"}
+                    }))
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+    });
+
+    let error = client
+        .start_turn(
+            "t-1",
+            "review",
+            json!({"type": "object"}),
+            &TurnExecutionPolicy::ReadOnly {
+                cwd: PathBuf::from("/repo/reviewer"),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("INCOMPATIBLE_CODEX"));
+    assert!(error.to_string().contains("turn/start"));
     server.await.unwrap();
 }
 

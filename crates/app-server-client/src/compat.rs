@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use semver::Version;
 use serde::Deserialize;
 use serde_json::Value;
@@ -31,10 +29,7 @@ struct MethodFixture {
     required_methods: Vec<String>,
 }
 
-pub fn check_compatibility(
-    version_output: &str,
-    available_methods: &[&str],
-) -> CompatibilityReport {
+pub fn check_compatibility(version_output: &str) -> CompatibilityReport {
     let fixture = match serde_json::from_str::<MethodFixture>(METHOD_FIXTURE) {
         Ok(fixture) => fixture,
         Err(error) => {
@@ -76,18 +71,11 @@ pub fn check_compatibility(
         }
     };
 
-    let advertised = available_methods.iter().copied().collect::<BTreeSet<_>>();
-    let missing_methods = fixture
-        .required_methods
-        .iter()
-        .filter(|method| !advertised.contains(method.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-    if !missing_methods.is_empty() {
+    if fixture.required_methods != REQUIRED_METHODS {
         return incompatible(
             Some(&installed),
-            missing_methods,
-            "one or more required App Server methods are unavailable".to_owned(),
+            vec![],
+            "checked-in method fixture does not match the compiled protocol contract".to_owned(),
         );
     }
     if installed < minimum || installed >= maximum {
@@ -121,11 +109,14 @@ pub fn parse_codex_version(output: &str) -> Option<Version> {
         }
     }
 
-    let mut fields = trimmed.split_whitespace();
-    if fields.next()? != "codex-cli" {
-        return None;
+    if let Some(version) = trimmed.strip_prefix("codex-cli/") {
+        return Version::parse(version.trim_start_matches('v')).ok();
     }
-    Version::parse(fields.next()?.trim_start_matches('v')).ok()
+    let mut fields = trimmed.split_whitespace();
+    (fields.next()? == "codex-cli")
+        .then(|| fields.next())
+        .flatten()
+        .and_then(|version| Version::parse(version.trim_start_matches('v')).ok())
 }
 
 fn incompatible(

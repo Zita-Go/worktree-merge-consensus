@@ -21,6 +21,7 @@ fn valid_approval() -> serde_json::Value {
             "approved_plan_revision": 1,
             "approved_primary_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "approved_reviewer_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "approved_plan_hash": "0000000000000000000000000000000000000000000000000000000000000000",
             "uncovered_items": []
         }
     })
@@ -104,7 +105,8 @@ fn primary_plan_is_a_machine_validated_protocol_message() {
             "primary_contract": {"goal": "primary behavior"},
             "reviewer_contract": {"goal": "reviewer behavior"},
             "plan": {"steps": ["merge", "verify"]},
-            "coverage_matrix": [{"contract_item": "primary behavior", "plan_step": "merge"}]
+            "coverage_matrix": [{"contract_item": "primary behavior", "plan_step": "merge"}],
+            "test_commands": ["cargo test --workspace"]
         }
     });
 

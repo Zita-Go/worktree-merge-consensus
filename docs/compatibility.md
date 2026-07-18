@@ -39,6 +39,35 @@ without preserving this adapter. A method call or response-shape mismatch is a
 communication/compatibility failure, never permission to continue with partial
 evidence.
 
+The `initialize` response is decoded against the pinned required fields
+`codexHome`, `platformFamily`, `platformOs`, and `userAgent`. `codexHome` must
+be absolute, the platform family must be Unix, and the App Server user-agent
+version must exactly match `codex --version`. Codex 0.144.5 does not advertise
+a method inventory in `initialize`; therefore each required operational method
+is invoked through a typed adapter, and JSON-RPC `Method not found` or a shape
+mismatch fails closed when reached. The version fixture is an adapter contract,
+not a claim that the server echoed the client's own method list.
+
+Every `turn/start` also carries the pinned role-specific cwd, runtime workspace
+roots, approval policy, an empty `environments` array that disables inherited
+sticky environments, and one of three sandbox profiles: offline read-only
+review, offline primary integration with source worktree/Git-common writes, or
+offline primary verification with only the isolated clone writable. The
+integration profile disables temporary-directory writes; the verification
+profile permits temporary build artifacts but has no source Git-common root.
+These fields are part of the 0.144.5 shape fixture and are process-tested; an
+adapter upgrade must revalidate their semantics and the `commandExecution`
+item fields (`id`, `command`, `cwd`, `status`, `exitCode`, and optional `source`)
+before widening the supported range.
+
+## Persisted-state compatibility
+
+The v0.1 run-state schema is explicitly versioned. This prerelease does not
+silently migrate state written by earlier development snapshots: missing or
+unknown schema versions return `INCOMPATIBLE_STATE`. Preserve the old state
+directory for audit and start the released binary with a fresh `--state-dir`
+instead of editing SQLite by hand.
+
 ## Operating-system policy
 
 Release artifacts are built natively on GitHub-hosted Linux x86_64 and ARM64
@@ -57,9 +86,11 @@ Supporting a new Codex minor line requires all of the following:
 1. Capture a new checked-in method/shape fixture; do not widen the old maximum
    before verifying the protocol.
 2. Add compatibility tests for the first accepted version, the previous
-   boundary, malformed version output, and missing methods.
+   boundary, malformed version output, handshake identity, turn policy shapes,
+   and operational method failures.
 3. Run the complete fake-App-Server E2E suite, including recovery, duplicated
-   notifications, cancellation, plan revision, result revision, and Git drift.
+   notifications, cancellation, plan revision, result revision, Git drift,
+   exact-SHA isolated verification, and authoritative command-item evidence.
 4. Complete and record
    [the real Codex smoke test](real-codex-smoke-test.md) on both release
    architectures where practical.

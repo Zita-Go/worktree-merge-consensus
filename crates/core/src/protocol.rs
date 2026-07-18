@@ -110,6 +110,14 @@ impl ProtocolMessage {
             MessageType::ContractReady => {
                 self.require_phase(MessagePhase::Contract)?;
                 self.require_no_integration()?;
+                let payload = self.payload_object()?;
+                let contract = payload
+                    .get("contract")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| {
+                        invariant("CONTRACT_READY payload.contract must be an object")
+                    })?;
+                require_nonempty_string_array(contract, "tests")?;
             }
             MessageType::PlanReady => self.validate_plan_ready()?,
             MessageType::ApprovedPlan => self.validate_plan_approval()?,
@@ -154,6 +162,15 @@ impl ProtocolMessage {
             "approved_reviewer_sha",
             &self.envelope.reviewer_sha,
         )?;
+        let plan_hash = payload
+            .get("approved_plan_hash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invariant("APPROVED_PLAN requires approved_plan_hash"))?;
+        if plan_hash.len() != 64 || !plan_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(invariant(
+                "APPROVED_PLAN approved_plan_hash must be a 64-character hex digest",
+            ));
+        }
         require_empty_array(payload, "uncovered_items")?;
         Ok(())
     }
@@ -175,6 +192,7 @@ impl ProtocolMessage {
                 "PLAN_READY payload.coverage_matrix must be a JSON array",
             ));
         }
+        require_nonempty_string_array(payload, "test_commands")?;
         Ok(())
     }
 
@@ -303,6 +321,26 @@ fn require_empty_array(payload: &Map<String, Value>, key: &str) -> Result<(), Pr
             "payload.{key} must be present and empty for approval"
         ))),
     }
+}
+
+fn require_nonempty_string_array(
+    payload: &Map<String, Value>,
+    key: &str,
+) -> Result<(), ProtocolError> {
+    let values = payload
+        .get(key)
+        .and_then(Value::as_array)
+        .filter(|values| !values.is_empty())
+        .ok_or_else(|| invariant(format!("payload.{key} must be a nonempty array")))?;
+    if values
+        .iter()
+        .any(|value| value.as_str().is_none_or(|text| text.trim().is_empty()))
+    {
+        return Err(invariant(format!(
+            "payload.{key} entries must be nonempty strings"
+        )));
+    }
+    Ok(())
 }
 
 fn invariant(message: impl Into<String>) -> ProtocolError {

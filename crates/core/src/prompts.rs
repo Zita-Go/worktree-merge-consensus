@@ -65,6 +65,7 @@ Safety policy:
 - The primary task is the only Git writer.
 - The reviewer task must not modify Git or files.
 - Never push, open a pull request, modify either source ref, merge into an existing branch, reset, rebase, delete branches, or clean worktrees.
+- Do not request user input, network access, broader filesystem access, or sandbox escalation. Return BLOCKED with evidence if the complete payload is insufficient.
 - No integration branch may be created before exact APPROVED_PLAN authorization.
 - Approval is valid only for the exact run, source SHAs, plan revision, round, branch, and integration SHA in the envelope.
 
@@ -136,7 +137,8 @@ fn expected_role(action: NextAction) -> Option<Role> {
     match action {
         NextAction::RequestPrimaryContract
         | NextAction::RequestPrimaryPlan
-        | NextAction::RequestPrimaryIntegration => Some(Role::Primary),
+        | NextAction::RequestPrimaryIntegration
+        | NextAction::RequestPrimaryVerification => Some(Role::Primary),
         NextAction::RequestReviewerContract
         | NextAction::RequestReviewerPlanVerdict
         | NextAction::RequestReviewerResultVerdict => Some(Role::Reviewer),
@@ -152,12 +154,24 @@ fn required_payload_fields(action: NextAction) -> &'static [&'static str] {
             "reviewer_contract",
             "plan",
             "coverage_matrix",
+            "test_commands",
+            "plan_hash",
         ],
         NextAction::RequestPrimaryIntegration => &[
             "primary_contract",
             "reviewer_contract",
             "approved_plan",
             "coverage_matrix",
+            "approval",
+            "target_integration_branch",
+        ],
+        NextAction::RequestPrimaryVerification => &[
+            "integration_evidence",
+            "changed_files",
+            "required_test_commands",
+            "verification_worktree",
+            "integration_branch",
+            "integration_sha",
         ],
         NextAction::RequestReviewerResultVerdict => &[
             "primary_contract",
@@ -166,6 +180,9 @@ fn required_payload_fields(action: NextAction) -> &'static [&'static str] {
             "coverage_matrix",
             "integration_evidence",
             "test_evidence",
+            "changed_files",
+            "integration_branch",
+            "integration_sha",
         ],
         _ => &[],
     }
@@ -174,12 +191,13 @@ fn required_payload_fields(action: NextAction) -> &'static [&'static str] {
 fn expected_message_type(action: NextAction) -> &'static str {
     match action {
         NextAction::RequestPrimaryContract | NextAction::RequestReviewerContract => {
-            "CONTRACT_READY"
+            "CONTRACT_READY or BLOCKED"
         }
-        NextAction::RequestPrimaryPlan => "PLAN_READY",
-        NextAction::RequestReviewerPlanVerdict => "APPROVED_PLAN or CHANGES_REQUIRED",
+        NextAction::RequestPrimaryPlan => "PLAN_READY or BLOCKED",
+        NextAction::RequestReviewerPlanVerdict => "APPROVED_PLAN, CHANGES_REQUIRED, or BLOCKED",
         NextAction::RequestPrimaryIntegration => "INTEGRATION_READY or BLOCKED",
-        NextAction::RequestReviewerResultVerdict => "APPROVED_RESULT or CHANGES_REQUIRED",
+        NextAction::RequestPrimaryVerification => "INTEGRATION_READY or BLOCKED",
+        NextAction::RequestReviewerResultVerdict => "APPROVED_RESULT, CHANGES_REQUIRED, or BLOCKED",
         NextAction::RevalidateAndAccept | NextAction::WaitForUser | NextAction::Stop => {
             "no model response"
         }
@@ -189,19 +207,22 @@ fn expected_message_type(action: NextAction) -> &'static str {
 fn action_instruction(action: NextAction) -> &'static str {
     match action {
         NextAction::RequestPrimaryContract => {
-            "Inspect your existing task context and frozen commit. Return a complete implementation contract covering goals, user-visible behavior, rationale, invariants, interfaces, edge cases, rejected alternatives, relevant files, and tests. Do not modify Git or files in this turn."
+            "Inspect your existing task context and frozen commit. Return a complete implementation contract covering goals, user-visible behavior, rationale, invariants, interfaces, edge cases, rejected alternatives, relevant files, and tests. contract.tests must be a nonempty array of exact commands. Do not modify Git or files in this turn."
         }
         NextAction::RequestReviewerContract => {
-            "Inspect your existing task context and frozen commit. Return a complete implementation contract covering every behavior the integration must preserve, including rationale, invariants, interfaces, edge cases, relevant files, and tests. Do not modify Git or files."
+            "Inspect your existing task context and frozen commit. Return a complete implementation contract covering every behavior the integration must preserve, including rationale, invariants, interfaces, edge cases, relevant files, and tests. contract.tests must be a nonempty array of exact commands. Do not modify Git or files."
         }
         NextAction::RequestPrimaryPlan => {
-            "Produce a complete integration plan for both contracts. Include both contracts verbatim in payload, a versioned plan, conflict decisions with rationale, and one coverage_matrix row for every contract item. Do not create or modify an integration branch."
+            "Produce a complete integration plan for both contracts. Include both contracts verbatim in payload, a versioned plan, conflict decisions with rationale, one coverage_matrix row for every contract item, and a nonempty test_commands array containing every exact command required by either contract plus plan-level verification. Do not create or modify an integration branch."
         }
         NextAction::RequestReviewerPlanVerdict => {
-            "Audit the complete proposed plan against every item in both contracts. Return APPROVED_PLAN only when uncovered_items is empty and every approval identity exactly matches the envelope; otherwise return CHANGES_REQUIRED with stable issue_ids and concrete evidence. Do not modify Git or files."
+            "Audit the complete proposed plan against every item in both contracts. Return APPROVED_PLAN only when uncovered_items is empty and every approval identity exactly matches the envelope, including approved_plan_hash copied from the payload; otherwise return CHANGES_REQUIRED with stable issue_ids and concrete evidence. Do not modify Git or files."
         }
         NextAction::RequestPrimaryIntegration => {
-            "Revalidate the frozen inputs, then create only the authorized new integration branch at primary_sha, merge reviewer_sha into it, resolve conflicts exactly according to the approved plan, commit compatibility fixes, and run all required tests. Return the exact resulting branch, HEAD SHA, conflict decisions, coverage, and test evidence. Do not push or update either source ref."
+            "Revalidate the frozen inputs, then create only the authorized new integration branch at primary_sha, merge reviewer_sha into it, resolve conflicts exactly according to the approved plan, and commit compatibility fixes. Do not run tests in this turn. The command gate accepts branch creation only as `git switch -c TARGET PRIMARY_SHA`, merge only as `git merge --no-ff --no-edit REVIEWER_SHA`, staging only as `git add -A` or `git add --all`, and commits only as `git commit --no-edit` or `git commit -m ONE_SAFE_TOKEN`; edit files through the file-change tool. Use one shell command per tool call; shell chaining is forbidden. Return the exact resulting branch, HEAD SHA, conflict decisions, coverage, and authoritative changed_files without test_evidence. Do not push or update either source ref."
+        }
+        NextAction::RequestPrimaryVerification => {
+            "This is a test-only turn in an isolated local clone that cannot write the source repository's Git common directory. Run every required_test_commands entry exactly once and run no other command. Do not edit files or invoke Git. Return VERIFY-phase INTEGRATION_READY for the exact branch and SHA, copying integration_evidence and changed_files and reporting test_evidence. The coordinator derives authoritative evidence from this turn's completed commandExecution items and rejects any mismatch."
         }
         NextAction::RequestReviewerResultVerdict => {
             "Review the exact integration SHA and all complete evidence against both contracts and the approved plan. Return APPROVED_RESULT only if every item is preserved and uncovered_items is empty; otherwise return CHANGES_REQUIRED with stable issue_ids and evidence. Do not modify Git or files."

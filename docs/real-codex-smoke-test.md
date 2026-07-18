@@ -41,12 +41,24 @@ maintainer completes this checklist and commits the evidence below.
    ```
 
 6. Observe at least one plan correction from the reviewer, exact plan approval,
-   primary-only Git writes, passing tests, and exact result-SHA approval.
-7. Restart the coordinator daemon during a second disposable run and confirm
-   the persisted run resumes without a duplicate integration action.
-8. Verify with read-only Git commands that both original refs and SHAs are
-   unchanged, both frozen commits are ancestors of the accepted SHA, and no
-   remote ref or existing branch changed.
+   primary-only source Git writes, and exact result-SHA approval. Confirm review
+   turns report read-only/offline policy and the integration turn reports
+   bounded source-workspace-write/offline policy. Confirm a separate
+   verification turn uses only the persisted `verification_worktree`, runs each
+   frozen command exactly once, and records successful `commandExecution`
+   evidence with turn ID, item ID, command, cwd, and exit code.
+7. Restart the coordinator daemon during a second disposable integration turn
+   and confirm the persisted run resumes without a duplicate integration
+   action. Repeat during a verification command that creates a disposable test
+   artifact; confirm the same verification turn is recovered without rerunning
+   the command and without relaxing exact-SHA/no-remote isolation.
+8. Verify `accepted_result` records the authoritative tests,
+   `source_refs_unchanged: true`, and local-only/no-push/no-PR fields. Verify the
+   test cwd is a cleanly materialized clone of the exact integration SHA with a
+   distinct Git common directory, detached HEAD, and no remote. Verify with
+   read-only Git commands that both original refs and SHAs are unchanged, both
+   frozen commits are ancestors of the accepted SHA, and no remote ref or
+   existing branch changed.
 9. Run `codex-consensus cancel RUN_ID` on a third disposable run and confirm
    cancellation preserves existing Git state.
 
@@ -67,6 +79,7 @@ Replace `NOT_RECORDED` only with reproducible, redacted evidence.
 | Accepted branch/SHA | `NOT_RECORDED` |
 | Source refs unchanged | `NOT_RECORDED` |
 | Required tests | `NOT_RECORDED` |
+| Verification clone / command-item evidence | `NOT_RECORDED` |
 | Restart recovery | `NOT_RECORDED` |
 | Cancellation preservation | `NOT_RECORDED` |
 

@@ -21,6 +21,59 @@
     "thread/list": [],
     "thread/read": ["threadId", "includeTurns"],
     "thread/resume": ["threadId"],
-    "turn/start": ["threadId", "input", "outputSchema"]
+    "turn/start": [
+      "threadId",
+      "input",
+      "outputSchema",
+      "cwd",
+      "runtimeWorkspaceRoots",
+      "approvalPolicy",
+      "approvalsReviewer",
+      "environments",
+      "sandboxPolicy"
+    ]
+  },
+  "initializeResponseShape": [
+    "codexHome",
+    "platformFamily",
+    "platformOs",
+    "userAgent"
+  ],
+  "turnPolicyShape": {
+    "readOnly": ["type", "networkAccess"],
+    "workspaceWrite": [
+      "type",
+      "writableRoots",
+      "networkAccess",
+      "excludeSlashTmp",
+      "excludeTmpdirEnvVar"
+    ]
+  },
+  "turnPolicyProfiles": {
+    "reviewReadOnly": {
+      "approvalPolicy": "never",
+      "networkAccess": false
+    },
+    "primaryIntegrationWorkspaceWrite": {
+      "approvalPolicy": "untrusted",
+      "writableRootRoles": ["primaryWorktree", "sourceGitCommonDirectory"],
+      "networkAccess": false,
+      "excludeSlashTmp": true,
+      "excludeTmpdirEnvVar": true
+    },
+    "primaryVerificationWorkspaceWrite": {
+      "approvalPolicy": "untrusted",
+      "writableRootRoles": ["isolatedVerificationClone"],
+      "networkAccess": false,
+      "excludeSlashTmp": false,
+      "excludeTmpdirEnvVar": false
+    }
+  },
+  "commandExecutionEvidenceShape": {
+    "required": ["id", "type", "command", "cwd", "status", "exitCode"],
+    "type": "commandExecution",
+    "successfulStatus": "completed",
+    "successfulExitCode": 0,
+    "agentSourceWhenPresent": "agent"
   }
 }

@@ -12,8 +12,55 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  qualify:
+    name: Qualify source and release metadata
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+
+      - name: Install minimum supported Rust toolchain
+        run: rustup toolchain install 1.85.0 --profile minimal
+
+      - name: Check minimum supported Rust version
+        run: cargo +1.85.0 check --locked --workspace --all-targets
+
+      - name: Validate tag and package versions
+        run: bash tests/release.sh "$GITHUB_REF_NAME"
+
+      - name: Regression-test exact binary version matching
+        run: bash tests/release-gate.sh
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run workspace tests
+        run: cargo test --workspace
+
+      - name: Check public documentation
+        run: bash tests/docs.sh
+
+      - name: Install audit tools
+        run: |
+          cargo install --locked cargo-audit
+          cargo install --locked cargo-deny
+
+      - name: Audit RustSec advisories
+        run: cargo audit
+
+      - name: Check dependency licenses
+        run: cargo deny check licenses
+
   build:
     name: Build ${{ matrix.target }}
+    needs: qualify
     strategy:
       fail-fast: false
       matrix:
@@ -28,14 +75,6 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v6
 
-      - name: Validate release tag
-        shell: bash
-        run: |
-          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-            printf 'release tag must be semantic: %s\n' "$GITHUB_REF_NAME" >&2
-            exit 1
-          fi
-
       - name: Install Rust target
         run: |
           rustup toolchain install stable --profile minimal
@@ -43,6 +82,12 @@ jobs:
 
       - name: Build locked release binary
         run: cargo build --locked --release --target "${{ matrix.target }}" -p codex-consensus
+
+      - name: Smoke-test packaged codex-consensus --version and --help
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/codex-consensus"
+          CODEX_CONSENSUS_BIN="$binary" bash tests/release.sh "$GITHUB_REF_NAME"
 
       - name: Package binary and documentation
         shell: bash

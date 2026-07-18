@@ -6,7 +6,8 @@
     "reviewer:CONTRACT_READY",
     "primary:PLAN_READY",
     "reviewer:APPROVED_PLAN",
-    "primary:INTEGRATION_READY",
+    "primary:INTEGRATION_READY@INTEGRATE",
+    "primary:INTEGRATION_READY@VERIFY",
     "reviewer:APPROVED_RESULT"
   ],
   "plan_revision": 1,

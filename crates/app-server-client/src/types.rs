@@ -10,9 +10,27 @@ pub struct AppEvent {
     pub params: Value,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InitializeInfo {
-    pub raw: Value,
+    pub codex_home: PathBuf,
+    pub platform_family: String,
+    pub platform_os: String,
+    pub user_agent: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnExecutionPolicy {
+    ReadOnly {
+        cwd: PathBuf,
+    },
+    PrimaryIntegration {
+        cwd: PathBuf,
+        git_common_dir: PathBuf,
+    },
+    PrimaryVerification {
+        cwd: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

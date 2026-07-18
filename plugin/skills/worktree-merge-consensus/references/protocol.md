@@ -16,7 +16,7 @@ The start operation freezes both task IDs, worktree paths, commit SHAs, and sour
 | `CONTRACT` | Both tasks independently describe behavior, constraints, tests, and protected details. |
 | `PLAN_REVIEW` | The primary proposes coverage; the reviewer either identifies concrete gaps or approves the exact plan revision. |
 | `INTEGRATE` | Only after exact plan approval, the primary creates a new local branch and integrates both frozen commits. |
-| `VERIFY` | Configured tests run and Git safety checks confirm both frozen source refs are unchanged. |
+| `VERIFY` | The coordinator creates a detached, remote-free clone of the exact result SHA. A separate primary turn runs each frozen test there exactly once; the daemon derives evidence from successful App Server command items and confirms both source refs are unchanged. |
 | `RESULT_REVIEW` | The reviewer audits the exact integration SHA and evidence, then requests changes or approves that SHA. |
 | `ACCEPTED` | The daemon revalidates the approved SHA and source refs, records the result, and stops. |
 
@@ -34,7 +34,7 @@ Review rounds are bounded. Repeated non-progress, malformed envelopes, incompati
 
 ## Accepted result
 
-An accepted status includes the run ID, new local integration branch, integration SHA, both frozen source SHAs, test evidence, and `source_refs_unchanged: true`. The coordinator does not publish the branch or merge it into an existing branch.
+An accepted status includes the run ID, new local integration branch, integration SHA, both frozen source SHAs, authoritative test evidence (`turn_id`, `item_id`, command, cwd, and exit code), and `source_refs_unchanged: true`. The coordinator does not publish the branch or merge it into an existing branch. A task's self-reported test result is never sufficient evidence.
 
 ## Recovery
 

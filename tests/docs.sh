@@ -19,6 +19,8 @@ required_files=(
   docs/real-codex-smoke-test.md
   .github/workflows/ci.yml
   .github/workflows/release.yml
+  tests/release.sh
+  tests/release-gate.sh
 )
 
 for path in "${required_files[@]}"; do
@@ -52,6 +54,8 @@ for command in "${commands[@]}"; do
 done
 
 grep -Fq 'cargo fmt --all --check' .github/workflows/ci.yml || fail 'CI omits rustfmt'
+grep -Fq 'cargo +1.85.0 check --locked --workspace --all-targets' .github/workflows/ci.yml ||
+  fail 'CI omits the declared Rust MSRV check'
 grep -Fq 'cargo clippy --workspace --all-targets -- -D warnings' .github/workflows/ci.yml ||
   fail 'CI omits warning-denied Clippy'
 grep -Fq 'cargo test --workspace' .github/workflows/ci.yml || fail 'CI omits workspace tests'
@@ -63,6 +67,23 @@ for marker in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu SHA256SUMS cycl
   grep -Fq "$marker" .github/workflows/release.yml ||
     fail "release workflow is missing $marker"
 done
+
+grep -Fq 'qualify:' .github/workflows/release.yml || fail 'release omits qualification job'
+grep -Fq 'needs: qualify' .github/workflows/release.yml || fail 'release builds bypass qualification'
+grep -Fq 'bash tests/release.sh "$GITHUB_REF_NAME"' .github/workflows/release.yml ||
+  fail 'release does not validate tag and package versions'
+grep -Fq 'bash tests/release-gate.sh' .github/workflows/release.yml ||
+  fail 'release does not regression-test exact binary version matching'
+grep -Fq 'cargo test --workspace' .github/workflows/release.yml || fail 'release omits workspace tests'
+grep -Fq 'cargo +1.85.0 check --locked --workspace --all-targets' .github/workflows/release.yml ||
+  fail 'release omits the declared Rust MSRV check'
+grep -Fq 'cargo clippy --workspace --all-targets -- -D warnings' .github/workflows/release.yml ||
+  fail 'release omits warning-denied Clippy'
+grep -Fq 'cargo audit' .github/workflows/release.yml || fail 'release omits cargo audit'
+grep -Fq 'cargo deny check licenses' .github/workflows/release.yml ||
+  fail 'release omits license checks'
+grep -Fq 'codex-consensus --version' .github/workflows/release.yml ||
+  fail 'release does not smoke-test packaged binaries'
 
 python3 - <<'PY'
 from pathlib import Path

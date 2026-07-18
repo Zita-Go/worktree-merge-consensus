@@ -2,7 +2,8 @@ use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
     fs,
-    path::{Path, PathBuf},
+    io::Read,
+    path::{Component, Path, PathBuf},
     process::{Command, Output},
 };
 
@@ -10,8 +11,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::state::RunFacts;
-
-const MAX_CONFLICT_SCAN_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct GitInspector {
@@ -45,6 +44,7 @@ pub struct WorktreeSnapshot {
 pub struct IntegrationSnapshot {
     pub worktree: WorktreeSnapshot,
     pub branch: String,
+    pub changed_files: Vec<PathBuf>,
     pub unmerged_entries: Vec<String>,
     pub conflict_marker_files: Vec<PathBuf>,
     pub primary_is_ancestor: bool,
@@ -196,7 +196,218 @@ pub fn verify_integration_result(
     Ok(())
 }
 
+pub fn verify_reported_changed_files(
+    integration: &IntegrationSnapshot,
+    reported: &[PathBuf],
+) -> Result<(), GitSafetyError> {
+    let reported = reported
+        .iter()
+        .map(|path| validate_relative_changed_path(path).map(Path::to_path_buf))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let authoritative = integration
+        .changed_files
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if reported != authoritative {
+        return Err(git_error(
+            "CHANGED_FILES_MISMATCH",
+            "reported changed_files does not match the authoritative Git object diff",
+        ));
+    }
+    Ok(())
+}
+
 impl GitInspector {
+    pub fn materialize_verification_clone(
+        &self,
+        source_worktree: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+        integration_sha: &str,
+        source_common_dir: impl AsRef<Path>,
+    ) -> Result<PathBuf, GitSafetyError> {
+        validate_sha(integration_sha, "verification integration SHA")?;
+        let source = fs::canonicalize(source_worktree.as_ref()).map_err(|error| {
+            git_error(
+                "NOT_A_WORKTREE",
+                format!("cannot canonicalize verification source: {error}"),
+            )
+        })?;
+        let source_common = fs::canonicalize(source_common_dir.as_ref()).map_err(|error| {
+            git_error(
+                "NOT_A_WORKTREE",
+                format!("cannot canonicalize source Git common directory: {error}"),
+            )
+        })?;
+        let destination = destination.as_ref();
+        if destination.starts_with(&source) || destination.starts_with(&source_common) {
+            return Err(git_error(
+                "UNSAFE_VERIFICATION_WORKSPACE",
+                "verification clone must be outside the source worktree and Git common directory",
+            ));
+        }
+        if destination.exists() {
+            return self.verify_verification_clone(
+                destination,
+                integration_sha,
+                &source_common,
+                true,
+            );
+        }
+        let parent = destination.parent().ok_or_else(|| {
+            git_error(
+                "UNSAFE_VERIFICATION_WORKSPACE",
+                "verification clone has no parent directory",
+            )
+        })?;
+        fs::create_dir_all(parent).map_err(|error| {
+            git_error(
+                "VERIFICATION_WORKSPACE_FAILURE",
+                format!("cannot create verification parent: {error}"),
+            )
+        })?;
+        let name = destination
+            .file_name()
+            .and_then(OsStr::to_str)
+            .ok_or_else(|| {
+                git_error(
+                    "UNSAFE_VERIFICATION_WORKSPACE",
+                    "verification clone name is not UTF-8",
+                )
+            })?;
+        let preparing = parent.join(format!(".{name}.preparing"));
+        if preparing.exists() {
+            fs::remove_dir_all(&preparing).map_err(|error| {
+                git_error(
+                    "VERIFICATION_WORKSPACE_FAILURE",
+                    format!("cannot remove an interrupted verification clone: {error}"),
+                )
+            })?;
+        }
+
+        let clone = Command::new(&self.git_binary)
+            .args([
+                OsStr::new("-c"),
+                OsStr::new("protocol.file.allow=always"),
+                OsStr::new("clone"),
+                OsStr::new("--no-local"),
+                OsStr::new("--no-hardlinks"),
+                OsStr::new("--no-checkout"),
+                OsStr::new("--quiet"),
+                OsStr::new("--config"),
+                OsStr::new("core.hooksPath=/dev/null"),
+                OsStr::new("--"),
+                source.as_os_str(),
+                preparing.as_os_str(),
+            ])
+            .output()
+            .map_err(|error| {
+                git_error(
+                    "VERIFICATION_WORKSPACE_FAILURE",
+                    format!("cannot start isolated git clone: {error}"),
+                )
+            })?;
+        ensure_success("clone verification workspace", &clone)?;
+
+        for (label, args) in [
+            (
+                "remove verification origin",
+                vec![
+                    OsString::from("-C"),
+                    preparing.as_os_str().to_owned(),
+                    OsString::from("remote"),
+                    OsString::from("remove"),
+                    OsString::from("origin"),
+                ],
+            ),
+            (
+                "checkout verification SHA",
+                vec![
+                    OsString::from("-C"),
+                    preparing.as_os_str().to_owned(),
+                    OsString::from("-c"),
+                    OsString::from("core.hooksPath=/dev/null"),
+                    OsString::from("checkout"),
+                    OsString::from("--detach"),
+                    OsString::from("--quiet"),
+                    OsString::from(integration_sha),
+                ],
+            ),
+        ] {
+            let output = Command::new(&self.git_binary)
+                .args(args)
+                .output()
+                .map_err(|error| {
+                    git_error(
+                        "VERIFICATION_WORKSPACE_FAILURE",
+                        format!("cannot {label}: {error}"),
+                    )
+                })?;
+            ensure_success(label, &output)?;
+        }
+        fs::rename(&preparing, destination).map_err(|error| {
+            git_error(
+                "VERIFICATION_WORKSPACE_FAILURE",
+                format!("cannot publish verification clone: {error}"),
+            )
+        })?;
+        self.verify_verification_clone(destination, integration_sha, &source_common, true)
+    }
+
+    pub fn recover_verification_clone(
+        &self,
+        destination: impl AsRef<Path>,
+        integration_sha: &str,
+        source_common_dir: impl AsRef<Path>,
+    ) -> Result<PathBuf, GitSafetyError> {
+        validate_sha(integration_sha, "verification integration SHA")?;
+        let source_common = fs::canonicalize(source_common_dir.as_ref()).map_err(|error| {
+            git_error(
+                "NOT_A_WORKTREE",
+                format!("cannot canonicalize source Git common directory: {error}"),
+            )
+        })?;
+        self.verify_verification_clone(destination.as_ref(), integration_sha, &source_common, false)
+    }
+
+    fn verify_verification_clone(
+        &self,
+        destination: &Path,
+        integration_sha: &str,
+        source_common: &Path,
+        require_clean: bool,
+    ) -> Result<PathBuf, GitSafetyError> {
+        let snapshot = self.inspect_worktree(destination)?;
+        if snapshot.common_dir == source_common
+            || snapshot.head_sha != integration_sha
+            || snapshot.source_ref.is_some()
+            || (require_clean && !snapshot.clean)
+        {
+            return Err(git_error(
+                "UNSAFE_VERIFICATION_WORKSPACE",
+                "verification clone is not an isolated detached copy of the exact integration SHA in the required cleanliness state",
+            ));
+        }
+        let remotes = Command::new(&self.git_binary)
+            .current_dir(&snapshot.worktree)
+            .arg("remote")
+            .output()
+            .map_err(|error| {
+                git_error(
+                    "VERIFICATION_WORKSPACE_FAILURE",
+                    format!("cannot inspect verification remotes: {error}"),
+                )
+            })?;
+        ensure_success("inspect verification remotes", &remotes)?;
+        if !remotes.stdout.iter().all(u8::is_ascii_whitespace) {
+            return Err(git_error(
+                "UNSAFE_VERIFICATION_WORKSPACE",
+                "verification clone must not retain a Git remote",
+            ));
+        }
+        Ok(snapshot.worktree)
+    }
+
     pub fn inspect_worktree(
         &self,
         path: impl AsRef<Path>,
@@ -258,7 +469,6 @@ impl GitInspector {
         &self,
         path: impl AsRef<Path>,
         facts: &RunFacts,
-        changed_files: &[PathBuf],
     ) -> Result<IntegrationSnapshot, GitSafetyError> {
         let worktree = self.inspect_worktree(path)?;
         let source_ref = worktree.source_ref.as_ref().ok_or_else(|| {
@@ -282,7 +492,9 @@ impl GitInspector {
             self.is_ancestor(&worktree.worktree, &facts.primary_sha, &worktree.head_sha)?;
         let reviewer_is_ancestor =
             self.is_ancestor(&worktree.worktree, &facts.reviewer_sha, &worktree.head_sha)?;
-        let conflict_marker_files = scan_conflict_markers(&worktree.worktree, changed_files)?;
+        let changed_files =
+            self.changed_files(&worktree.worktree, &facts.primary_sha, &worktree.head_sha)?;
+        let conflict_marker_files = scan_conflict_markers(&worktree.worktree, &changed_files)?;
         let primary_source_ref_target =
             self.optional_ref_target(&worktree.worktree, facts.primary_ref.as_deref())?;
         let reviewer_source_ref_target =
@@ -291,6 +503,7 @@ impl GitInspector {
         Ok(IntegrationSnapshot {
             worktree,
             branch,
+            changed_files,
             unmerged_entries,
             conflict_marker_files,
             primary_is_ancestor,
@@ -298,6 +511,28 @@ impl GitInspector {
             primary_source_ref_target,
             reviewer_source_ref_target,
         })
+    }
+
+    fn changed_files(
+        &self,
+        worktree: &Path,
+        baseline: &str,
+        integration: &str,
+    ) -> Result<Vec<PathBuf>, GitSafetyError> {
+        validate_sha(baseline, "changed-file baseline")?;
+        validate_sha(integration, "changed-file integration SHA")?;
+        let output = self.git_output(
+            worktree,
+            [
+                OsString::from("diff"),
+                OsString::from("--name-only"),
+                OsString::from("-z"),
+                OsString::from(baseline),
+                OsString::from(integration),
+                OsString::from("--"),
+            ],
+        )?;
+        parse_changed_files(&output.stdout)
     }
 
     pub fn verify_source_refs_unchanged(
@@ -509,6 +744,9 @@ fn validate_read_only_command(args: &[OsString]) -> Result<(), GitSafetyError> {
         ["merge-base", "--is-ancestor", ancestor, descendant] => {
             is_sha(ancestor) && is_sha(descendant)
         }
+        ["diff", "--name-only", "-z", baseline, integration, "--"] => {
+            is_sha(baseline) && is_sha(integration)
+        }
         _ => false,
     };
     if allowed {
@@ -549,13 +787,20 @@ pub fn normalize_branch_name(branch: &str) -> Result<String, GitSafetyError> {
         && !branch.contains("..")
         && !branch.contains("//")
         && !branch.contains("@{")
+        && branch != "HEAD"
         && !branch.chars().any(char::is_control)
         && !branch
             .chars()
             .any(|character| forbidden.contains(&character))
-        && branch
-            .split('/')
-            .all(|component| !component.is_empty() && component != "." && component != "..");
+        && branch != "@"
+        && branch.split('/').all(|component| {
+            !component.is_empty()
+                && component != "."
+                && component != ".."
+                && !component.starts_with('.')
+                && !component.ends_with('.')
+                && !component.ends_with(".lock")
+        });
     if valid {
         Ok(branch.to_owned())
     } else {
@@ -564,6 +809,37 @@ pub fn normalize_branch_name(branch: &str) -> Result<String, GitSafetyError> {
             "integration branch name is not a safe local branch ref",
         ))
     }
+}
+
+fn parse_changed_files(bytes: &[u8]) -> Result<Vec<PathBuf>, GitSafetyError> {
+    let mut paths = BTreeSet::new();
+    for raw in bytes.split(|byte| *byte == 0).filter(|raw| !raw.is_empty()) {
+        let text = std::str::from_utf8(raw).map_err(|error| {
+            git_error(
+                "INVALID_GIT_OUTPUT",
+                format!("Git changed-file path is not UTF-8: {error}"),
+            )
+        })?;
+        let path = PathBuf::from(text);
+        validate_relative_changed_path(&path)?;
+        paths.insert(path);
+    }
+    Ok(paths.into_iter().collect())
+}
+
+fn validate_relative_changed_path(path: &Path) -> Result<&Path, GitSafetyError> {
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || !path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(git_error(
+            "UNSAFE_CHANGED_PATH",
+            "changed file paths must be normalized repository-relative paths",
+        ));
+    }
+    Ok(path)
 }
 
 fn scan_conflict_markers(
@@ -598,25 +874,91 @@ fn scan_conflict_markers(
                 format!("cannot inspect changed file: {error}"),
             )
         })?;
-        if !metadata.is_file() || metadata.len() > MAX_CONFLICT_SCAN_BYTES {
+        if !metadata.is_file() {
             continue;
         }
-        let bytes = fs::read(&canonical).map_err(|error| {
+        let mut file = fs::File::open(&canonical).map_err(|error| {
             git_error(
                 "UNREADABLE_CHANGED_FILE",
-                format!("cannot read changed file: {error}"),
+                format!("cannot open changed file: {error}"),
             )
         })?;
-        if bytes.contains(&0) {
-            continue;
-        }
-        if bytes.split(|byte| *byte == b'\n').any(|line| {
-            line.starts_with(b"<<<<<<< ") || line == b"=======" || line.starts_with(b">>>>>>> ")
-        }) {
+        if stream_contains_conflict_markers(&mut file).map_err(|error| {
+            git_error(
+                "UNREADABLE_CHANGED_FILE",
+                format!("cannot scan changed file: {error}"),
+            )
+        })? {
             markers.insert(canonical);
         }
     }
     Ok(markers.into_iter().collect())
+}
+
+fn stream_contains_conflict_markers(reader: &mut impl Read) -> std::io::Result<bool> {
+    #[derive(Clone, Copy)]
+    enum Stage {
+        Outside,
+        Ours,
+        Separator,
+    }
+
+    fn advance(stage: Stage, first: Option<u8>, leading: usize, only_same: bool) -> (Stage, bool) {
+        if first == Some(b'<') && leading >= 7 {
+            return (Stage::Ours, false);
+        }
+        match stage {
+            Stage::Ours if first == Some(b'=') && leading >= 7 && only_same => {
+                (Stage::Separator, false)
+            }
+            Stage::Separator if first == Some(b'>') && leading >= 7 => (Stage::Outside, true),
+            current => (current, false),
+        }
+    }
+
+    let mut stage = Stage::Outside;
+    let mut first = None;
+    let mut leading = 0usize;
+    let mut only_same = true;
+    let mut binary = false;
+    let mut found = false;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        for byte in &buffer[..read] {
+            if *byte == 0 {
+                binary = true;
+            }
+            if *byte == b'\n' {
+                let (next, matched) = advance(stage, first, leading, only_same);
+                stage = next;
+                found |= matched;
+                first = None;
+                leading = 0;
+                only_same = true;
+                continue;
+            }
+            if *byte == b'\r' {
+                continue;
+            }
+            match first {
+                None => {
+                    first = Some(*byte);
+                    leading = 1;
+                }
+                Some(value) if *byte == value && only_same => leading += 1,
+                Some(_) => only_same = false,
+            }
+        }
+    }
+    if first.is_some() {
+        let (_, matched) = advance(stage, first, leading, only_same);
+        found |= matched;
+    }
+    Ok(found && !binary)
 }
 
 fn parse_unmerged_entries(bytes: &[u8]) -> Vec<String> {
@@ -668,6 +1010,14 @@ fn command_failure(command: &str, output: &Output) -> GitSafetyError {
             output.status.code()
         ),
     )
+}
+
+fn ensure_success(command: &str, output: &Output) -> Result<(), GitSafetyError> {
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(command_failure(command, output))
+    }
 }
 
 fn git_error(code: &'static str, detail: impl Into<String>) -> GitSafetyError {

@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -13,6 +13,7 @@ use thiserror::Error;
 #[derive(Clone)]
 pub struct SqliteRunStore {
     connection: Arc<Mutex<Connection>>,
+    state_root: Arc<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +52,8 @@ pub enum StoreError {
     Database(#[from] rusqlite::Error),
     #[error("state serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error("INCOMPATIBLE_STATE: {0}")]
+    IncompatibleState(String),
     #[error("state storage I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("state store lock is poisoned")]
@@ -65,6 +68,7 @@ impl StoreError {
             Self::PendingSendNotFound(_) => "PENDING_SEND_NOT_FOUND",
             Self::Database(_) => "DATABASE_ERROR",
             Self::Serialization(_) => "SERIALIZATION_ERROR",
+            Self::IncompatibleState(_) => "INCOMPATIBLE_STATE",
             Self::Io(_) => "IO_ERROR",
             Self::Poisoned => "LOCK_POISONED",
         }
@@ -74,10 +78,13 @@ impl StoreError {
 impl SqliteRunStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-            set_private_directory_permissions(parent)?;
-        }
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        set_private_directory_permissions(parent)?;
+        let state_root = fs::canonicalize(parent)?;
         let connection = Connection::open(path)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.execute_batch(
@@ -89,7 +96,14 @@ impl SqliteRunStore {
         set_private_file_permissions(path)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            state_root: Arc::new(state_root),
         })
+    }
+
+    pub fn verification_path(&self, run_id: &str, integration_sha: &str) -> PathBuf {
+        self.state_root
+            .join("verification")
+            .join(format!("{run_id}-{integration_sha}"))
     }
 
     pub fn insert_run(&self, state: &RunState) -> Result<(), StoreError> {
@@ -97,7 +111,7 @@ impl SqliteRunStore {
         let transaction = connection.transaction()?;
         let run_id = state.facts.run_id.to_string();
         let common_dir = state.facts.git_common_dir.to_string_lossy();
-        let state_json = serde_json::to_string(state)?;
+        let state_json = serialize_state(state)?;
         transaction.execute(
             "INSERT INTO runs (
                 run_id, state_json, status, phase, round, plan_revision,
@@ -168,7 +182,7 @@ impl SqliteRunStore {
             )
             .optional()?;
         state_json
-            .map(|state| serde_json::from_str(&state).map_err(StoreError::from))
+            .map(|state| deserialize_state(&state))
             .transpose()
     }
 
@@ -283,7 +297,7 @@ impl SqliteRunStore {
             )
             .optional()?
             .ok_or_else(|| StoreError::RunNotFound(run_id.to_owned()))?;
-        let current: RunState = serde_json::from_str(&current_json)?;
+        let current = deserialize_state(&current_json)?;
         let pending_id = transaction
             .query_row(
                 "SELECT id FROM turns
@@ -429,7 +443,7 @@ fn update_run_row(
     run_id: &str,
     state: &RunState,
 ) -> Result<(), StoreError> {
-    let state_json = serde_json::to_string(state)?;
+    let state_json = serialize_state(state)?;
     let changed = transaction.execute(
         "UPDATE runs SET
             state_json = ?1, status = ?2, phase = ?3, round = ?4,
@@ -454,6 +468,31 @@ fn update_run_row(
     } else {
         Err(StoreError::RunNotFound(run_id.to_owned()))
     }
+}
+
+fn serialize_state(state: &RunState) -> Result<String, StoreError> {
+    state
+        .validate_persisted()
+        .map_err(|error| StoreError::IncompatibleState(error.to_string()))?;
+    serde_json::to_string(state).map_err(Into::into)
+}
+
+fn deserialize_state(encoded: &str) -> Result<RunState, StoreError> {
+    let value = serde_json::from_str::<serde_json::Value>(encoded)?;
+    let version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64);
+    if version != Some(u64::from(consensus_core::state::RUN_STATE_SCHEMA_VERSION)) {
+        return Err(StoreError::IncompatibleState(format!(
+            "persisted state schema {:?} is unsupported",
+            version
+        )));
+    }
+    let state = serde_json::from_value::<RunState>(value)?;
+    state
+        .validate_persisted()
+        .map_err(|error| StoreError::IncompatibleState(error.to_string()))?;
+    Ok(state)
 }
 
 fn ensure_run_exists(transaction: &Transaction<'_>, run_id: &str) -> Result<(), StoreError> {

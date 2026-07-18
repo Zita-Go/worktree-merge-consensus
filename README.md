@@ -25,7 +25,10 @@ SHAs before review. It then enforces this sequence:
    revision.
 4. Only the primary creates a unique new local integration branch and combines
    the two frozen commits.
-5. Configured tests and Git invariants are checked.
+5. The coordinator materializes a clean, detached, remote-free clone of the
+   exact result SHA. A separate primary verification turn runs every frozen
+   test there, while the coordinator derives evidence from App Server command
+   execution items and checks Git invariants.
 6. The reviewer audits the exact resulting SHA; acceptance is recorded only for
    that SHA.
 
@@ -34,6 +37,17 @@ worktrees, the Git common directory, the Codex App Server, and the coordinator
 must be on one host. The coordinator does not push, open a pull request, merge
 into an existing branch, update either source ref, rebase, reset, delete, or
 clean up worktrees.
+
+This is enforced beyond prompt text: review turns are read-only and offline;
+the primary integration turn is offline, has bounded source-repository writable
+roots, and can run only a narrow Git command set. The separate verification
+turn can write only inside the isolated clone and can run only the exact frozen
+test commands. Each command must appear exactly once as a successful App Server
+`commandExecution` item with the expected cwd; a model's self-reported success
+is not evidence. Deterministic approval rules cancel publication, destructive
+Git, shell chaining, wrong-directory commands, and permission escalation.
+Conflict scanning uses Git's actual primary-to-result diff, including large
+text files, rather than the task's file list.
 
 Read [the v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
@@ -108,8 +122,10 @@ codex-consensus run
 ```
 
 For scripts, provide both task IDs. The branch flag is optional; without it the
-coordinator reserves `consensus/<run-id>`. Every `--test` value is a command the
-primary must run and report during integration.
+coordinator reserves `consensus/<run-id>`. Every `--test` value is an exact
+direct command the primary must run during the isolated verification turn.
+Git commands, shell control operators, and dynamic shell/interpreter launchers
+are rejected. For composed checks, invoke a committed test script directly.
 
 ```bash
 codex-consensus run \
@@ -152,8 +168,8 @@ machine-readable JSON at their operational leaf where shown by `--help`.
 | --- | --- |
 | `RUNNING` | The daemon can dispatch the next deterministic step. |
 | `WAITING_THREAD` | A selected Codex task already has an active turn. |
-| `PAUSED_USER_ACTION` | Permission or another external action is required. Fix the reason, then resume. |
-| `ACCEPTED` | Tests, source-ref invariants, and reviewer approval all match the exact integration SHA. |
+| `PAUSED_USER_ACTION` | Explicit task input or another external action is required. Resolve it, then resume. |
+| `ACCEPTED` | Tests, source-ref invariants, and reviewer approval all match the exact integration SHA; `accepted_result` records test results and the local-only/no-push boundary. |
 | `BLOCKED` | A terminal protocol, safety, round-limit, or no-progress condition stopped the run. |
 | `CANCELLED` | The user cancelled; existing Git state was preserved. |
 | `INCOMPATIBLE_CODEX` | Codex is outside the checked adapter range or lacks a required method. |
@@ -161,7 +177,10 @@ machine-readable JSON at their operational leaf where shown by `--help`.
 Before each App Server turn, the daemon persists the intended send in SQLite.
 After a process restart, the next CLI or MCP request reconnects to the daemon,
 which recovers runnable work idempotently. Do not use `resume` for `BLOCKED` or
-`CANCELLED` runs.
+`CANCELLED` runs. A pending verification turn may leave test artifacts in its
+clone; recovery permits that clone to be dirty only while still requiring the
+persisted path, exact detached SHA, independent Git common directory, and no
+remote.
 
 ## State, logs, and privacy
 
@@ -173,26 +192,34 @@ with the global `--state-dir DIR` option. It contains:
   metadata;
 - `daemon.sock`: the local Unix socket, mode `0600`;
 - `daemon.pid`: the managed daemon process ID.
+- `verification/<run-id>-<integration-sha>`: a detached, remote-free clone used
+  only for exact-SHA tests. It has a Git common directory independent of both
+  source worktrees and is retained for audit/recovery in v0.1.
 
-The directory is mode `0700`. The database does not store task conversation
-transcripts or generated prompts; Codex itself retains messages in the two
-selected task histories. Sensitive App Server diagnostics are redacted. The
-managed daemon does not create a persistent log file by default, so CLI output,
-Codex task history, and `status --json` are the operational record.
+The directory is mode `0700`. The database stores canonical protocol payloads
+and evidence but not full task conversation transcripts or generated prompts;
+Codex itself retains messages in the two selected task histories. Sensitive App
+Server diagnostics are redacted. The managed daemon does not create a
+persistent log file by default, so CLI output, Codex task history, and
+`status --json` are the operational record.
 
 ## Troubleshooting
 
 - `INCOMPATIBLE_CODEX`: confirm `codex --version`, then compare it with
   [the compatibility window](docs/compatibility.md). Unknown versions are not
   guessed compatible.
+- `INCOMPATIBLE_STATE`: a prerelease database has a missing or unknown run-state
+  schema. Preserve it for audit and use a fresh `--state-dir`; do not edit
+  SQLite manually.
 - `DIRTY_WORKTREE`: commit or intentionally remove local changes in both source
   worktrees before starting a new run.
 - `INTEGRATION_BRANCH_EXISTS`: choose a new branch name. Existing branches are
   never reused or deleted.
 - `SOURCE_DRIFT`: a frozen source ref or worktree HEAD changed. Inspect the Git
   state and start a new run with newly frozen commits.
-- `PERMISSION_REQUIRED`: answer the pending Codex permission request in the
-  relevant task, then use `codex-consensus resume RUN_ID`.
+- `PERMISSION_REQUIRED`: answer the pending explicit task-input request in the
+  relevant task, then use `codex-consensus resume RUN_ID`. Command or permission
+  escalation is denied instead and ends as `FORBIDDEN_OPERATION`.
 - `NO_PROGRESS` or `ROUND_LIMIT`: the run is terminal. Review the contracts and
   start a new run rather than forcing acceptance.
 - Daemon startup failure: check ownership and permissions of the state
@@ -217,6 +244,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 bash tests/docs.sh
+bash tests/release-gate.sh
 ```
 
 The end-to-end suite uses a process-level fake App Server and disposable Git

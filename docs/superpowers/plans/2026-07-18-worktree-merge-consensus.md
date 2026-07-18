@@ -1,5 +1,9 @@
 # Worktree Merge Consensus Implementation Plan
 
+> Historical implementation plan. Later security review split integration from
+> exact-SHA test verification and added canonical payload/state-schema binding.
+> See [`docs/protocol-v1.md`](../../protocol-v1.md) for the implemented contract.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build an open-source Rust coordinator that lets two existing same-host Codex App tasks negotiate and produce an accepted local integration branch without a third coordinating agent.

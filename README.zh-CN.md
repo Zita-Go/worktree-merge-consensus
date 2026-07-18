@@ -18,13 +18,22 @@
 2. 主修任务提出覆盖方案。
 3. 复核任务持续提出具体缺口，直到认可某一个精确的方案版本。
 4. 只有主修任务可以创建唯一的新本地集成分支并组合两个冻结提交。
-5. 执行指定测试并检查 Git 不变量。
+5. 协调器为精确结果 SHA 创建干净、detached、无 remote 的独立克隆。单独的主修验证
+   turn 在其中执行全部冻结测试；协调器依据 App Server 的命令执行项生成证据并检查 Git
+   不变量。
 6. 复核任务审计精确的集成 SHA；只有该 SHA 能被记录为验收通过。
 
 `same-host`（同机）和 `no-push`（不推送）是刻意设定的边界。两个任务、两个
 worktree、Git common directory、Codex App Server 和协调器必须位于同一台机器。
 协调器不会 push、创建 PR、合并到已有分支、更新任一源引用、rebase、reset、删除或
 清理 worktree。
+
+这些限制不只依赖提示词：复核 turn 强制只读且断网；主修集成 turn 断网、只开放受限的
+源仓库写入根目录，并且只能执行狭窄的 Git 命令集。单独的验证 turn 只能写入隔离克隆，
+也只能执行精确冻结的测试命令。每个命令都必须在预期 cwd 中恰好出现一次，并对应退出码
+为 0 的 App Server `commandExecution` 项；模型自行声称“通过”不构成证据。确定性审批规则
+会取消发布、破坏性 Git、shell 串联、错误目录命令和权限升级。冲突扫描依据 Git 从主修源
+SHA 到结果 SHA 的真实差异（包括大型文本文件），而不是任务自行上报的文件。
 
 精确边界见 [v1 协议](docs/protocol-v1.md)、
 [兼容性策略](docs/compatibility.md)与[安全策略](SECURITY.md)。
@@ -92,7 +101,9 @@ codex-consensus run
 ```
 
 脚本调用必须同时给出两个任务 ID。分支参数可省略；省略时协调器保留
-`consensus/<run-id>`。每个 `--test` 都是主修集成时必须执行并报告的命令。
+`consensus/<run-id>`。每个 `--test` 都是主修任务必须在隔离验证 turn 中执行的精确直接
+命令。Git 命令、shell 控制符和动态 shell/解释器启动方式会被拒绝；组合检查应直接调用
+仓库中已提交的测试脚本。
 
 ```bash
 codex-consensus run \
@@ -133,15 +144,17 @@ codex-consensus cancel RUN_ID
 | --- | --- |
 | `RUNNING` | daemon 可以发送下一个确定性步骤。 |
 | `WAITING_THREAD` | 某个选中任务已有进行中的 turn。 |
-| `PAUSED_USER_ACTION` | 需要权限确认或其他外部操作；解决原因后再恢复。 |
-| `ACCEPTED` | 测试、源引用不变量和复核认可均对应精确的集成 SHA。 |
+| `PAUSED_USER_ACTION` | 需要显式任务输入或其他外部操作；解决后再恢复。 |
+| `ACCEPTED` | 测试、源引用不变量和复核认可均对应精确的集成 SHA；`accepted_result` 记录测试结果及“仅本地、未推送”边界。 |
 | `BLOCKED` | 协议、安全、轮次上限或无进展条件使运行终止。 |
 | `CANCELLED` | 用户取消；已有 Git 状态保持不变。 |
 | `INCOMPATIBLE_CODEX` | Codex 超出已验证适配范围，或缺少必要方法。 |
 
 daemon 在每次 App Server turn 前先把待发送动作写入 SQLite。进程重启后，下一次 CLI 或
 MCP 请求会重新连接 daemon，并以幂等方式恢复可继续的工作。不要对 `BLOCKED` 或
-`CANCELLED` 运行调用 `resume`。
+`CANCELLED` 运行调用 `resume`。待完成的验证 turn 可能在克隆中留下测试产物；恢复时可
+允许该克隆变脏，但仍强制要求持久化路径、精确 detached SHA、独立 Git common directory
+且无 remote。
 
 ## 状态、日志与隐私
 
@@ -151,15 +164,20 @@ MCP 请求会重新连接 daemon，并以幂等方式恢复可继续的工作。
 - `state.db`：SQLite 运行状态、冻结的 Git 事实、状态迁移和待发送元数据；
 - `daemon.sock`：权限为 `0600` 的本地 Unix socket；
 - `daemon.pid`：托管 daemon 的进程 ID。
+- `verification/<run-id>-<integration-sha>`：用于精确 SHA 测试的 detached、无 remote
+  克隆；其 Git common directory 与两个源 worktree 独立，v0.1 会保留它用于审计和恢复。
 
-目录权限为 `0700`。数据库不保存任务会话全文或生成的 prompt；Codex 自身仍会在两个
-选中任务的历史中保留消息。敏感 App Server 诊断会被脱敏。托管 daemon 默认不创建持久
-日志文件，因此 CLI 输出、Codex 任务历史和 `status --json` 是运行记录。
+目录权限为 `0700`。数据库保存规范协议 payload 和证据，但不保存任务会话全文或生成的
+prompt；Codex 自身仍会在两个选中任务的历史中保留消息。敏感 App Server 诊断会被脱敏。
+托管 daemon 默认不创建持久日志文件，因此 CLI 输出、Codex 任务历史和 `status --json`
+是运行记录。
 
 ## 故障排查
 
 - `INCOMPATIBLE_CODEX`：检查 `codex --version`，再与
   [兼容窗口](docs/compatibility.md)对照；未知版本不会被猜测为兼容。
+- `INCOMPATIBLE_STATE`：预发布数据库缺少运行状态版本或版本未知。请保留旧目录用于审计，
+  并换用新的 `--state-dir`；不要手工修改 SQLite。
 - `DIRTY_WORKTREE`：新运行前先提交或有意识地处理两个源 worktree 的本地修改。
 - `INTEGRATION_BRANCH_EXISTS`：选择新的分支名；协调器不会复用或删除已有分支。
 - `SOURCE_DRIFT`：冻结的源引用或 worktree HEAD 已变化；检查 Git 后用新的提交重新运行。
@@ -185,6 +203,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 bash tests/docs.sh
+bash tests/release-gate.sh
 ```
 
 端到端测试使用进程级 fake App Server 与一次性 Git 仓库；真实 Codex 发布仍须完成单独的

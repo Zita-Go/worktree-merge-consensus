@@ -1,24 +1,30 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use app_server_client::{AppEvent, AppServer, AppServerError, ThreadDetail};
+use app_server_client::{AppEvent, AppServer, AppServerError, ThreadDetail, TurnExecutionPolicy};
 use consensus_core::{
     canonical_json_hash,
     git::{
         GitInspector, GitSafetyError, normalize_branch_name, verify_frozen_sources,
-        verify_integration_result, verify_same_repository,
+        verify_integration_result, verify_reported_changed_files, verify_same_repository,
     },
     prompts::{PromptError, build_turn_prompt},
-    protocol::{MessagePhase, MessageType, ProtocolMessage, output_schema, validate_message},
-    state::{NextAction, Phase, Role, RunFacts, RunState, RunStatus, StateError},
+    protocol::{MessageType, ProtocolMessage, output_schema, validate_message},
+    state::{NextAction, Phase, Role, RunFacts, RunState, RunStatus, StateError, TestEvidence},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+use crate::policy::{ApprovalDecision, decide_command_approval, validate_test_command};
 use crate::store::{SqliteRunStore, StoreError};
 
 const MAX_DRIVER_STEPS: usize = 128;
+
+struct CompletedTurn {
+    response: Value,
+    turn: Value,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct StartRequest {
@@ -102,6 +108,22 @@ pub trait RepositorySafety: Send + Sync {
         sha: &str,
         changed_files: &[PathBuf],
     ) -> Result<(), SafetyError>;
+
+    fn prepare_verification_workspace(
+        &self,
+        facts: &RunFacts,
+        integration_sha: &str,
+        destination: &std::path::Path,
+    ) -> Result<PathBuf, SafetyError>;
+
+    fn recover_verification_workspace(
+        &self,
+        facts: &RunFacts,
+        integration_sha: &str,
+        destination: &std::path::Path,
+    ) -> Result<PathBuf, SafetyError> {
+        self.prepare_verification_workspace(facts, integration_sha, destination)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -185,10 +207,38 @@ impl RepositorySafety for GitRepositorySafety {
     ) -> Result<(), SafetyError> {
         let reviewer = self.inspector.inspect_worktree(&facts.reviewer_worktree)?;
         verify_reviewer_frozen(facts, &reviewer)?;
-        let integration =
-            self.inspector
-                .inspect_integration(&facts.primary_worktree, facts, changed_files)?;
+        let integration = self
+            .inspector
+            .inspect_integration(&facts.primary_worktree, facts)?;
+        verify_reported_changed_files(&integration, changed_files)?;
         verify_integration_result(facts, &integration, branch, sha).map_err(Into::into)
+    }
+
+    fn prepare_verification_workspace(
+        &self,
+        facts: &RunFacts,
+        integration_sha: &str,
+        destination: &std::path::Path,
+    ) -> Result<PathBuf, SafetyError> {
+        self.inspector
+            .materialize_verification_clone(
+                &facts.primary_worktree,
+                destination,
+                integration_sha,
+                &facts.git_common_dir,
+            )
+            .map_err(Into::into)
+    }
+
+    fn recover_verification_workspace(
+        &self,
+        facts: &RunFacts,
+        integration_sha: &str,
+        destination: &std::path::Path,
+    ) -> Result<PathBuf, SafetyError> {
+        self.inspector
+            .recover_verification_clone(destination, integration_sha, &facts.git_common_dir)
+            .map_err(Into::into)
     }
 }
 
@@ -289,6 +339,16 @@ where
             .integration_branch
             .unwrap_or_else(|| format!("consensus/{}", state.facts.run_id));
         let branch = normalize_branch_name(&requested_branch).map_err(SafetyError::from)?;
+        if request
+            .test_commands
+            .iter()
+            .any(|command| !validate_test_command(command))
+        {
+            return Err(CoordinatorError::operational(
+                "INVALID_TEST_COMMAND",
+                "test commands must be nonempty, single commands without publication or destructive Git operations",
+            ));
+        }
         state.configure_integration(branch.clone(), request.test_commands)?;
 
         let primary = self
@@ -336,6 +396,11 @@ where
                 state = persisted;
                 if error.code() == "COMMUNICATION_FAILURE" {
                     state.pause("COMMUNICATION_FAILURE")?;
+                    self.store.save_state(&state)?;
+                    return Ok(state);
+                }
+                if error.code() == "INCOMPATIBLE_CODEX" {
+                    state.mark_incompatible("INCOMPATIBLE_CODEX");
                     self.store.save_state(&state)?;
                     return Ok(state);
                 }
@@ -388,6 +453,9 @@ where
         state: &mut RunState,
         action: NextAction,
     ) -> Result<(), CoordinatorError> {
+        if action == NextAction::RequestPrimaryVerification {
+            self.prepare_verification_workspace(state)?;
+        }
         let role = action_role(action).ok_or_else(|| {
             CoordinatorError::operational("INVALID_STATE", "action has no task role")
         })?;
@@ -395,9 +463,9 @@ where
         let detail = self.wait_until_idle(state, role, &thread_id).await?;
         self.verify_thread_identity(state, role, &detail)?;
 
-        let history = self.load_history(state).await?;
-        self.revalidate_before_action(state, action, &history)?;
-        let payload = build_action_payload(state, action, &history)?;
+        self.load_history(state).await?;
+        self.revalidate_before_action(state, action)?;
+        let payload = build_action_payload(state, action)?;
         let request_hash = canonical_json_hash(&json!({
             "run_id": state.facts.run_id,
             "action": action,
@@ -460,7 +528,12 @@ where
             }
             let turn = self
                 .app
-                .start_turn(&thread_id, &prompt, output_schema())
+                .start_turn(
+                    &thread_id,
+                    &prompt,
+                    output_schema(),
+                    &turn_execution_policy(state, action, role),
+                )
                 .await
                 .map_err(communication_error)?;
             self.store
@@ -468,13 +541,16 @@ where
             turn.id
         };
 
-        let response = self
+        let completed = self
             .wait_for_turn_response(state, &thread_id, &turn_id)
             .await?;
-        let message = validate_message(response.clone()).map_err(|error| {
+        let mut message = validate_message(completed.response).map_err(|error| {
             CoordinatorError::operational("INVALID_RESPONSE", error.to_string())
         })?;
-        self.verify_message_evidence(state, &message)?;
+        self.verify_message_evidence(state, action, &mut message, &completed.turn, &turn_id)?;
+        let response = serde_json::to_value(&message).map_err(|error| {
+            CoordinatorError::operational("SERIALIZATION_FAILURE", error.to_string())
+        })?;
         let mut next = state.clone();
         next.apply_message(message)?;
         let response_hash = canonical_json_hash(&response);
@@ -485,14 +561,8 @@ where
     }
 
     async fn revalidate_and_accept(&self, state: &mut RunState) -> Result<(), CoordinatorError> {
-        let history = self.load_history(state).await?;
-        let integration = history.latest_integration(state).ok_or_else(|| {
-            CoordinatorError::operational(
-                "HISTORY_UNAVAILABLE",
-                "current integration evidence is absent from task history",
-            )
-        })?;
-        let changed_files = changed_files(&integration.message.payload)?;
+        self.load_history(state).await?;
+        let changed_files = changed_files(current_integration_payload(state)?)?;
         let branch = state.integration_branch.as_deref().ok_or_else(|| {
             CoordinatorError::operational("INVALID_STATE", "integration branch is missing")
         })?;
@@ -514,18 +584,12 @@ where
             state.integration_branch.as_deref(),
             state.integration_sha.as_deref(),
         ) {
-            let history = self.load_history(state).await?;
-            let integration = history.latest_integration(state).ok_or_else(|| {
-                CoordinatorError::operational(
-                    "HISTORY_UNAVAILABLE",
-                    "current integration evidence is absent from task history",
-                )
-            })?;
+            self.load_history(state).await?;
             self.safety.verify_integration(
                 &state.facts,
                 branch,
                 sha,
-                &changed_files(&integration.message.payload)?,
+                &changed_files(current_integration_payload(state)?)?,
             )?;
         } else {
             self.safety.verify_frozen(&state.facts)?;
@@ -537,23 +601,30 @@ where
         &self,
         state: &RunState,
         action: NextAction,
-        history: &RunHistory,
     ) -> Result<(), CoordinatorError> {
+        if action == NextAction::RequestPrimaryIntegration {
+            let branch = state.target_integration_branch.as_deref().ok_or_else(|| {
+                CoordinatorError::operational(
+                    "INVALID_STATE",
+                    "target integration branch is missing",
+                )
+            })?;
+            let run_id = state.facts.run_id.to_string();
+            if self.store.pending_send(&run_id)?.is_some() {
+                self.safety
+                    .verify_integration_in_progress(&state.facts, branch)?;
+                return Ok(());
+            }
+        }
         if let (Some(branch), Some(sha)) = (
             state.integration_branch.as_deref(),
             state.integration_sha.as_deref(),
         ) {
-            let integration = history.latest_integration(state).ok_or_else(|| {
-                CoordinatorError::operational(
-                    "HISTORY_UNAVAILABLE",
-                    "current integration evidence is absent from task history",
-                )
-            })?;
             self.safety.verify_integration(
                 &state.facts,
                 branch,
                 sha,
-                &changed_files(&integration.message.payload)?,
+                &changed_files(current_integration_payload(state)?)?,
             )?;
         } else {
             if action == NextAction::RequestPrimaryIntegration {
@@ -563,14 +634,8 @@ where
                         "target integration branch is missing",
                     )
                 })?;
-                let run_id = state.facts.run_id.to_string();
-                if self.store.pending_send(&run_id)?.is_some() {
-                    self.safety
-                        .verify_integration_in_progress(&state.facts, branch)?;
-                } else {
-                    self.safety.verify_frozen(&state.facts)?;
-                    self.safety.verify_branch_absent(&state.facts, branch)?;
-                }
+                self.safety.verify_frozen(&state.facts)?;
+                self.safety.verify_branch_absent(&state.facts, branch)?;
             } else {
                 self.safety.verify_frozen(&state.facts)?;
             }
@@ -578,15 +643,116 @@ where
         Ok(())
     }
 
+    fn prepare_verification_workspace(&self, state: &mut RunState) -> Result<(), CoordinatorError> {
+        let integration_sha = state.integration_sha.as_deref().ok_or_else(|| {
+            CoordinatorError::operational(
+                "INVALID_STATE",
+                "verification requires an integration SHA",
+            )
+        })?;
+        let destination = self
+            .store
+            .verification_path(&state.facts.run_id.to_string(), integration_sha);
+        if state
+            .verification_worktree
+            .as_ref()
+            .is_some_and(|existing| existing != &destination)
+        {
+            return Err(CoordinatorError::operational(
+                "INVALID_STATE",
+                "persisted verification workspace does not match the exact integration SHA",
+            ));
+        }
+        let pending_turn = self
+            .store
+            .pending_send(&state.facts.run_id.to_string())?
+            .is_some();
+        let prepared = if pending_turn && state.verification_worktree.as_ref() == Some(&destination)
+        {
+            self.safety.recover_verification_workspace(
+                &state.facts,
+                integration_sha,
+                &destination,
+            )?
+        } else {
+            self.safety.prepare_verification_workspace(
+                &state.facts,
+                integration_sha,
+                &destination,
+            )?
+        };
+        if prepared != destination {
+            return Err(CoordinatorError::operational(
+                "UNSAFE_VERIFICATION_WORKSPACE",
+                "verification workspace provider returned a different path",
+            ));
+        }
+        state.verification_worktree = Some(prepared);
+        self.store.save_state(state)?;
+        Ok(())
+    }
+
     fn verify_message_evidence(
         &self,
         state: &RunState,
-        message: &ProtocolMessage,
+        action: NextAction,
+        message: &mut ProtocolMessage,
+        turn: &Value,
+        turn_id: &str,
     ) -> Result<(), CoordinatorError> {
+        if matches!(
+            message.envelope.message_type,
+            MessageType::ContractReady | MessageType::PlanReady
+        ) {
+            for command in declared_test_commands(message)? {
+                if !validate_test_command(&command) {
+                    return Err(CoordinatorError::operational(
+                        "INVALID_TEST_COMMAND",
+                        format!(
+                            "model-declared test command violates the execution policy: {command}"
+                        ),
+                    ));
+                }
+            }
+            return Ok(());
+        }
         if message.envelope.message_type != MessageType::IntegrationReady {
             return Ok(());
         }
-        verify_test_evidence(&state.required_test_commands, &message.payload)?;
+        match action {
+            NextAction::RequestPrimaryIntegration => {
+                verify_integration_command_items(state, turn)?;
+            }
+            NextAction::RequestPrimaryVerification => {
+                let authoritative = authoritative_test_evidence(state, turn, turn_id)?;
+                verify_reported_test_evidence(&authoritative, &message.payload)?;
+                let mut canonical = current_integration_payload(state)?.clone();
+                canonical
+                    .as_object_mut()
+                    .ok_or_else(|| {
+                        CoordinatorError::operational(
+                            "INVALID_STATE",
+                            "canonical integration payload is not an object",
+                        )
+                    })?
+                    .insert(
+                        "test_evidence".into(),
+                        serde_json::to_value(authoritative).map_err(|error| {
+                            CoordinatorError::operational(
+                                "SERIALIZATION_FAILURE",
+                                error.to_string(),
+                            )
+                        })?,
+                    );
+                message.payload = canonical;
+            }
+            _ => {
+                return Err(CoordinatorError::operational(
+                    "INVALID_RESPONSE",
+                    "INTEGRATION_READY arrived for a non-integration action",
+                ));
+            }
+        }
         let branch = message
             .envelope
             .integration_branch
@@ -650,7 +816,7 @@ where
         state: &mut RunState,
         thread_id: &str,
         turn_id: &str,
-    ) -> Result<Value, CoordinatorError> {
+    ) -> Result<CompletedTurn, CoordinatorError> {
         let deadline = tokio::time::Instant::now() + self.options.wait_timeout;
         loop {
             let persisted = self.required_run(&state.facts.run_id.to_string())?;
@@ -664,7 +830,12 @@ where
             let detail = self.read_thread_with_retry(thread_id).await?;
             if let Some(turn) = find_turn(&detail, turn_id) {
                 match turn.get("status").and_then(Value::as_str) {
-                    Some("completed") => return final_agent_json(turn),
+                    Some("completed") => {
+                        return Ok(CompletedTurn {
+                            response: final_agent_json(turn)?,
+                            turn: turn.clone(),
+                        });
+                    }
                     Some("failed" | "interrupted") => {
                         return Err(CoordinatorError::operational(
                             "COMMUNICATION_FAILURE",
@@ -681,6 +852,12 @@ where
                 ));
             }
             match tokio::time::timeout(self.options.poll_interval, self.app.next_event()).await {
+                Ok(Some(event))
+                    if event_matches_turn(&event, thread_id, turn_id)
+                        && self.handle_execution_request(state, &event).await? =>
+                {
+                    continue;
+                }
                 Ok(Some(event)) if user_action_event(&event, thread_id, turn_id) => {
                     state.pause("PERMISSION_REQUIRED")?;
                     self.store.save_state(state)?;
@@ -695,7 +872,70 @@ where
         }
     }
 
-    async fn load_history(&self, state: &RunState) -> Result<RunHistory, CoordinatorError> {
+    async fn handle_execution_request(
+        &self,
+        state: &RunState,
+        event: &AppEvent,
+    ) -> Result<bool, CoordinatorError> {
+        let Some(id) = event.id.clone() else {
+            return Ok(false);
+        };
+        match event.method.as_str() {
+            "item/commandExecution/requestApproval" => {
+                let decision = decide_command_approval(state, &event.params);
+                let response = match decision {
+                    ApprovalDecision::Accept => json!({"decision": "accept"}),
+                    ApprovalDecision::Cancel => json!({"decision": "cancel"}),
+                };
+                self.app
+                    .respond_to_request(id, response)
+                    .await
+                    .map_err(communication_error)?;
+                if decision == ApprovalDecision::Cancel {
+                    return Err(CoordinatorError::operational(
+                        "FORBIDDEN_OPERATION",
+                        "the task requested a command outside the frozen integration execution policy",
+                    ));
+                }
+                Ok(true)
+            }
+            "item/fileChange/requestApproval" => {
+                let requests_grant_root = event
+                    .params
+                    .get("grantRoot")
+                    .is_some_and(|value| !value.is_null());
+                let integration_write = state.next_action == NextAction::RequestPrimaryIntegration
+                    && !requests_grant_root;
+                self.app
+                    .respond_to_request(
+                        id,
+                        json!({"decision": if integration_write { "accept" } else { "cancel" }}),
+                    )
+                    .await
+                    .map_err(communication_error)?;
+                if !integration_write {
+                    return Err(CoordinatorError::operational(
+                        "FORBIDDEN_OPERATION",
+                        "a task requested a file change outside the fixed integration write roots",
+                    ));
+                }
+                Ok(true)
+            }
+            "item/permissions/requestApproval" => {
+                self.app
+                    .respond_to_request(id, json!({"permissions": {}, "scope": "turn"}))
+                    .await
+                    .map_err(communication_error)?;
+                Err(CoordinatorError::operational(
+                    "FORBIDDEN_OPERATION",
+                    "additional filesystem or network permissions are forbidden",
+                ))
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn load_history(&self, state: &RunState) -> Result<(), CoordinatorError> {
         let primary = self
             .read_thread_with_retry(&state.facts.primary_thread_id)
             .await?;
@@ -704,7 +944,7 @@ where
             .await?;
         self.verify_thread_identity(state, Role::Primary, &primary)?;
         self.verify_thread_identity(state, Role::Reviewer, &reviewer)?;
-        Ok(RunHistory::from_threads(state, [&primary, &reviewer]))
+        Ok(())
     }
 
     async fn read_thread_with_retry(
@@ -752,108 +992,28 @@ where
     }
 }
 
-#[derive(Clone)]
-struct HistoricalMessage {
-    message: ProtocolMessage,
-}
-
-#[derive(Default)]
-struct RunHistory {
-    messages: Vec<HistoricalMessage>,
-}
-
-impl RunHistory {
-    fn from_threads(state: &RunState, threads: [&ThreadDetail; 2]) -> Self {
-        let mut messages = Vec::new();
-        for thread in threads {
-            for turn in &thread.turns {
-                for item in turn
-                    .get("items")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    if item.get("type").and_then(Value::as_str) != Some("agentMessage") {
-                        continue;
-                    }
-                    let Some(text) = item.get("text").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let Ok(value) = serde_json::from_str::<Value>(text.trim()) else {
-                        continue;
-                    };
-                    let Ok(message) = validate_message(value) else {
-                        continue;
-                    };
-                    if message.envelope.run_id == state.facts.run_id
-                        && message.envelope.primary_sha == state.facts.primary_sha
-                        && message.envelope.reviewer_sha == state.facts.reviewer_sha
-                    {
-                        messages.push(HistoricalMessage { message });
-                    }
-                }
-            }
-        }
-        Self { messages }
-    }
-
-    fn latest(&self, message_type: MessageType) -> Option<&HistoricalMessage> {
-        self.messages
-            .iter()
-            .rev()
-            .find(|entry| entry.message.envelope.message_type == message_type)
-    }
-
-    fn latest_contract(&self, role: &str) -> Option<&Value> {
-        self.messages.iter().rev().find_map(|entry| {
-            (entry.message.envelope.message_type == MessageType::ContractReady
-                && entry.message.payload.get("role").and_then(Value::as_str) == Some(role))
-            .then(|| entry.message.payload.get("contract"))
-            .flatten()
-        })
-    }
-
-    fn latest_plan(&self, state: &RunState) -> Option<&HistoricalMessage> {
-        self.messages.iter().rev().find(|entry| {
-            entry.message.envelope.message_type == MessageType::PlanReady
-                && entry.message.envelope.plan_revision == state.plan_revision
-        })
-    }
-
-    fn latest_integration(&self, state: &RunState) -> Option<&HistoricalMessage> {
-        self.messages.iter().rev().find(|entry| {
-            entry.message.envelope.message_type == MessageType::IntegrationReady
-                && entry.message.envelope.integration_sha.as_deref()
-                    == state.integration_sha.as_deref()
-        })
-    }
-
-    fn latest_changes(&self, phase: MessagePhase) -> Option<&HistoricalMessage> {
-        self.messages.iter().rev().find(|entry| {
-            entry.message.envelope.message_type == MessageType::ChangesRequired
-                && entry.message.envelope.phase == phase
-        })
-    }
-}
-
-fn build_action_payload(
-    state: &RunState,
-    action: NextAction,
-    history: &RunHistory,
-) -> Result<Value, CoordinatorError> {
+fn build_action_payload(state: &RunState, action: NextAction) -> Result<Value, CoordinatorError> {
     let primary_contract = || {
-        history.latest_contract("PRIMARY").cloned().ok_or_else(|| {
+        state.primary_contract.clone().ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
-                "primary contract is absent from canonical task history",
+                "primary contract is absent from canonical persisted state",
             )
         })
     };
     let reviewer_contract = || {
-        history.latest_contract("REVIEWER").cloned().ok_or_else(|| {
+        state.reviewer_contract.clone().ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
-                "reviewer contract is absent from canonical task history",
+                "reviewer contract is absent from canonical persisted state",
+            )
+        })
+    };
+    let current_plan = || {
+        state.current_plan_payload.clone().ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "current plan is absent from canonical persisted state",
             )
         })
     };
@@ -868,66 +1028,65 @@ fn build_action_payload(
         NextAction::RequestPrimaryPlan => Ok(json!({
             "primary_contract": primary_contract()?,
             "reviewer_contract": reviewer_contract()?,
-            "previous_plan": history.latest(MessageType::PlanReady).map(|entry| entry.message.payload.clone()),
-            "review_feedback": history.latest_changes(MessagePhase::PlanReview).map(|entry| entry.message.payload.clone()),
+            "previous_plan": state.current_plan_payload,
+            "review_feedback": state.last_plan_feedback,
             "target_integration_branch": state.target_integration_branch,
             "required_test_commands": state.required_test_commands,
         })),
         NextAction::RequestReviewerPlanVerdict => {
-            let plan = history.latest_plan(state).ok_or_else(|| {
-                CoordinatorError::operational(
-                    "HISTORY_UNAVAILABLE",
-                    "current primary plan is absent from canonical task history",
-                )
-            })?;
-            Ok(plan.message.payload.clone())
+            let mut plan = current_plan()?;
+            let plan_hash = canonical_json_hash(&plan);
+            plan.as_object_mut()
+                .ok_or_else(|| {
+                    CoordinatorError::operational(
+                        "INVALID_STATE",
+                        "canonical plan payload is not an object",
+                    )
+                })?
+                .insert("plan_hash".into(), json!(plan_hash));
+            Ok(plan)
         }
         NextAction::RequestPrimaryIntegration => {
-            let plan = history.latest_plan(state).ok_or_else(|| {
+            let plan = current_plan()?;
+            let approval = state.plan_approval_payload.clone().ok_or_else(|| {
                 CoordinatorError::operational(
                     "HISTORY_UNAVAILABLE",
-                    "approved primary plan is absent from canonical task history",
-                )
-            })?;
-            let approval = history.latest(MessageType::ApprovedPlan).ok_or_else(|| {
-                CoordinatorError::operational(
-                    "HISTORY_UNAVAILABLE",
-                    "plan approval is absent from canonical task history",
+                    "plan approval is absent from canonical persisted state",
                 )
             })?;
             Ok(json!({
                 "primary_contract": primary_contract()?,
                 "reviewer_contract": reviewer_contract()?,
-                "approved_plan": plan.message.payload.get("plan").cloned().unwrap_or(Value::Null),
-                "coverage_matrix": plan.message.payload.get("coverage_matrix").cloned().unwrap_or(Value::Null),
-                "approval": approval.message.payload,
+                "approved_plan": plan.get("plan").cloned().unwrap_or(Value::Null),
+                "coverage_matrix": plan.get("coverage_matrix").cloned().unwrap_or(Value::Null),
+                "approval": approval,
                 "target_integration_branch": state.target_integration_branch,
-                "required_test_commands": state.required_test_commands,
                 "previous_integration_sha": state.integration_sha,
-                "result_feedback": history.latest_changes(MessagePhase::ResultReview).map(|entry| entry.message.payload.clone()),
+                "result_feedback": state.last_result_feedback,
+            }))
+        }
+        NextAction::RequestPrimaryVerification => {
+            let integration = current_integration_payload(state)?;
+            Ok(json!({
+                "integration_evidence": integration.get("integration_evidence").cloned().unwrap_or(Value::Null),
+                "changed_files": integration.get("changed_files").cloned().unwrap_or(Value::Null),
+                "required_test_commands": state.required_test_commands,
+                "verification_worktree": state.verification_worktree,
+                "integration_branch": state.integration_branch,
+                "integration_sha": state.integration_sha,
             }))
         }
         NextAction::RequestReviewerResultVerdict => {
-            let plan = history.latest_plan(state).ok_or_else(|| {
-                CoordinatorError::operational(
-                    "HISTORY_UNAVAILABLE",
-                    "approved primary plan is absent from canonical task history",
-                )
-            })?;
-            let integration = history.latest_integration(state).ok_or_else(|| {
-                CoordinatorError::operational(
-                    "HISTORY_UNAVAILABLE",
-                    "current integration evidence is absent from canonical task history",
-                )
-            })?;
+            let plan = current_plan()?;
+            let integration = current_integration_payload(state)?;
             Ok(json!({
                 "primary_contract": primary_contract()?,
                 "reviewer_contract": reviewer_contract()?,
-                "approved_plan": plan.message.payload.get("plan").cloned().unwrap_or(Value::Null),
-                "coverage_matrix": plan.message.payload.get("coverage_matrix").cloned().unwrap_or(Value::Null),
-                "integration_evidence": integration.message.payload.get("integration_evidence").cloned().unwrap_or(Value::Null),
-                "test_evidence": integration.message.payload.get("test_evidence").cloned().unwrap_or(Value::Null),
-                "changed_files": integration.message.payload.get("changed_files").cloned().unwrap_or(Value::Null),
+                "approved_plan": plan.get("plan").cloned().unwrap_or(Value::Null),
+                "coverage_matrix": plan.get("coverage_matrix").cloned().unwrap_or(Value::Null),
+                "integration_evidence": integration.get("integration_evidence").cloned().unwrap_or(Value::Null),
+                "test_evidence": integration.get("test_evidence").cloned().unwrap_or(Value::Null),
+                "changed_files": integration.get("changed_files").cloned().unwrap_or(Value::Null),
                 "integration_branch": state.integration_branch,
                 "integration_sha": state.integration_sha,
             }))
@@ -938,45 +1097,199 @@ fn build_action_payload(
     }
 }
 
-fn verify_test_evidence(
-    required_commands: &[String],
+fn current_integration_payload(state: &RunState) -> Result<&Value, CoordinatorError> {
+    state.current_integration_payload.as_ref().ok_or_else(|| {
+        CoordinatorError::operational(
+            "HISTORY_UNAVAILABLE",
+            "current integration evidence is absent from canonical persisted state",
+        )
+    })
+}
+
+fn verify_reported_test_evidence(
+    authoritative: &[TestEvidence],
     payload: &Value,
 ) -> Result<(), CoordinatorError> {
     let evidence = payload
         .get("test_evidence")
         .and_then(Value::as_array)
+        .filter(|evidence| !evidence.is_empty())
         .ok_or_else(|| {
             CoordinatorError::operational(
-                "INVALID_RESPONSE",
-                "INTEGRATION_READY payload requires test_evidence",
+                "TEST_FAILURE",
+                "verification response requires nonempty test_evidence",
             )
         })?;
+    if evidence.len() != authoritative.len() {
+        return Err(CoordinatorError::operational(
+            "TEST_FAILURE",
+            "reported test evidence count does not match commandExecution items",
+        ));
+    }
     for item in evidence {
-        let passed = item.get("exit_code").and_then(Value::as_i64) == Some(0)
-            || item.get("passed").and_then(Value::as_bool) == Some(true)
-            || item.get("status").and_then(Value::as_str) == Some("passed");
-        if !passed {
+        let command = item
+            .get("command")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|command| !command.is_empty());
+        if command.is_none() || item.get("exit_code").and_then(Value::as_i64) != Some(0) {
             return Err(CoordinatorError::operational(
                 "TEST_FAILURE",
-                "integration test evidence contains a failed or indeterminate command",
+                "each test evidence entry requires a nonempty command and exact exit_code 0",
             ));
         }
     }
-    for required in required_commands {
+    for actual in authoritative {
         let passed = evidence.iter().any(|item| {
-            item.get("command").and_then(Value::as_str) == Some(required.as_str())
-                && (item.get("exit_code").and_then(Value::as_i64) == Some(0)
-                    || item.get("passed").and_then(Value::as_bool) == Some(true)
-                    || item.get("status").and_then(Value::as_str) == Some("passed"))
+            item.get("command").and_then(Value::as_str) == Some(actual.command.as_str())
+                && item.get("exit_code").and_then(Value::as_i64) == Some(actual.exit_code)
         });
         if !passed {
             return Err(CoordinatorError::operational(
                 "TEST_FAILURE",
-                format!("required test command lacks passing evidence: {required}"),
+                format!(
+                    "reported test evidence does not match commandExecution: {}",
+                    actual.command
+                ),
             ));
         }
     }
     Ok(())
+}
+
+fn command_execution_items(turn: &Value) -> Result<Vec<&Value>, CoordinatorError> {
+    let items = turn.get("items").and_then(Value::as_array).ok_or_else(|| {
+        CoordinatorError::operational(
+            "HISTORY_UNAVAILABLE",
+            "completed turn has no canonical items",
+        )
+    })?;
+    Ok(items
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("commandExecution"))
+        .collect())
+}
+
+fn verify_integration_command_items(
+    state: &RunState,
+    turn: &Value,
+) -> Result<(), CoordinatorError> {
+    for item in command_execution_items(turn)? {
+        let command = item.get("command").and_then(Value::as_str).ok_or_else(|| {
+            CoordinatorError::operational("INVALID_RESPONSE", "commandExecution item omits command")
+        })?;
+        let cwd = item.get("cwd").and_then(Value::as_str).ok_or_else(|| {
+            CoordinatorError::operational("INVALID_RESPONSE", "commandExecution item omits cwd")
+        })?;
+        if decide_command_approval(
+            state,
+            &json!({"cwd": cwd, "command": command, "availableDecisions": ["accept"]}),
+        ) != ApprovalDecision::Accept
+        {
+            return Err(CoordinatorError::operational(
+                "FORBIDDEN_OPERATION",
+                format!("integration turn executed a command outside policy: {command}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn authoritative_test_evidence(
+    state: &RunState,
+    turn: &Value,
+    turn_id: &str,
+) -> Result<Vec<TestEvidence>, CoordinatorError> {
+    let expected_cwd = state.verification_worktree.as_ref().ok_or_else(|| {
+        CoordinatorError::operational("INVALID_STATE", "verification workspace is not persisted")
+    })?;
+    let items = command_execution_items(turn)?;
+    if items.len() != state.required_test_commands.len() {
+        return Err(CoordinatorError::operational(
+            "TEST_FAILURE",
+            "verification must execute each frozen command exactly once and no other command",
+        ));
+    }
+    let mut evidence = Vec::with_capacity(items.len());
+    for required in &state.required_test_commands {
+        let matches = items
+            .iter()
+            .filter(|item| item.get("command").and_then(Value::as_str) == Some(required.as_str()))
+            .copied()
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(CoordinatorError::operational(
+                "TEST_FAILURE",
+                format!("frozen test was not executed exactly once: {required}"),
+            ));
+        }
+        let item = matches[0];
+        let item_id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| {
+                CoordinatorError::operational("INVALID_RESPONSE", "commandExecution item omits id")
+            })?;
+        if item.get("cwd").and_then(Value::as_str) != expected_cwd.to_str() {
+            return Err(CoordinatorError::operational(
+                "FORBIDDEN_OPERATION",
+                format!("test executed outside the isolated clone: {required}"),
+            ));
+        }
+        if item.get("status").and_then(Value::as_str) != Some("completed")
+            || item.get("exitCode").and_then(Value::as_i64) != Some(0)
+        {
+            return Err(CoordinatorError::operational(
+                "TEST_FAILURE",
+                format!("frozen test did not complete with exit code 0: {required}"),
+            ));
+        }
+        if item
+            .get("source")
+            .and_then(Value::as_str)
+            .is_some_and(|source| source != "agent")
+        {
+            return Err(CoordinatorError::operational(
+                "INVALID_RESPONSE",
+                "test commandExecution source is not the agent turn",
+            ));
+        }
+        evidence.push(TestEvidence {
+            command: required.clone(),
+            exit_code: 0,
+            turn_id: turn_id.to_owned(),
+            item_id: item_id.to_owned(),
+            cwd: expected_cwd.clone(),
+        });
+    }
+    Ok(evidence)
+}
+
+fn declared_test_commands(message: &ProtocolMessage) -> Result<Vec<String>, CoordinatorError> {
+    let values = match message.envelope.message_type {
+        MessageType::ContractReady => message
+            .payload
+            .get("contract")
+            .and_then(|contract| contract.get("tests")),
+        MessageType::PlanReady => message.payload.get("test_commands"),
+        _ => return Ok(Vec::new()),
+    }
+    .and_then(Value::as_array)
+    .ok_or_else(|| {
+        CoordinatorError::operational("INVALID_RESPONSE", "declared tests must be a command array")
+    })?;
+    values
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                CoordinatorError::operational(
+                    "INVALID_RESPONSE",
+                    "declared test commands must be strings",
+                )
+            })
+        })
+        .collect()
 }
 
 fn changed_files(payload: &Value) -> Result<Vec<PathBuf>, CoordinatorError> {
@@ -1069,10 +1382,13 @@ fn user_action_event(event: &AppEvent, thread_id: &str, turn_id: &str) -> bool {
     if !is_request {
         return false;
     }
+    event_matches_turn(event, thread_id, turn_id)
+}
+
+fn event_matches_turn(event: &AppEvent, thread_id: &str, turn_id: &str) -> bool {
     let event_thread = event.params.get("threadId").and_then(Value::as_str);
     let event_turn = event.params.get("turnId").and_then(Value::as_str);
-    event_thread.is_none_or(|value| value == thread_id)
-        && event_turn.is_none_or(|value| value == turn_id)
+    event_thread == Some(thread_id) && event_turn == Some(turn_id)
 }
 
 fn role_thread_id(state: &RunState, role: Role) -> &str {
@@ -1082,11 +1398,34 @@ fn role_thread_id(state: &RunState, role: Role) -> &str {
     }
 }
 
+fn turn_execution_policy(state: &RunState, action: NextAction, role: Role) -> TurnExecutionPolicy {
+    match action {
+        NextAction::RequestPrimaryIntegration => TurnExecutionPolicy::PrimaryIntegration {
+            cwd: state.facts.primary_worktree.clone(),
+            git_common_dir: state.facts.git_common_dir.clone(),
+        },
+        NextAction::RequestPrimaryVerification => TurnExecutionPolicy::PrimaryVerification {
+            cwd: state
+                .verification_worktree
+                .clone()
+                .expect("verification workspace is prepared before turn creation"),
+        },
+        _ => {
+            let cwd = match role {
+                Role::Primary => state.facts.primary_worktree.clone(),
+                Role::Reviewer => state.facts.reviewer_worktree.clone(),
+            };
+            TurnExecutionPolicy::ReadOnly { cwd }
+        }
+    }
+}
+
 fn action_role(action: NextAction) -> Option<Role> {
     match action {
         NextAction::RequestPrimaryContract
         | NextAction::RequestPrimaryPlan
-        | NextAction::RequestPrimaryIntegration => Some(Role::Primary),
+        | NextAction::RequestPrimaryIntegration
+        | NextAction::RequestPrimaryVerification => Some(Role::Primary),
         NextAction::RequestReviewerContract
         | NextAction::RequestReviewerPlanVerdict
         | NextAction::RequestReviewerResultVerdict => Some(Role::Reviewer),
@@ -1118,7 +1457,12 @@ fn phase_name(phase: Phase) -> &'static str {
 }
 
 fn communication_error(error: AppServerError) -> CoordinatorError {
-    CoordinatorError::operational("COMMUNICATION_FAILURE", error.to_string())
+    match error {
+        AppServerError::IncompatibleCodex(detail) => {
+            CoordinatorError::operational("INCOMPATIBLE_CODEX", detail)
+        }
+        error => CoordinatorError::operational("COMMUNICATION_FAILURE", error.to_string()),
+    }
 }
 
 fn verify_reviewer_frozen(

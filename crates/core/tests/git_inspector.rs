@@ -1,9 +1,14 @@
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use consensus_core::{
     git::{
-        GitInspector, inspect_worktree, verify_frozen_sources, verify_integration_result,
-        verify_same_repository,
+        GitInspector, inspect_worktree, normalize_branch_name, verify_frozen_sources,
+        verify_integration_result, verify_reported_changed_files, verify_same_repository,
     },
     state::RunFacts,
 };
@@ -92,11 +97,7 @@ fn integration_result_contains_both_frozen_commits_and_preserves_source_refs() {
     let (fixture, facts) = integrated_fixture();
     let inspector = GitInspector::default();
     let integration = inspector
-        .inspect_integration(
-            fixture.primary(),
-            &facts,
-            &["primary.txt".into(), "reviewer.txt".into()],
-        )
+        .inspect_integration(fixture.primary(), &facts)
         .unwrap();
 
     verify_integration_result(
@@ -108,6 +109,91 @@ fn integration_result_contains_both_frozen_commits_and_preserves_source_refs() {
     .unwrap();
     assert!(integration.primary_is_ancestor);
     assert!(integration.reviewer_is_ancestor);
+    assert_eq!(
+        integration.changed_files,
+        vec![PathBuf::from("reviewer.txt")]
+    );
+}
+
+#[test]
+fn verification_clone_is_detached_remote_free_and_git_isolated() {
+    let (fixture, facts) = integrated_fixture();
+    let inspector = GitInspector::default();
+    let integration = inspector
+        .inspect_integration(fixture.primary(), &facts)
+        .unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let destination = state.path().join("verification");
+
+    let clone = inspector
+        .materialize_verification_clone(
+            fixture.primary(),
+            &destination,
+            &integration.worktree.head_sha,
+            &facts.git_common_dir,
+        )
+        .unwrap();
+
+    let snapshot = inspector.inspect_worktree(&clone).unwrap();
+    assert_eq!(snapshot.head_sha, integration.worktree.head_sha);
+    assert!(snapshot.source_ref.is_none());
+    assert_ne!(snapshot.common_dir, facts.git_common_dir);
+    let remotes = Command::new("git")
+        .args(["-C", clone.to_str().unwrap(), "remote"])
+        .output()
+        .unwrap();
+    assert!(remotes.status.success());
+    assert!(remotes.stdout.is_empty());
+    inspector
+        .verify_source_refs_unchanged(fixture.primary(), &facts)
+        .unwrap();
+}
+
+#[test]
+fn pending_verification_can_recover_a_dirty_clone_without_losing_git_isolation() {
+    let (fixture, facts) = integrated_fixture();
+    let inspector = GitInspector::default();
+    let integration = inspector
+        .inspect_integration(fixture.primary(), &facts)
+        .unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let destination = state.path().join("verification");
+    let clone = inspector
+        .materialize_verification_clone(
+            fixture.primary(),
+            &destination,
+            &integration.worktree.head_sha,
+            &facts.git_common_dir,
+        )
+        .unwrap();
+    fs::write(
+        clone.join("test-artifact.txt"),
+        "created by a frozen test\n",
+    )
+    .unwrap();
+
+    let normal_error = inspector
+        .materialize_verification_clone(
+            fixture.primary(),
+            &destination,
+            &integration.worktree.head_sha,
+            &facts.git_common_dir,
+        )
+        .unwrap_err();
+    assert_eq!(normal_error.code(), "UNSAFE_VERIFICATION_WORKSPACE");
+
+    let recovered = inspector
+        .recover_verification_clone(
+            &destination,
+            &integration.worktree.head_sha,
+            &facts.git_common_dir,
+        )
+        .unwrap();
+    let snapshot = inspector.inspect_worktree(&recovered).unwrap();
+    assert_eq!(snapshot.head_sha, integration.worktree.head_sha);
+    assert!(snapshot.source_ref.is_none());
+    assert_ne!(snapshot.common_dir, facts.git_common_dir);
+    assert!(recovered.join("test-artifact.txt").exists());
 }
 
 #[test]
@@ -125,7 +211,7 @@ fn committed_conflict_markers_are_rejected() {
     );
     let inspector = GitInspector::default();
     let integration = inspector
-        .inspect_integration(fixture.primary(), &facts, &["conflicted.txt".into()])
+        .inspect_integration(fixture.primary(), &facts)
         .unwrap();
 
     let error = verify_integration_result(
@@ -137,6 +223,68 @@ fn committed_conflict_markers_are_rejected() {
     .unwrap_err();
 
     assert_eq!(error.code(), "CONFLICT_MARKERS");
+    assert!(
+        integration
+            .conflict_marker_files
+            .iter()
+            .any(|path| path.ends_with("conflicted.txt"))
+    );
+}
+
+#[test]
+fn conflict_markers_in_large_files_are_scanned_fail_closed() {
+    let (fixture, facts) = integrated_fixture();
+    let path = fixture.primary().join("large-conflict.txt");
+    let mut file = fs::File::create(&path).unwrap();
+    writeln!(file, "<<<<<<<<<< ours").unwrap();
+    file.write_all(&vec![b'a'; 8 * 1024 * 1024]).unwrap();
+    writeln!(file, "\n==========\nright\n>>>>>>>>>> theirs").unwrap();
+    drop(file);
+    fixture.git(fixture.primary(), &["add", "large-conflict.txt"]);
+    fixture.git(
+        fixture.primary(),
+        &["commit", "-m", "large unresolved conflict"],
+    );
+    let integration = GitInspector::default()
+        .inspect_integration(fixture.primary(), &facts)
+        .unwrap();
+
+    let error = verify_integration_result(
+        &facts,
+        &integration,
+        "consensus/test-run",
+        &integration.worktree.head_sha,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "CONFLICT_MARKERS");
+}
+
+#[test]
+fn reported_changed_files_must_match_git_objects_exactly() {
+    let (fixture, facts) = integrated_fixture();
+    let integration = GitInspector::default()
+        .inspect_integration(fixture.primary(), &facts)
+        .unwrap();
+
+    let error = verify_reported_changed_files(&integration, &[]).unwrap_err();
+
+    assert_eq!(error.code(), "CHANGED_FILES_MISMATCH");
+    verify_reported_changed_files(&integration, &[PathBuf::from("reviewer.txt")]).unwrap();
+}
+
+#[test]
+fn branch_components_follow_git_ref_format_rules() {
+    for branch in [
+        "consensus/.hidden/result",
+        "consensus/result.lock/final",
+        "consensus/trailing./final",
+        "@",
+        "HEAD",
+    ] {
+        let error = normalize_branch_name(branch).unwrap_err();
+        assert_eq!(error.code(), "INVALID_BRANCH_NAME", "{branch}");
+    }
 }
 
 fn integrated_fixture() -> (GitFixture, RunFacts) {

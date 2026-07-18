@@ -28,11 +28,17 @@ Before the first task turn, the coordinator records:
 - the shared Git common directory;
 - both source commit SHAs and source refs;
 - the unique target integration branch;
-- all required test commands.
+- user-supplied test commands. Contract and approved-plan test commands are
+  added to this set and frozen before integration starts.
+
+Every frozen test command must be a direct command. Git executables, shell
+control operators, and dynamic shell/interpreter command launchers are invalid.
 
 The task IDs, worktrees, common directory, source SHAs, and source refs are
-immutable for the life of the run. Source drift, a dirty worktree, a detached
-primary, a mismatched repository, or a pre-existing target branch fails closed.
+immutable for the life of the run. Source drift, a dirty worktree, a mismatched
+repository, or a pre-existing target branch fails closed. A source worktree may
+start detached because it is frozen by SHA; an accepted integration result must
+be attached to its authorized new local branch.
 
 ## Envelope
 
@@ -65,10 +71,10 @@ schema violations, missing approval identities, or an approval with a nonempty
 | `CONTRACT` | Primary and reviewer independently return `CONTRACT_READY` with behavior, constraints, tests, and protected details. |
 | `PLAN_REVIEW` | Primary returns `PLAN_READY`; reviewer returns `CHANGES_REQUIRED` or exact `APPROVED_PLAN`. |
 | `INTEGRATE` | After plan approval only, primary creates the new branch at the frozen primary SHA and integrates the reviewer SHA. |
-| `VERIFY` | Required commands and Git source-ref/ancestry checks validate the reported integration. |
+| `VERIFY` | The daemon creates an isolated detached clone of the exact result SHA; a separate primary turn runs every frozen command there, and Git source-ref/ancestry checks validate the result. |
 | `RESULT_REVIEW` | Reviewer audits the exact branch, SHA, contracts, plan, and evidence; it returns `CHANGES_REQUIRED` or exact `APPROVED_RESULT`. |
 | `ACCEPTED` | Daemon revalidates the approved SHA and unchanged sources, records acceptance, and stops dispatching. |
-| `PAUSED_USER_ACTION` | An external permission or task action must be resolved before explicit resume. |
+| `PAUSED_USER_ACTION` | Explicit task input or another external action must be resolved before resume. |
 | `BLOCKED` | A terminal protocol or safety condition stopped the run. |
 | `CANCELLED` | User cancellation stopped the run without reverting Git state. |
 
@@ -79,15 +85,17 @@ schema violations, missing approval identities, or an approval with a nonempty
 Valid only in `CONTRACT`. Integration identity must be `null`. The payload
 captures observable behavior, constraints, files/interfaces, tests, and details
 that the later plan and result must preserve. Contract payloads are hashed and
-the canonical versions are reused in subsequent prompts.
+the canonical versions are reused in subsequent prompts. `contract.tests` is a
+nonempty array of exact commands.
 
 ### `PLAN_READY`
 
 Valid only in `PLAN_REVIEW`. It has a positive `plan_revision` and no
 integration identity. The payload must contain object-valued
 `primary_contract`, `reviewer_contract`, and `plan`, plus an array-valued
-`coverage_matrix`. The matrix maps every contract item to a concrete integration
-decision and verification method.
+`coverage_matrix`, plus a nonempty `test_commands` array. The matrix maps every
+contract item to a concrete integration decision and verification method. The
+coordinator unions contract, plan, and user commands before integration.
 
 ### `CHANGES_REQUIRED`
 
@@ -100,17 +108,36 @@ unchanged verdict reaches `NO_PROGRESS` after two unchanged rounds.
 ### `APPROVED_PLAN`
 
 Valid only in `PLAN_REVIEW`. Its payload must repeat the approved plan revision
-and both frozen SHAs, and `uncovered_items` must be present and empty. Approval
-authorizes only that exact plan; it does not authorize integration into an
-existing branch or any remote operation.
+and both frozen SHAs, copy the 64-hex `approved_plan_hash` calculated over the
+canonical complete `PLAN_READY` payload, and include an empty
+`uncovered_items`. Approval authorizes only that exact payload; it does not
+authorize integration into an existing branch or any remote operation.
 
 ### `INTEGRATION_READY`
 
-Valid in `INTEGRATE` or `VERIFY`. It identifies the authorized integration
-branch and exact HEAD SHA. Its payload includes changed files, conflict
-decisions, coverage, and test evidence. Every configured test command needs a
-matching passing result. Git verification also requires both frozen commits to
-be ancestors of the result and both source refs to remain unchanged.
+Valid in `INTEGRATE` or `VERIFY`, with different evidence rules. Both forms
+identify the authorized integration branch and exact HEAD SHA.
+
+During `INTEGRATE`, the primary reports the complete changed-file set and
+integration decisions but must not report passing tests. The reported file set
+must exactly equal the daemon's read-only
+`git diff --name-only primary_sha integration_sha` result. Conflict markers are
+stream-scanned across that authoritative set, including large text files. Git
+verification also requires both frozen commits to be ancestors and both source
+refs unchanged.
+
+Before `VERIFY`, the daemon creates
+`verification/<run-id>-<integration-sha>` under the private state directory by
+cloning without local object sharing, removing all remotes, and checking out the
+exact SHA detached with hooks disabled. Its Git common directory must differ
+from the source repository. A separate primary turn may run only every frozen
+test command exactly once in that clone and no other command. The response must
+report those tests, but the daemon replaces the report with authoritative App
+Server command-item evidence. Every accepted entry records `command`, exact
+integer `exit_code: 0`, `turn_id`, `item_id`, and absolute `cwd`. Missing,
+duplicated, extra, failed, wrong-directory, or merely self-reported commands
+yield `TEST_FAILURE` or `FORBIDDEN_OPERATION`. The canonical integration
+payload from `INTEGRATE` cannot be replaced during verification.
 
 ### `APPROVED_RESULT`
 
@@ -121,9 +148,10 @@ Any primary amendment produces a new SHA and requires another reviewer verdict.
 
 ### `BLOCKED`
 
-Requires a nonempty reason code. It reports that the task cannot safely produce
-the expected message. The state machine converts terminal blocks to `BLOCKED`
-instead of improvising a next step.
+Requires a nonempty reason code and the exact current phase, round, plan
+revision, and integration identity. It reports that the task cannot safely
+produce the expected message. Stale blocks are rejected instead of terminating
+the current run.
 
 ## Bounded review
 
@@ -133,17 +161,39 @@ Exceeding them yields `ROUND_LIMIT` or `NO_PROGRESS`. Malformed responses yield
 such as `SOURCE_DRIFT`, `DIRTY_WORKTREE`, `MISSING_SOURCE_ANCESTRY`, and
 `UNEXPECTED_INTEGRATION_BRANCH` also fail closed.
 
-`PERMISSION_REQUIRED` pauses for user action. Communication and history errors
-are surfaced with stable reason codes and are never treated as approval.
+Unexpected command, file-write, network, or permission escalation is denied and
+terminates with `FORBIDDEN_OPERATION`. Explicit task input may pause as
+`PERMISSION_REQUIRED`. Communication and history errors are never approvals.
+
+## App Server execution policy
+
+Every turn supplies an empty `environments` array so it cannot inherit a sticky
+task execution environment. Contract, plan, and review turns supply an absolute
+role worktree, one runtime workspace root, a read-only sandbox, network
+disabled, and approval policy `never`. The authorized primary integration turn
+supplies only the primary worktree and source Git common directory as writable
+roots, disables network and temporary-directory writes, and uses approval
+policy `untrusted`; the daemon accepts only a narrow set of branch creation,
+exact-SHA merge, staging, commit, and read-only Git commands. The primary
+verification turn supplies only the isolated clone as a writable root, remains
+offline, uses approval policy `untrusted`, and accepts only exact frozen tests.
+Publication, destructive Git operations, shell chaining, wrong-directory
+execution, and added permission requests are cancelled at the App Server
+request boundary.
 
 ## Durability and delivery
 
-SQLite stores run facts, state transitions, messages, and an outbox-style
-pending send before the App Server turn is started. Accepted response hashes
-make duplicate notifications idempotent. After daemon restart, an incomplete
-send is reconciled with canonical task history before the state machine
-continues. A response absent from task history is not accepted merely because a
-notification was observed.
+SQLite stores versioned run facts, canonical protocol payloads, state
+transitions, and an outbox-style pending send before the App Server turn is
+started. Accepted response hashes make duplicate notifications idempotent.
+After daemon restart, an incomplete send is reconciled with its delivery
+identity in task history before the state machine continues. Extra historical
+protocol-looking messages never replace the persisted contracts, plan,
+approval, or integration payload. Unknown persisted-state schema versions fail
+closed instead of receiving permissive defaults. If a daemon crashes after a
+verification turn starts, recovery may reuse its test-dirty clone only while a
+matching send remains pending; exact detached HEAD, independent Git common
+directory, and no-remote invariants are still mandatory.
 
 ## Git postconditions
 
@@ -153,8 +203,14 @@ An accepted run guarantees only a new local branch and exact commit SHA:
 - both frozen commits are ancestors of the accepted SHA;
 - both frozen source refs still point to their original SHAs;
 - the primary worktree is on the authorized branch at the accepted SHA;
-- configured tests have passing evidence;
+- every frozen test has authoritative passing command-item evidence from the
+  isolated exact-SHA clone;
 - the reviewer approved that exact SHA.
+
+The persisted `accepted_result` repeats the branch and SHA, both source SHAs,
+structured test results, `source_refs_unchanged: true`, and an explicit
+publication boundary: local-only, not pushed, no PR, and not merged into an
+existing branch.
 
 The protocol never pushes, opens a PR, updates an existing target branch, or
 deletes source or integration state.

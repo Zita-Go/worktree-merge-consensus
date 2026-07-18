@@ -37,6 +37,49 @@ fn conflict_free() {
     let integration_sha = git_text(&fixture.repository.primary, &["rev-parse", "HEAD"]);
     assert_eq!(accepted["integration_sha"], integration_sha);
     assert_eq!(
+        accepted["accepted_result"]["integration_sha"],
+        integration_sha
+    );
+    assert_eq!(
+        accepted["accepted_result"]["tests"][0]["command"],
+        "test -f reviewer.txt"
+    );
+    let verification_worktree = PathBuf::from(
+        accepted["verification_worktree"]
+            .as_str()
+            .expect("accepted run must retain the verification worktree"),
+    );
+    let accepted_test = &accepted["accepted_result"]["tests"][0];
+    assert_eq!(accepted_test["cwd"], json!(verification_worktree));
+    assert!(
+        accepted_test["turn_id"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+    assert!(
+        accepted_test["item_id"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+    assert_eq!(git_text(&verification_worktree, &["remote"]), "");
+    assert_eq!(
+        git_text(&verification_worktree, &["branch", "--show-current"]),
+        ""
+    );
+    assert_ne!(
+        git_text(
+            &verification_worktree,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"]
+        ),
+        fixture.repository.git_common_dir.to_string_lossy()
+    );
+    assert_eq!(accepted["accepted_result"]["source_refs_unchanged"], true);
+    assert_eq!(
+        accepted["accepted_result"]["publication"]["local_only"],
+        true
+    );
+    assert_eq!(accepted["accepted_result"]["publication"]["pushed"], false);
+    assert_eq!(
         accepted["facts"]["primary_sha"],
         fixture.repository.primary_sha
     );
@@ -214,8 +257,8 @@ fn review_round_limit_blocks_without_integration() {
 }
 
 #[test]
-fn permission_pause_resumes_the_existing_integration_turn() {
-    let fixture = AcceptanceFixture::new("permission_pause", false);
+fn user_input_pause_resumes_the_existing_integration_turn() {
+    let fixture = AcceptanceFixture::new("user_input_pause", false);
     let (run_id, _daemon) = fixture.start();
     let paused = fixture.wait_for_terminal(&run_id);
     assert_eq!(paused["status"], "PAUSED_USER_ACTION");
@@ -254,6 +297,41 @@ fn daemon_crash_restart_recovers_without_a_duplicate_turn() {
         fixture.events()
     );
     assert_eq!(fixture.action_count("REQUEST_PRIMARY_INTEGRATION"), 1);
+}
+
+#[test]
+fn daemon_crash_recovers_a_dirty_in_progress_verification_clone() {
+    let fixture = AcceptanceFixture::new("crash_verification", false);
+    let (run_id, daemon) = fixture.start_with_test("touch verification-artifact.txt");
+    fixture.wait_for_action("REQUEST_PRIMARY_VERIFICATION", 1);
+    fixture.wait_for_pending_turn();
+
+    daemon.kill();
+    fixture.release_deferred("complete");
+    let accepted = fixture.wait_for_terminal(&run_id);
+
+    assert_eq!(
+        accepted["status"],
+        "ACCEPTED",
+        "state={accepted}\nevents={}",
+        fixture.events()
+    );
+    assert_eq!(fixture.action_count("REQUEST_PRIMARY_VERIFICATION"), 1);
+    assert_eq!(
+        accepted["accepted_result"]["tests"][0]["command"],
+        "touch verification-artifact.txt"
+    );
+    let verification_worktree = PathBuf::from(
+        accepted["verification_worktree"]
+            .as_str()
+            .expect("verification worktree must be persisted"),
+    );
+    assert!(
+        verification_worktree
+            .join("verification-artifact.txt")
+            .exists()
+    );
+    fixture.assert_source_refs_unchanged();
 }
 
 #[test]
@@ -309,6 +387,7 @@ impl AcceptanceFixture {
                 "reviewer_thread": REVIEWER_THREAD,
                 "primary_worktree": repository.primary,
                 "reviewer_worktree": repository.reviewer,
+                "git_common_dir": repository.git_common_dir,
                 "integration_branch": branch,
                 "state_directory": fake_state
             }))
@@ -336,6 +415,10 @@ impl AcceptanceFixture {
     }
 
     fn start(&self) -> (String, DaemonGuard) {
+        self.start_with_test("test -f reviewer.txt")
+    }
+
+    fn start_with_test(&self, test_command: &str) -> (String, DaemonGuard) {
         let started = self.environment().cli_json(&[
             "run",
             "--primary-thread",
@@ -345,7 +428,7 @@ impl AcceptanceFixture {
             "--integration-branch",
             &self.branch,
             "--test",
-            "test -f reviewer.txt",
+            test_command,
             "--json",
         ]);
         let daemon = DaemonGuard::new(&self.state_dir);
@@ -412,6 +495,27 @@ impl AcceptanceFixture {
     fn release_deferred(&self, marker: &str) {
         fs::create_dir_all(&self.fake_state).unwrap();
         fs::write(self.fake_state.join(marker), "released\n").unwrap();
+    }
+
+    fn wait_for_pending_turn(&self) {
+        let started = Instant::now();
+        loop {
+            let pending = fs::read_dir(&self.fake_state)
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().starts_with("pending-"));
+            if pending {
+                return;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "fake App Server never persisted a pending turn: {}",
+                self.events()
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     fn assert_source_refs_unchanged(&self) {
@@ -525,6 +629,7 @@ impl TestEnvironment<'_> {
 struct RepositoryFixture {
     primary: PathBuf,
     reviewer: PathBuf,
+    git_common_dir: PathBuf,
     primary_sha: String,
     reviewer_sha: String,
 }
@@ -573,10 +678,15 @@ impl RepositoryFixture {
         git(&reviewer, &["add", "."]);
         git(&reviewer, &["commit", "-m", "reviewer implementation"]);
         let reviewer_sha = git_text(&reviewer, &["rev-parse", "HEAD"]);
+        let git_common_dir = PathBuf::from(git_text(
+            &primary,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        ));
 
         Self {
             primary,
             reviewer,
+            git_common_dir,
             primary_sha,
             reviewer_sha,
         }

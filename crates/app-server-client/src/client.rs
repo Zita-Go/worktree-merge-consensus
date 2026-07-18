@@ -16,9 +16,12 @@ use tokio::{
 };
 
 use crate::{
-    compat::{REQUIRED_METHODS, check_compatibility},
+    compat::{check_compatibility, parse_codex_version},
     transport::{JsonRpcTransport, RpcError},
-    types::{AppEvent, InitializeInfo, ThreadDetail, ThreadPage, ThreadSummary, TurnHandle},
+    types::{
+        AppEvent, InitializeInfo, ThreadDetail, ThreadPage, ThreadSummary, TurnExecutionPolicy,
+        TurnHandle,
+    },
 };
 
 const STDERR_TAIL_LINES: usize = 40;
@@ -67,7 +70,9 @@ pub trait AppServer: Send + Sync {
         thread_id: &str,
         prompt: &str,
         output_schema: Value,
+        policy: &TurnExecutionPolicy,
     ) -> Result<TurnHandle, AppServerError>;
+    async fn respond_to_request(&self, id: Value, result: Value) -> Result<(), AppServerError>;
     async fn next_event(&self) -> Option<AppEvent>;
 }
 
@@ -108,7 +113,7 @@ impl CodexAppServer {
         let version_output = String::from_utf8(version.stdout).map_err(|error| {
             AppServerError::Process(format!("codex --version returned invalid UTF-8: {error}"))
         })?;
-        let compatibility = check_compatibility(&version_output, REQUIRED_METHODS);
+        let compatibility = check_compatibility(&version_output);
         if !compatibility.compatible {
             return Err(AppServerError::IncompatibleCodex(compatibility.detail));
         }
@@ -163,12 +168,32 @@ impl CodexAppServer {
             })),
             stderr_tail,
         };
-        client.initialize().await?;
+        let initialized = client.initialize().await?;
+        let installed_version = compatibility.installed_version.as_deref().ok_or_else(|| {
+            AppServerError::IncompatibleCodex(
+                "compatible version report omitted the installed version".to_owned(),
+            )
+        })?;
+        validate_managed_identity(&initialized, installed_version)?;
         Ok(client)
     }
 
     pub async fn redacted_stderr_tail(&self) -> Vec<String> {
         self.stderr_tail.lock().await.iter().cloned().collect()
+    }
+
+    async fn rpc_request(&self, method: &str, params: Value) -> Result<Value, AppServerError> {
+        match self.transport.request(method, params).await {
+            Ok(value) => Ok(value),
+            Err(RpcError::Remote {
+                code: -32_601,
+                message,
+                ..
+            }) => Err(AppServerError::IncompatibleCodex(format!(
+                "required App Server method {method} is unavailable: {message}"
+            ))),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
@@ -197,8 +222,7 @@ impl Drop for ProcessGuard {
 impl AppServer for CodexAppServer {
     async fn initialize(&self) -> Result<InitializeInfo, AppServerError> {
         let raw = self
-            .transport
-            .request(
+            .rpc_request(
                 "initialize",
                 json!({
                     "clientInfo": {
@@ -210,8 +234,14 @@ impl AppServer for CodexAppServer {
                 }),
             )
             .await?;
+        let initialized = serde_json::from_value::<InitializeInfo>(raw).map_err(|error| {
+            AppServerError::IncompatibleCodex(format!(
+                "initialize response does not match the pinned schema: {error}"
+            ))
+        })?;
+        validate_initialize_shape(&initialized)?;
         self.transport.notify("initialized", json!({})).await?;
-        Ok(InitializeInfo { raw })
+        Ok(initialized)
     }
 
     async fn list_threads(
@@ -220,8 +250,7 @@ impl AppServer for CodexAppServer {
         limit: u32,
     ) -> Result<ThreadPage, AppServerError> {
         let raw = self
-            .transport
-            .request(
+            .rpc_request(
                 "thread/list",
                 json!({
                     "cursor": cursor,
@@ -251,8 +280,7 @@ impl AppServer for CodexAppServer {
 
     async fn read_thread(&self, thread_id: &str) -> Result<ThreadDetail, AppServerError> {
         let raw = self
-            .transport
-            .request(
+            .rpc_request(
                 "thread/read",
                 json!({"threadId": thread_id, "includeTurns": true}),
             )
@@ -262,8 +290,7 @@ impl AppServer for CodexAppServer {
 
     async fn resume_thread(&self, thread_id: &str) -> Result<ThreadDetail, AppServerError> {
         let raw = self
-            .transport
-            .request("thread/resume", json!({"threadId": thread_id}))
+            .rpc_request("thread/resume", json!({"threadId": thread_id}))
             .await?;
         parse_thread_response(raw)
     }
@@ -273,10 +300,12 @@ impl AppServer for CodexAppServer {
         thread_id: &str,
         prompt: &str,
         output_schema: Value,
+        policy: &TurnExecutionPolicy,
     ) -> Result<TurnHandle, AppServerError> {
+        let (cwd, runtime_workspace_roots, approval_policy, sandbox_policy) =
+            turn_policy_params(policy)?;
         let raw = self
-            .transport
-            .request(
+            .rpc_request(
                 "turn/start",
                 json!({
                     "threadId": thread_id,
@@ -286,6 +315,12 @@ impl AppServer for CodexAppServer {
                         "text_elements": [],
                     }],
                     "outputSchema": output_schema,
+                    "cwd": cwd,
+                    "runtimeWorkspaceRoots": runtime_workspace_roots,
+                    "approvalPolicy": approval_policy,
+                    "approvalsReviewer": "user",
+                    "environments": [],
+                    "sandboxPolicy": sandbox_policy,
                 }),
             )
             .await?;
@@ -300,6 +335,106 @@ impl AppServer for CodexAppServer {
     async fn next_event(&self) -> Option<AppEvent> {
         self.transport.next_event().await
     }
+
+    async fn respond_to_request(&self, id: Value, result: Value) -> Result<(), AppServerError> {
+        self.transport.respond(id, result).await.map_err(Into::into)
+    }
+}
+
+fn turn_policy_params(
+    policy: &TurnExecutionPolicy,
+) -> Result<(Value, Value, Value, Value), AppServerError> {
+    let absolute = |path: &PathBuf, label: &str| {
+        if path.is_absolute() {
+            Ok(path.clone())
+        } else {
+            Err(AppServerError::IncompatibleCodex(format!(
+                "{label} must be an absolute path"
+            )))
+        }
+    };
+    match policy {
+        TurnExecutionPolicy::ReadOnly { cwd } => {
+            let cwd = absolute(cwd, "turn cwd")?;
+            Ok((
+                json!(cwd),
+                json!([cwd]),
+                json!("never"),
+                json!({"type": "readOnly", "networkAccess": false}),
+            ))
+        }
+        TurnExecutionPolicy::PrimaryIntegration {
+            cwd,
+            git_common_dir,
+        } => {
+            let cwd = absolute(cwd, "integration cwd")?;
+            let git_common_dir = absolute(git_common_dir, "Git common directory")?;
+            Ok((
+                json!(cwd),
+                json!([cwd]),
+                json!("untrusted"),
+                json!({
+                    "type": "workspaceWrite",
+                    "writableRoots": [cwd, git_common_dir],
+                    "networkAccess": false,
+                    "excludeSlashTmp": true,
+                    "excludeTmpdirEnvVar": true,
+                }),
+            ))
+        }
+        TurnExecutionPolicy::PrimaryVerification { cwd } => {
+            let cwd = absolute(cwd, "verification cwd")?;
+            Ok((
+                json!(cwd),
+                json!([cwd]),
+                json!("untrusted"),
+                json!({
+                    "type": "workspaceWrite",
+                    "writableRoots": [cwd],
+                    "networkAccess": false,
+                    "excludeSlashTmp": false,
+                    "excludeTmpdirEnvVar": false,
+                }),
+            ))
+        }
+    }
+}
+
+fn validate_initialize_shape(info: &InitializeInfo) -> Result<(), AppServerError> {
+    if !info.codex_home.is_absolute() {
+        return Err(AppServerError::IncompatibleCodex(
+            "initialize.codexHome must be absolute".to_owned(),
+        ));
+    }
+    if info.platform_family != "unix" {
+        return Err(AppServerError::IncompatibleCodex(format!(
+            "initialize.platformFamily must be unix, found {}",
+            info.platform_family
+        )));
+    }
+    if info.platform_os.trim().is_empty() || info.user_agent.trim().is_empty() {
+        return Err(AppServerError::IncompatibleCodex(
+            "initialize response contains an empty platformOs or userAgent".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_managed_identity(
+    info: &InitializeInfo,
+    installed_version: &str,
+) -> Result<(), AppServerError> {
+    let managed_version = parse_codex_version(&info.user_agent).ok_or_else(|| {
+        AppServerError::IncompatibleCodex(
+            "initialize.userAgent does not contain an exact codex-cli version".to_owned(),
+        )
+    })?;
+    if managed_version.to_string() != installed_version {
+        return Err(AppServerError::IncompatibleCodex(format!(
+            "initialize.userAgent version {managed_version} does not match codex --version {installed_version}"
+        )));
+    }
+    Ok(())
 }
 
 fn parse_thread_response(raw: Value) -> Result<ThreadDetail, AppServerError> {

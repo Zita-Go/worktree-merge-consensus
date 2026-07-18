@@ -2,9 +2,11 @@
   "scenario": "result-revision",
   "expected_status": "ACCEPTED",
   "request_order": [
-    "primary:INTEGRATION_READY@cccccccccccccccccccccccccccccccccccccccc",
+    "primary:INTEGRATION_READY@INTEGRATE@cccccccccccccccccccccccccccccccccccccccc",
+    "primary:INTEGRATION_READY@VERIFY@cccccccccccccccccccccccccccccccccccccccc",
     "reviewer:CHANGES_REQUIRED@cccccccccccccccccccccccccccccccccccccccc",
-    "primary:INTEGRATION_READY@dddddddddddddddddddddddddddddddddddddddd",
+    "primary:INTEGRATION_READY@INTEGRATE@dddddddddddddddddddddddddddddddddddddddd",
+    "primary:INTEGRATION_READY@VERIFY@dddddddddddddddddddddddddddddddddddddddd",
     "reviewer:APPROVED_RESULT@dddddddddddddddddddddddddddddddddddddddd"
   ],
   "rejected_sha": "cccccccccccccccccccccccccccccccccccccccc",

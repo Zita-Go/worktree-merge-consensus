@@ -27,6 +27,12 @@ jobs:
       - name: Install Rust toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
 
+      - name: Install minimum supported Rust toolchain
+        run: rustup toolchain install 1.85.0 --profile minimal
+
+      - name: Check minimum supported Rust version
+        run: cargo +1.85.0 check --locked --workspace --all-targets
+
       - name: Check formatting
         run: cargo fmt --all --check
 
@@ -38,6 +44,9 @@ jobs:
 
       - name: Check public documentation
         run: bash tests/docs.sh
+
+      - name: Regression-test release version gate
+        run: bash tests/release-gate.sh
 
   supply-chain:
     name: Audit dependencies and licenses

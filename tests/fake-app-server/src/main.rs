@@ -17,6 +17,7 @@ struct Config {
     reviewer_thread: String,
     primary_worktree: PathBuf,
     reviewer_worktree: PathBuf,
+    git_common_dir: PathBuf,
     integration_branch: String,
     state_directory: PathBuf,
 }
@@ -90,7 +91,12 @@ fn serve_proxy() -> Result<(), String> {
 
 fn handle_request(config: &Config, method: &str, params: &Value) -> Result<Value, String> {
     match method {
-        "initialize" => Ok(json!({"userAgent": "codex-cli/0.144.5"})),
+        "initialize" => Ok(json!({
+            "codexHome": config.state_directory.join("codex-home"),
+            "platformFamily": "unix",
+            "platformOs": "linux",
+            "userAgent": "codex-cli/0.144.5"
+        })),
         "thread/list" => Ok(json!({
             "data": [thread_summary(config, &config.primary_thread), thread_summary(config, &config.reviewer_thread)],
             "nextCursor": null,
@@ -159,18 +165,41 @@ fn start_turn(config: &Config, params: &Value) -> Result<Value, String> {
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| "prompt action is missing".to_owned())?;
+    if let Err(error) = validate_turn_policy(config, action, thread_id, params, &payload) {
+        append_event(
+            config,
+            &format!("turn-policy-error {error}; params={params}"),
+        )?;
+        return Err(error);
+    }
     append_event(config, &format!("turn {thread_id} {action}"))?;
     let occurrence = action_count(config, action)?;
 
-    let reply = scripted_reply(config, action, occurrence, &metadata, &payload)?;
     let turn_id = format!("turn-{}", turn_count(config)? + 1);
+    let verification = if action == "REQUEST_PRIMARY_VERIFICATION" {
+        Some(run_verification(config, &payload, &turn_id)?)
+    } else {
+        None
+    };
+    let reply = scripted_reply(
+        config,
+        action,
+        occurrence,
+        &metadata,
+        &payload,
+        verification.as_ref(),
+    )?;
     let deferred = deferred_marker(config, action);
-    let turn = if deferred.is_some() {
+    let mut turn = if deferred.is_some() {
         let pending = PendingTurn {
             thread_id: thread_id.to_owned(),
             turn_id: turn_id.clone(),
             prompt: prompt.to_owned(),
             reply: reply.clone(),
+            command_items: verification
+                .as_ref()
+                .map(|result| result.command_items.clone())
+                .unwrap_or_default(),
         };
         fs::write(
             pending_path(config, &turn_id),
@@ -181,6 +210,11 @@ fn start_turn(config: &Config, params: &Value) -> Result<Value, String> {
     } else {
         completed_turn(&turn_id, prompt, &reply)
     };
+    if deferred.is_none() {
+        if let Some(verification) = verification {
+            append_command_items(&mut turn, verification.command_items);
+        }
+    }
     append_turn(config, thread_id, &turn)?;
     Ok(json!({
         "turn": {
@@ -191,12 +225,121 @@ fn start_turn(config: &Config, params: &Value) -> Result<Value, String> {
     }))
 }
 
+fn declared_tests(metadata: &Value) -> Vec<String> {
+    let mut commands = metadata
+        .get("required_test_commands")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if commands.is_empty() {
+        commands.push("test -d .".to_owned());
+    }
+    commands
+}
+
+fn validate_turn_policy(
+    config: &Config,
+    action: &str,
+    thread_id: &str,
+    params: &Value,
+    current: &Value,
+) -> Result<(), String> {
+    let integration = action == "REQUEST_PRIMARY_INTEGRATION";
+    let verification = action == "REQUEST_PRIMARY_VERIFICATION";
+    let primary_action = matches!(
+        action,
+        "REQUEST_PRIMARY_CONTRACT"
+            | "REQUEST_PRIMARY_PLAN"
+            | "REQUEST_PRIMARY_INTEGRATION"
+            | "REQUEST_PRIMARY_VERIFICATION"
+    );
+    let expected_thread = if primary_action {
+        &config.primary_thread
+    } else {
+        &config.reviewer_thread
+    };
+    let expected_cwd = if verification {
+        PathBuf::from(
+            current
+                .get("verification_worktree")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "verification_worktree is missing".to_owned())?,
+        )
+    } else if primary_action {
+        config.primary_worktree.clone()
+    } else {
+        config.reviewer_worktree.clone()
+    };
+    let expected_cwd = fs::canonicalize(&expected_cwd)
+        .map_err(|error| format!("canonicalize expected task cwd: {error}"))?;
+    if thread_id != expected_thread {
+        return Err(format!(
+            "turn/start thread mismatch: {thread_id} != {expected_thread}"
+        ));
+    }
+    if params.get("cwd") != Some(&json!(expected_cwd)) {
+        return Err(format!(
+            "turn/start cwd mismatch: {:?} != {}",
+            params.get("cwd"),
+            expected_cwd.display()
+        ));
+    }
+    if params.get("runtimeWorkspaceRoots") != Some(&json!([expected_cwd])) {
+        return Err(format!(
+            "turn/start workspace roots mismatch: {:?} != {}",
+            params.get("runtimeWorkspaceRoots"),
+            expected_cwd.display()
+        ));
+    }
+    if params.get("approvalsReviewer") != Some(&json!("user")) {
+        return Err("turn/start approvalsReviewer is not user".to_owned());
+    }
+    if params.get("environments") != Some(&json!([])) {
+        return Err("turn/start inherited sticky environments".to_owned());
+    }
+    let expected_approval = if integration || verification {
+        "untrusted"
+    } else {
+        "never"
+    };
+    if params.get("approvalPolicy") != Some(&json!(expected_approval)) {
+        return Err("turn/start approval policy is not fail-closed".to_owned());
+    }
+    let expected_sandbox = if integration {
+        json!({
+            "type": "workspaceWrite",
+            "writableRoots": [expected_cwd, config.git_common_dir],
+            "networkAccess": false,
+            "excludeSlashTmp": true,
+            "excludeTmpdirEnvVar": true
+        })
+    } else if verification {
+        json!({
+            "type": "workspaceWrite",
+            "writableRoots": [expected_cwd],
+            "networkAccess": false,
+            "excludeSlashTmp": false,
+            "excludeTmpdirEnvVar": false
+        })
+    } else {
+        json!({"type": "readOnly", "networkAccess": false})
+    };
+    if params.get("sandboxPolicy") != Some(&expected_sandbox) {
+        return Err("turn/start sandbox policy is not pinned".to_owned());
+    }
+    Ok(())
+}
+
 fn scripted_reply(
     config: &Config,
     action: &str,
     occurrence: usize,
     metadata: &Value,
     current: &Value,
+    verification: Option<&VerificationResult>,
 ) -> Result<Value, String> {
     if config.scenario == "invalid_reply" && occurrence == 1 {
         return Ok(json!("not a protocol envelope"));
@@ -221,13 +364,25 @@ fn scripted_reply(
     let (message_type, payload, integration_branch, integration_sha) = match action {
         "REQUEST_PRIMARY_CONTRACT" => (
             "CONTRACT_READY",
-            json!({"role": "PRIMARY", "contract": {"items": ["primary-feature"]}}),
+            json!({
+                "role": "PRIMARY",
+                "contract": {
+                    "items": ["primary-feature"],
+                    "tests": declared_tests(metadata)
+                }
+            }),
             None,
             None,
         ),
         "REQUEST_REVIEWER_CONTRACT" => (
             "CONTRACT_READY",
-            json!({"role": "REVIEWER", "contract": {"items": ["reviewer-feature"]}}),
+            json!({
+                "role": "REVIEWER",
+                "contract": {
+                    "items": ["reviewer-feature"],
+                    "tests": declared_tests(metadata)
+                }
+            }),
             None,
             None,
         ),
@@ -247,7 +402,8 @@ fn scripted_reply(
                     "coverage_matrix": [
                         {"item": "primary-feature", "covered_by": step},
                         {"item": "reviewer-feature", "covered_by": step}
-                    ]
+                    ],
+                    "test_commands": declared_tests(metadata)
                 }),
                 None,
                 None,
@@ -259,6 +415,7 @@ fn scripted_reply(
                 "approved_plan_revision": metadata["plan_revision"],
                 "approved_primary_sha": metadata["primary_sha"],
                 "approved_reviewer_sha": metadata["reviewer_sha"],
+                "approved_plan_hash": current["plan_hash"],
                 "uncovered_items": []
             }),
             None,
@@ -270,11 +427,24 @@ fn scripted_reply(
                 "INTEGRATION_READY",
                 json!({
                     "changed_files": integration.changed_files,
-                    "integration_evidence": {"summary": "both frozen commits integrated"},
-                    "test_evidence": integration.test_evidence
+                    "integration_evidence": {"summary": "both frozen commits integrated"}
                 }),
                 Some(config.integration_branch.clone()),
                 Some(integration.sha),
+            )
+        }
+        "REQUEST_PRIMARY_VERIFICATION" => {
+            let verification =
+                verification.ok_or_else(|| "verification execution is missing".to_owned())?;
+            (
+                "INTEGRATION_READY",
+                json!({
+                    "changed_files": current["changed_files"],
+                    "integration_evidence": current["integration_evidence"],
+                    "test_evidence": verification.reported_evidence
+                }),
+                metadata["integration_branch"].as_str().map(str::to_owned),
+                metadata["integration_sha"].as_str().map(str::to_owned),
             )
         }
         "REQUEST_REVIEWER_RESULT_VERDICT" => (
@@ -343,7 +513,6 @@ fn protocol_message(
 struct IntegrationResult {
     sha: String,
     changed_files: Vec<String>,
-    test_evidence: Vec<Value>,
 }
 
 fn integrate(
@@ -393,39 +562,74 @@ fn integrate(
         }
     }
 
-    let required_tests = metadata
+    let sha = git_text(&config.primary_worktree, &["rev-parse", "HEAD"])?;
+    append_event(config, &format!("integration-sha {sha}"))?;
+    let changed_files = git_text(
+        &config.primary_worktree,
+        &["diff", "--name-only", primary_sha, &sha, "--"],
+    )?
+    .lines()
+    .map(str::to_owned)
+    .collect();
+    Ok(IntegrationResult { sha, changed_files })
+}
+
+struct VerificationResult {
+    reported_evidence: Vec<Value>,
+    command_items: Vec<Value>,
+}
+
+fn run_verification(
+    config: &Config,
+    current: &Value,
+    turn_id: &str,
+) -> Result<VerificationResult, String> {
+    let cwd = current
+        .get("verification_worktree")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| "verification_worktree is missing".to_owned())?;
+    let cwd = fs::canonicalize(cwd)
+        .map_err(|error| format!("canonicalize verification worktree: {error}"))?;
+    let commands = current
         .get("required_test_commands")
         .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let mut test_evidence = Vec::new();
-    for test in required_tests {
-        let command = test
+        .ok_or_else(|| "required_test_commands is missing".to_owned())?;
+    let mut reported_evidence = Vec::with_capacity(commands.len());
+    let mut command_items = Vec::with_capacity(commands.len());
+    for (index, command) in commands.iter().enumerate() {
+        let command = command
             .as_str()
             .ok_or_else(|| "test command is not a string".to_owned())?;
-        append_event(config, &format!("test {command}"))?;
+        append_event(
+            config,
+            &format!("verification-test {} {command}", cwd.display()),
+        )?;
         let status = Command::new("sh")
             .arg("-c")
             .arg(command)
-            .current_dir(&config.primary_worktree)
+            .current_dir(&cwd)
             .status()
             .map_err(|error| format!("run test {command}: {error}"))?;
-        test_evidence.push(json!({
+        let exit_code = status.code().unwrap_or(1);
+        reported_evidence.push(json!({
             "command": command,
-            "exit_code": status.code().unwrap_or(1)
+            "exit_code": exit_code
+        }));
+        command_items.push(json!({
+            "id": format!("{turn_id}-command-{}", index + 1),
+            "type": "commandExecution",
+            "command": command,
+            "commandActions": [],
+            "cwd": cwd,
+            "status": "completed",
+            "exitCode": exit_code,
+            "source": "agent"
         }));
     }
-
-    let sha = git_text(&config.primary_worktree, &["rev-parse", "HEAD"])?;
-    append_event(config, &format!("integration-sha {sha}"))?;
-    let changed_files = git_text(&config.primary_worktree, &["ls-files"])?
-        .lines()
-        .map(str::to_owned)
-        .collect();
-    Ok(IntegrationResult {
-        sha,
-        changed_files,
-        test_evidence,
+    Ok(VerificationResult {
+        reported_evidence,
+        command_items,
     })
 }
 
@@ -451,21 +655,24 @@ struct PendingTurn {
     turn_id: String,
     prompt: String,
     reply: Value,
+    #[serde(default)]
+    command_items: Vec<Value>,
 }
 
 fn deferred_marker(config: &Config, action: &str) -> Option<&'static str> {
     match (config.scenario.as_str(), action) {
         ("source_drift" | "cancellation", "REQUEST_PRIMARY_CONTRACT") => Some("complete"),
-        ("permission_pause", "REQUEST_PRIMARY_INTEGRATION") => Some("approve"),
+        ("user_input_pause", "REQUEST_PRIMARY_INTEGRATION") => Some("approve"),
         ("crash_restart", "REQUEST_PRIMARY_INTEGRATION") => Some("complete"),
+        ("crash_verification", "REQUEST_PRIMARY_VERIFICATION") => Some("complete"),
         _ => None,
     }
 }
 
 fn complete_deferred_turns(config: &Config) -> Result<(), String> {
     let marker = match config.scenario.as_str() {
-        "permission_pause" => "approve",
-        "source_drift" | "crash_restart" => "complete",
+        "user_input_pause" => "approve",
+        "source_drift" | "crash_restart" | "crash_verification" => "complete",
         _ => return Ok(()),
     };
     if !config.state_directory.join(marker).exists() {
@@ -484,11 +691,11 @@ fn complete_deferred_turns(config: &Config) -> Result<(), String> {
             &fs::read(entry.path()).map_err(|error| format!("read pending turn: {error}"))?,
         )
         .map_err(|error| format!("parse pending turn: {error}"))?;
-        append_turn(
-            config,
-            &pending.thread_id,
-            &completed_turn(&pending.turn_id, &pending.prompt, &pending.reply),
-        )?;
+        let mut turn = completed_turn(&pending.turn_id, &pending.prompt, &pending.reply);
+        if !pending.command_items.is_empty() {
+            append_command_items(&mut turn, pending.command_items);
+        }
+        append_turn(config, &pending.thread_id, &turn)?;
         fs::remove_file(entry.path()).map_err(|error| format!("remove pending turn: {error}"))?;
         append_event(config, &format!("completed deferred {}", pending.turn_id))?;
     }
@@ -516,17 +723,17 @@ fn emit_post_response(
         .and_then(Value::as_str)
         .ok_or_else(|| "turn/start response is missing turn id".to_owned())?;
     let status = result["turn"]["status"].as_str().unwrap_or_default();
-    if config.scenario == "permission_pause" && status == "inProgress" {
+    if config.scenario == "user_input_pause" && status == "inProgress" {
         write_json_line(
             writer,
             &json!({
                 "jsonrpc": "2.0",
                 "id": 900,
-                "method": "item/commandExecution/requestApproval",
+                "method": "item/tool/requestUserInput",
                 "params": {"threadId": config.primary_thread, "turnId": turn_id}
             }),
         )?;
-        append_event(config, "permission notification")?;
+        append_event(config, "user input notification")?;
     }
     if config.scenario == "duplicate_notification" && turn_id == "turn-1" {
         let notification = json!({
@@ -583,6 +790,17 @@ fn completed_turn(turn_id: &str, prompt: &str, reply: &Value) -> Value {
             }
         ]
     })
+}
+
+fn append_command_items(turn: &mut Value, command_items: Vec<Value>) {
+    let items = turn["items"]
+        .as_array_mut()
+        .expect("completed turn items must be an array");
+    let assistant = items
+        .pop()
+        .expect("completed turn must end with an assistant item");
+    items.extend(command_items);
+    items.push(assistant);
 }
 
 fn append_turn(config: &Config, thread_id: &str, turn: &Value) -> Result<(), String> {

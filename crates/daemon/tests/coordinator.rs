@@ -10,7 +10,7 @@ use std::{
 
 use app_server_client::{
     AppEvent, AppServer, AppServerError, InitializeInfo, ThreadDetail, ThreadPage, ThreadSummary,
-    TurnHandle,
+    TurnExecutionPolicy, TurnHandle,
 };
 use async_trait::async_trait;
 use consensus_core::{
@@ -74,6 +74,12 @@ async fn conflict_free_run_waits_for_plan_approval_and_accepts_exact_result() {
 
     assert_eq!(result.status, RunStatus::Accepted);
     assert_eq!(result.integration_sha.as_deref(), Some(INTEGRATION_SHA));
+    let accepted = result.accepted_result.as_ref().unwrap();
+    assert_eq!(accepted.integration_sha, INTEGRATION_SHA);
+    assert_eq!(accepted.tests[0].command, "cargo test --workspace");
+    assert!(accepted.source_refs_unchanged);
+    assert!(accepted.publication.local_only);
+    assert!(!accepted.publication.pushed);
     assert_eq!(
         app.request_order(),
         vec![
@@ -82,6 +88,7 @@ async fn conflict_free_run_waits_for_plan_approval_and_accepts_exact_result() {
             "primary:REQUEST_PRIMARY_PLAN",
             "reviewer:REQUEST_REVIEWER_PLAN_VERDICT",
             "primary:REQUEST_PRIMARY_INTEGRATION",
+            "primary:REQUEST_PRIMARY_VERIFICATION",
             "reviewer:REQUEST_REVIEWER_RESULT_VERDICT",
         ]
     );
@@ -98,6 +105,22 @@ async fn conflict_free_run_waits_for_plan_approval_and_accepts_exact_result() {
         .unwrap();
     assert!(approval < integration_request);
     assert!(safety_events.contains(&format!("result:consensus/test-run:{INTEGRATION_SHA}")));
+    let policies = app.policies();
+    assert_eq!(policies.len(), 7);
+    assert!(matches!(
+        &policies[4],
+        TurnExecutionPolicy::PrimaryIntegration { cwd, git_common_dir }
+            if cwd == &PathBuf::from("/repo/primary")
+                && git_common_dir == &PathBuf::from("/repo/.git")
+    ));
+    assert!(matches!(
+        &policies[5],
+        TurnExecutionPolicy::PrimaryVerification { cwd }
+            if cwd.to_string_lossy().contains(RUN_ID)
+    ));
+    assert!(policies.iter().enumerate().all(|(index, policy)| {
+        matches!(index, 4 | 5) || matches!(policy, TurnExecutionPolicy::ReadOnly { .. })
+    }));
 }
 
 #[tokio::test]
@@ -282,9 +305,10 @@ async fn non_object_model_reply_blocks_as_invalid_response() {
 async fn failed_required_test_blocks_before_result_review() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
-    let mut replies = conflict_free_replies();
-    replies[4]["payload"]["test_evidence"][0]["exit_code"] = json!(1);
-    let app = Arc::new(FakeAppServer::new(replies));
+    let app = Arc::new(
+        FakeAppServer::new(conflict_free_replies())
+            .with_verification_behavior(VerificationBehavior::FailedExecution),
+    );
     let coordinator = Coordinator::new(
         Arc::clone(&app),
         store,
@@ -305,6 +329,170 @@ async fn failed_required_test_blocks_before_result_review() {
             .iter()
             .all(|action| !action.ends_with("REQUEST_REVIEWER_RESULT_VERDICT"))
     );
+}
+
+#[tokio::test]
+async fn empty_test_evidence_blocks_even_without_cli_test_flags() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let coordinator = Coordinator::new(
+        Arc::new(
+            FakeAppServer::new(conflict_free_replies())
+                .with_verification_behavior(VerificationBehavior::EmptyReport),
+        ),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    let request = StartRequest {
+        integration_branch: Some("consensus/test-run".into()),
+        test_commands: Vec::new(),
+    };
+    coordinator.start(fixture_run(), request).await.unwrap();
+
+    let result = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Blocked);
+    assert_eq!(result.reason_code.as_deref(), Some("TEST_FAILURE"));
+}
+
+#[tokio::test]
+async fn legacy_passed_status_without_exact_exit_code_is_rejected() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let coordinator = Coordinator::new(
+        Arc::new(
+            FakeAppServer::new(conflict_free_replies())
+                .with_verification_behavior(VerificationBehavior::LegacyReport),
+        ),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let result = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Blocked);
+    assert_eq!(result.reason_code.as_deref(), Some("TEST_FAILURE"));
+}
+
+#[tokio::test]
+async fn self_reported_success_without_command_execution_is_rejected() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::new(conflict_free_replies())
+            .with_verification_behavior(VerificationBehavior::MissingExecution),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let result = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Blocked);
+    assert_eq!(result.reason_code.as_deref(), Some("TEST_FAILURE"));
+    assert!(
+        app.request_order()
+            .iter()
+            .all(|action| !action.ends_with("REQUEST_REVIEWER_RESULT_VERDICT"))
+    );
+}
+
+#[tokio::test]
+async fn verification_cannot_replace_canonical_integration_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::new(conflict_free_replies())
+            .with_verification_behavior(VerificationBehavior::RewriteIntegrationEvidence),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let result = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Accepted);
+    let result_review_prompt = app
+        .prompts()
+        .into_iter()
+        .find(|prompt| prompt.contains("REQUEST_REVIEWER_RESULT_VERDICT"))
+        .unwrap();
+    assert!(result_review_prompt.contains("both features are present"));
+    assert!(!result_review_prompt.contains("forged verification replacement"));
+}
+
+#[tokio::test]
+async fn forbidden_integration_command_is_cancelled_and_blocks_the_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(FakeAppServer::deferred(
+        conflict_free_replies(),
+        5,
+        DeferMode::ForbiddenCommand,
+    ));
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let result = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Blocked);
+    assert_eq!(result.reason_code.as_deref(), Some("FORBIDDEN_OPERATION"));
+    assert_eq!(app.responses(), vec![json!({"decision": "cancel"})]);
+}
+
+#[tokio::test]
+async fn file_change_grant_root_is_cancelled_and_blocks_the_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(FakeAppServer::deferred(
+        conflict_free_replies(),
+        5,
+        DeferMode::FileGrantRoot,
+    ));
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let result = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Blocked);
+    assert_eq!(result.reason_code.as_deref(), Some("FORBIDDEN_OPERATION"));
+    assert_eq!(app.responses(), vec![json!({"decision": "cancel"})]);
 }
 
 #[tokio::test]
@@ -338,7 +526,7 @@ async fn completed_turn_is_recovered_without_duplicate_send_when_turn_id_was_not
     let result = coordinator.drive(RUN_ID).await.unwrap();
 
     assert_eq!(result.status, RunStatus::Accepted);
-    assert_eq!(app.request_count(), 5);
+    assert_eq!(app.request_count(), 6);
     assert!(
         app.request_order()
             .iter()
@@ -375,17 +563,17 @@ async fn pending_record_created_before_send_results_in_exactly_one_task_turn() {
     let result = coordinator.drive(RUN_ID).await.unwrap();
 
     assert_eq!(result.status, RunStatus::Accepted);
-    assert_eq!(app.request_count(), 6);
+    assert_eq!(app.request_count(), 7);
 }
 
 #[tokio::test]
-async fn permission_request_pauses_and_resume_reuses_the_same_turn() {
+async fn user_input_request_pauses_and_resume_reuses_the_same_turn() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
     let app = Arc::new(FakeAppServer::deferred(
         conflict_free_replies(),
         1,
-        DeferMode::Permission,
+        DeferMode::UserInput,
     ));
     let coordinator = Coordinator::new(
         Arc::clone(&app),
@@ -408,17 +596,17 @@ async fn permission_request_pauses_and_resume_reuses_the_same_turn() {
     let result = coordinator.resume(RUN_ID).await.unwrap();
 
     assert_eq!(result.status, RunStatus::Accepted);
-    assert_eq!(app.request_count(), 6);
+    assert_eq!(app.request_count(), 7);
 }
 
 #[tokio::test]
-async fn permission_during_integration_resumes_the_authorized_in_progress_turn() {
+async fn user_input_during_integration_resumes_the_authorized_in_progress_turn() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
     let app = Arc::new(FakeAppServer::deferred(
         conflict_free_replies(),
         5,
-        DeferMode::Permission,
+        DeferMode::UserInput,
     ));
     let coordinator = Coordinator::new(
         Arc::clone(&app),
@@ -441,7 +629,7 @@ async fn permission_during_integration_resumes_the_authorized_in_progress_turn()
     let result = coordinator.resume(RUN_ID).await.unwrap();
 
     assert_eq!(result.status, RunStatus::Accepted);
-    assert_eq!(app.request_count(), 6);
+    assert_eq!(app.request_count(), 7);
 }
 
 #[tokio::test]
@@ -451,7 +639,7 @@ async fn recovered_integration_turn_skips_the_first_action_frozen_head_check() {
     let app = Arc::new(FakeAppServer::deferred(
         conflict_free_replies(),
         5,
-        DeferMode::Permission,
+        DeferMode::UserInput,
     ));
     let safety = Arc::new(InProgressRecoverySafety::default());
     let coordinator =
@@ -470,6 +658,40 @@ async fn recovered_integration_turn_skips_the_first_action_frozen_head_check() {
     let result = coordinator.resume(RUN_ID).await.unwrap();
 
     assert_eq!(result.status, RunStatus::Accepted);
+    assert!(safety.in_progress_calls.load(Ordering::SeqCst) >= 2);
+}
+
+#[tokio::test]
+async fn recovered_result_fix_turn_allows_head_to_advance_past_previous_result() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(FakeAppServer::deferred(
+        result_revision_replies(),
+        8,
+        DeferMode::UserInput,
+    ));
+    let safety = Arc::new(InProgressRecoverySafety::with_stale_sha(INTEGRATION_SHA));
+    let coordinator =
+        Coordinator::new(Arc::clone(&app), store, Arc::clone(&safety), fast_options());
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let paused = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+    assert_eq!(paused.integration_sha.as_deref(), Some(INTEGRATION_SHA));
+
+    safety
+        .integration_branch_active
+        .store(true, Ordering::SeqCst);
+    app.complete_deferred_turns();
+    let result = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Accepted);
+    assert_eq!(
+        result.integration_sha.as_deref(),
+        Some("dddddddddddddddddddddddddddddddddddddddd")
+    );
     assert!(safety.in_progress_calls.load(Ordering::SeqCst) >= 2);
 }
 
@@ -645,12 +867,40 @@ impl RepositorySafety for RecordingSafety {
             .push(format!("result:{branch}:{sha}"));
         Ok(())
     }
+
+    fn prepare_verification_workspace(
+        &self,
+        _facts: &RunFacts,
+        _integration_sha: &str,
+        destination: &std::path::Path,
+    ) -> Result<PathBuf, SafetyError> {
+        Ok(destination.to_path_buf())
+    }
 }
 
-#[derive(Default)]
 struct InProgressRecoverySafety {
     integration_branch_active: AtomicBool,
     in_progress_calls: AtomicUsize,
+    stale_integration_sha: Option<&'static str>,
+}
+
+impl Default for InProgressRecoverySafety {
+    fn default() -> Self {
+        Self {
+            integration_branch_active: AtomicBool::new(false),
+            in_progress_calls: AtomicUsize::new(0),
+            stale_integration_sha: None,
+        }
+    }
+}
+
+impl InProgressRecoverySafety {
+    fn with_stale_sha(sha: &'static str) -> Self {
+        Self {
+            stale_integration_sha: Some(sha),
+            ..Self::default()
+        }
+    }
 }
 
 impl RepositorySafety for InProgressRecoverySafety {
@@ -682,10 +932,27 @@ impl RepositorySafety for InProgressRecoverySafety {
         &self,
         _facts: &RunFacts,
         _branch: &str,
-        _sha: &str,
+        sha: &str,
         _changed_files: &[PathBuf],
     ) -> Result<(), SafetyError> {
+        if self.integration_branch_active.load(Ordering::SeqCst)
+            && self.stale_integration_sha == Some(sha)
+        {
+            return Err(SafetyError::new(
+                "STALE_INTEGRATION_SHA",
+                "integration HEAD advanced while the result-fix turn was pending",
+            ));
+        }
         Ok(())
+    }
+
+    fn prepare_verification_workspace(
+        &self,
+        _facts: &RunFacts,
+        _integration_sha: &str,
+        destination: &std::path::Path,
+    ) -> Result<PathBuf, SafetyError> {
+        Ok(destination.to_path_buf())
     }
 }
 
@@ -725,6 +992,15 @@ impl RepositorySafety for FailAfterStartSafety {
     ) -> Result<(), SafetyError> {
         Ok(())
     }
+
+    fn prepare_verification_workspace(
+        &self,
+        _facts: &RunFacts,
+        _integration_sha: &str,
+        destination: &std::path::Path,
+    ) -> Result<PathBuf, SafetyError> {
+        Ok(destination.to_path_buf())
+    }
 }
 
 struct FakeAppServer {
@@ -733,15 +1009,31 @@ struct FakeAppServer {
     requests: Mutex<Vec<String>>,
     reply_types: Mutex<Vec<String>>,
     prompts: Mutex<Vec<String>>,
+    policies: Mutex<Vec<TurnExecutionPolicy>>,
+    responses: Mutex<Vec<Value>>,
     deferred: Option<(usize, DeferMode)>,
     deferred_replies: Mutex<HashMap<String, Value>>,
     events: Mutex<VecDeque<AppEvent>>,
+    verification_behavior: VerificationBehavior,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DeferMode {
-    Permission,
+    UserInput,
+    ForbiddenCommand,
+    FileGrantRoot,
     Hold,
+}
+
+#[derive(Clone, Copy, Default)]
+enum VerificationBehavior {
+    #[default]
+    Pass,
+    EmptyReport,
+    LegacyReport,
+    FailedExecution,
+    MissingExecution,
+    RewriteIntegrationEvidence,
 }
 
 impl FakeAppServer {
@@ -755,10 +1047,18 @@ impl FakeAppServer {
             requests: Mutex::new(Vec::new()),
             reply_types: Mutex::new(Vec::new()),
             prompts: Mutex::new(Vec::new()),
+            policies: Mutex::new(Vec::new()),
+            responses: Mutex::new(Vec::new()),
             deferred: None,
             deferred_replies: Mutex::new(HashMap::new()),
             events: Mutex::new(VecDeque::new()),
+            verification_behavior: VerificationBehavior::Pass,
         }
+    }
+
+    fn with_verification_behavior(mut self, behavior: VerificationBehavior) -> Self {
+        self.verification_behavior = behavior;
+        self
     }
 
     fn deferred(replies: Vec<Value>, request_number: usize, mode: DeferMode) -> Self {
@@ -777,6 +1077,14 @@ impl FakeAppServer {
 
     fn prompts(&self) -> Vec<String> {
         self.prompts.lock().unwrap().clone()
+    }
+
+    fn policies(&self) -> Vec<TurnExecutionPolicy> {
+        self.policies.lock().unwrap().clone()
+    }
+
+    fn responses(&self) -> Vec<Value> {
+        self.responses.lock().unwrap().clone()
     }
 
     fn request_count(&self) -> usize {
@@ -811,6 +1119,13 @@ impl FakeAppServer {
                     "text": serde_json::to_string(reply).unwrap(),
                     "phase": "final_answer"
                 }));
+                let prompt = turn["items"][0]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                if prompt_action(&prompt) == "REQUEST_PRIMARY_VERIFICATION" {
+                    append_verification_command_items(turn, &prompt, self.verification_behavior);
+                }
             }
         }
     }
@@ -841,7 +1156,12 @@ impl FakeAppServer {
 #[async_trait]
 impl AppServer for FakeAppServer {
     async fn initialize(&self) -> Result<InitializeInfo, AppServerError> {
-        Ok(InitializeInfo { raw: json!({}) })
+        Ok(InitializeInfo {
+            codex_home: PathBuf::from("/home/test/.codex"),
+            platform_family: "unix".into(),
+            platform_os: "linux".into(),
+            user_agent: "codex-cli/0.144.5".into(),
+        })
     }
 
     async fn list_threads(
@@ -869,6 +1189,7 @@ impl AppServer for FakeAppServer {
         thread_id: &str,
         prompt: &str,
         output_schema: Value,
+        policy: &TurnExecutionPolicy,
     ) -> Result<TurnHandle, AppServerError> {
         assert_eq!(
             output_schema["title"],
@@ -880,7 +1201,16 @@ impl AppServer for FakeAppServer {
             .unwrap()
             .push(format!("{thread_id}:{action}"));
         self.prompts.lock().unwrap().push(prompt.to_owned());
-        let reply = self.replies.lock().unwrap().pop_front().unwrap();
+        self.policies.lock().unwrap().push(policy.clone());
+        let mut reply = if action == "REQUEST_PRIMARY_VERIFICATION" {
+            verification_reply(prompt, self.verification_behavior)
+        } else {
+            self.replies.lock().unwrap().pop_front().unwrap()
+        };
+        if action == "REQUEST_REVIEWER_PLAN_VERDICT" && reply["message_type"] == "APPROVED_PLAN" {
+            reply["payload"]["approved_plan_hash"] =
+                prompt_json_block(prompt, "Complete current payload")["plan_hash"].clone();
+        }
         self.reply_types.lock().unwrap().push(
             reply["message_type"]
                 .as_str()
@@ -893,7 +1223,7 @@ impl AppServer for FakeAppServer {
             .deferred
             .filter(|(number, _)| *number == request_number)
             .map(|(_, mode)| mode);
-        let turn = if deferred_mode.is_some() {
+        let mut turn = if deferred_mode.is_some() {
             self.deferred_replies
                 .lock()
                 .unwrap()
@@ -910,17 +1240,41 @@ impl AppServer for FakeAppServer {
         } else {
             completed_turn(&turn_id, prompt, &reply)
         };
+        if action == "REQUEST_PRIMARY_VERIFICATION" {
+            append_verification_command_items(&mut turn, prompt, self.verification_behavior);
+        }
         self.threads
             .lock()
             .unwrap()
             .get_mut(thread_id)
             .unwrap()
             .push(turn);
-        if deferred_mode == Some(DeferMode::Permission) {
+        if deferred_mode == Some(DeferMode::UserInput) {
+            self.events.lock().unwrap().push_back(AppEvent {
+                id: Some(json!(1)),
+                method: "item/tool/requestUserInput".into(),
+                params: json!({"threadId": thread_id, "turnId": turn_id}),
+            });
+        } else if deferred_mode == Some(DeferMode::ForbiddenCommand) {
             self.events.lock().unwrap().push_back(AppEvent {
                 id: Some(json!(1)),
                 method: "item/commandExecution/requestApproval".into(),
-                params: json!({"threadId": thread_id, "turnId": turn_id}),
+                params: json!({
+                    "threadId": thread_id,
+                    "turnId": turn_id,
+                    "cwd": "/repo/primary",
+                    "command": "git push origin HEAD"
+                }),
+            });
+        } else if deferred_mode == Some(DeferMode::FileGrantRoot) {
+            self.events.lock().unwrap().push_back(AppEvent {
+                id: Some(json!(1)),
+                method: "item/fileChange/requestApproval".into(),
+                params: json!({
+                    "threadId": thread_id,
+                    "turnId": turn_id,
+                    "grantRoot": "/repo"
+                }),
             });
         }
         Ok(TurnHandle {
@@ -932,6 +1286,11 @@ impl AppServer for FakeAppServer {
 
     async fn next_event(&self) -> Option<AppEvent> {
         self.events.lock().unwrap().pop_front()
+    }
+
+    async fn respond_to_request(&self, _id: Value, result: Value) -> Result<(), AppServerError> {
+        self.responses.lock().unwrap().push(result);
+        Ok(())
     }
 }
 
@@ -986,6 +1345,7 @@ fn prompt_action(prompt: &str) -> &'static str {
         "REQUEST_PRIMARY_PLAN",
         "REQUEST_REVIEWER_PLAN_VERDICT",
         "REQUEST_PRIMARY_INTEGRATION",
+        "REQUEST_PRIMARY_VERIFICATION",
         "REQUEST_REVIEWER_RESULT_VERDICT",
     ] {
         if prompt.contains(action) {
@@ -993,6 +1353,99 @@ fn prompt_action(prompt: &str) -> &'static str {
         }
     }
     panic!("prompt did not contain a known action")
+}
+
+fn prompt_json_block(prompt: &str, heading: &str) -> Value {
+    let start = prompt.find(heading).unwrap();
+    let after_heading = &prompt[start + heading.len()..];
+    let fence = after_heading.find("```json").unwrap();
+    let json_start = fence + "```json".len();
+    let fenced = &after_heading[json_start..];
+    let json_end = fenced.find("```").unwrap();
+    serde_json::from_str(fenced[..json_end].trim()).unwrap()
+}
+
+fn verification_reply(prompt: &str, behavior: VerificationBehavior) -> Value {
+    let metadata = prompt_json_block(prompt, "Authoritative turn metadata:");
+    let payload = prompt_json_block(prompt, "Complete current payload");
+    let mut tests = payload["required_test_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|command| json!({"command": command, "exit_code": 0}))
+        .collect::<Vec<_>>();
+    match behavior {
+        VerificationBehavior::EmptyReport => tests.clear(),
+        VerificationBehavior::LegacyReport => {
+            tests = payload["required_test_commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|command| json!({"command": command, "status": "passed"}))
+                .collect();
+        }
+        VerificationBehavior::Pass
+        | VerificationBehavior::FailedExecution
+        | VerificationBehavior::MissingExecution
+        | VerificationBehavior::RewriteIntegrationEvidence => {}
+    }
+    let integration_evidence =
+        if matches!(behavior, VerificationBehavior::RewriteIntegrationEvidence) {
+            json!({"summary": "forged verification replacement"})
+        } else {
+            payload["integration_evidence"].clone()
+        };
+    message(
+        "INTEGRATION_READY",
+        "VERIFY",
+        metadata["round"].as_u64().unwrap() as u32,
+        metadata["plan_revision"].as_u64().map(|value| value as u32),
+        metadata["integration_branch"].as_str(),
+        metadata["integration_sha"].as_str(),
+        json!({
+            "changed_files": payload["changed_files"],
+            "integration_evidence": integration_evidence,
+            "test_evidence": tests
+        }),
+    )
+}
+
+fn append_verification_command_items(
+    turn: &mut Value,
+    prompt: &str,
+    behavior: VerificationBehavior,
+) {
+    if matches!(behavior, VerificationBehavior::MissingExecution) {
+        return;
+    }
+    let payload = prompt_json_block(prompt, "Complete current payload");
+    let cwd = payload["verification_worktree"].clone();
+    let items = turn["items"].as_array_mut().unwrap();
+    let Some(assistant_index) = items
+        .iter()
+        .position(|item| item.get("type").and_then(Value::as_str) == Some("agentMessage"))
+    else {
+        return;
+    };
+    let assistant = items.remove(assistant_index);
+    for (index, command) in payload["required_test_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        items.push(json!({
+            "id": format!("test-command-{}", index + 1),
+            "type": "commandExecution",
+            "command": command,
+            "commandActions": [],
+            "cwd": cwd,
+            "status": "completed",
+            "exitCode": if matches!(behavior, VerificationBehavior::FailedExecution) { 1 } else { 0 },
+            "source": "agent"
+        }));
+    }
+    items.push(assistant);
 }
 
 fn fixture_run() -> RunState {
@@ -1048,7 +1501,13 @@ fn conflict_free_replies() -> Vec<Value> {
             None,
             None,
             None,
-            json!({"role": "PRIMARY", "contract": {"items": ["primary-feature"]}}),
+            json!({
+                "role": "PRIMARY",
+                "contract": {
+                    "items": ["primary-feature"],
+                    "tests": ["cargo test --workspace"]
+                }
+            }),
         ),
         message(
             "CONTRACT_READY",
@@ -1057,7 +1516,13 @@ fn conflict_free_replies() -> Vec<Value> {
             None,
             None,
             None,
-            json!({"role": "REVIEWER", "contract": {"items": ["reviewer-feature"]}}),
+            json!({
+                "role": "REVIEWER",
+                "contract": {
+                    "items": ["reviewer-feature"],
+                    "tests": ["cargo test --workspace"]
+                }
+            }),
         ),
         message(
             "PLAN_READY",
@@ -1073,7 +1538,8 @@ fn conflict_free_replies() -> Vec<Value> {
                 "coverage_matrix": [
                     {"item": "primary-feature", "covered_by": "merge both"},
                     {"item": "reviewer-feature", "covered_by": "merge both"}
-                ]
+                ],
+                "test_commands": ["cargo test --workspace"]
             }),
         ),
         message(
@@ -1099,11 +1565,7 @@ fn conflict_free_replies() -> Vec<Value> {
             Some(INTEGRATION_SHA),
             json!({
                 "changed_files": ["combined.txt"],
-                "integration_evidence": {"summary": "both features are present"},
-                "test_evidence": [{
-                    "command": "cargo test --workspace",
-                    "exit_code": 0
-                }]
+                "integration_evidence": {"summary": "both features are present"}
             }),
         ),
         message(
@@ -1137,8 +1599,7 @@ fn plan_revision_replies() -> Vec<Value> {
         Some(INTEGRATION_SHA),
         json!({
             "changed_files": ["combined.txt"],
-            "integration_evidence": {"summary": "revised plan implemented"},
-            "test_evidence": [{"command": "cargo test --workspace", "exit_code": 0}]
+            "integration_evidence": {"summary": "revised plan implemented"}
         }),
     );
     let result_approval = message(
@@ -1175,7 +1636,8 @@ fn plan_revision_replies() -> Vec<Value> {
                 "coverage_matrix": [
                     {"item": "primary-feature", "covered_by": "first-plan"},
                     {"item": "reviewer-feature", "covered_by": "preserve reviewer edge"}
-                ]
+                ],
+                "test_commands": ["cargo test --workspace"]
             }),
         ),
         message(
@@ -1220,8 +1682,7 @@ fn result_revision_replies() -> Vec<Value> {
             Some(revised_sha),
             json!({
                 "changed_files": ["combined.txt", "reviewer-edge.txt"],
-                "integration_evidence": {"summary": "reviewer edge restored"},
-                "test_evidence": [{"command": "cargo test --workspace", "exit_code": 0}]
+                "integration_evidence": {"summary": "reviewer edge restored"}
             }),
         ),
         message(
@@ -1251,6 +1712,7 @@ fn no_progress_replies() -> Vec<Value> {
         "reviewer_contract": {"items": ["reviewer-feature"]},
         "plan": {"steps": ["unchanged plan"]},
         "coverage_matrix": [{"item": "both", "covered_by": "unchanged plan"}]
+        ,"test_commands": ["cargo test --workspace"]
     });
     vec![
         base[0].clone(),

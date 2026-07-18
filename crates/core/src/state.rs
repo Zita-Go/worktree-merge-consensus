@@ -12,6 +12,7 @@ use crate::{
 
 pub const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 6;
 pub const DEFAULT_NO_PROGRESS_ROUNDS: u8 = 2;
+pub const RUN_STATE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -56,6 +57,7 @@ pub enum NextAction {
     RequestPrimaryPlan,
     RequestReviewerPlanVerdict,
     RequestPrimaryIntegration,
+    RequestPrimaryVerification,
     RequestReviewerResultVerdict,
     RevalidateAndAccept,
     WaitForUser,
@@ -77,7 +79,36 @@ pub struct RunFacts {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestEvidence {
+    pub command: String,
+    pub exit_code: i64,
+    pub turn_id: String,
+    pub item_id: String,
+    pub cwd: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationBoundary {
+    pub local_only: bool,
+    pub pushed: bool,
+    pub pull_request_created: bool,
+    pub merged_into_existing_branch: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptedResult {
+    pub integration_branch: String,
+    pub integration_sha: String,
+    pub primary_sha: String,
+    pub reviewer_sha: String,
+    pub tests: Vec<TestEvidence>,
+    pub source_refs_unchanged: bool,
+    pub publication: PublicationBoundary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunState {
+    pub schema_version: u32,
     pub facts: RunFacts,
     pub phase: Phase,
     pub status: RunStatus,
@@ -87,10 +118,18 @@ pub struct RunState {
     pub integration_sha: Option<String>,
     pub reason_code: Option<String>,
     pub next_action: NextAction,
-    #[serde(default)]
     pub target_integration_branch: Option<String>,
-    #[serde(default)]
     pub required_test_commands: Vec<String>,
+    pub test_evidence: Vec<TestEvidence>,
+    pub accepted_result: Option<AcceptedResult>,
+    pub primary_contract: Option<Value>,
+    pub reviewer_contract: Option<Value>,
+    pub current_plan_payload: Option<Value>,
+    pub plan_approval_payload: Option<Value>,
+    pub current_integration_payload: Option<Value>,
+    pub last_plan_feedback: Option<Value>,
+    pub last_result_feedback: Option<Value>,
+    pub verification_worktree: Option<PathBuf>,
     pub max_review_rounds: u32,
     pub no_progress_rounds: u8,
     primary_contract_hash: Option<String>,
@@ -122,6 +161,7 @@ impl StateError {
 impl RunState {
     pub fn new(facts: RunFacts) -> Self {
         Self {
+            schema_version: RUN_STATE_SCHEMA_VERSION,
             facts,
             phase: Phase::Contract,
             status: RunStatus::Running,
@@ -133,6 +173,16 @@ impl RunState {
             next_action: NextAction::RequestPrimaryContract,
             target_integration_branch: None,
             required_test_commands: Vec::new(),
+            test_evidence: Vec::new(),
+            accepted_result: None,
+            primary_contract: None,
+            reviewer_contract: None,
+            current_plan_payload: None,
+            plan_approval_payload: None,
+            current_integration_payload: None,
+            last_plan_feedback: None,
+            last_result_feedback: None,
+            verification_worktree: None,
             max_review_rounds: DEFAULT_MAX_REVIEW_ROUNDS,
             no_progress_rounds: DEFAULT_NO_PROGRESS_ROUNDS,
             primary_contract_hash: None,
@@ -176,8 +226,15 @@ impl RunState {
                 "required test commands cannot be empty",
             ));
         }
+        let mut normalized_tests = Vec::new();
+        for command in test_commands {
+            let command = command.trim().to_owned();
+            if !normalized_tests.contains(&command) {
+                normalized_tests.push(command);
+            }
+        }
         self.target_integration_branch = Some(target_branch);
-        self.required_test_commands = test_commands;
+        self.required_test_commands = normalized_tests;
         Ok(())
     }
 
@@ -194,6 +251,7 @@ impl RunState {
             MessageType::IntegrationReady => self.apply_integration(message),
             MessageType::ApprovedResult => self.apply_result_approval(message),
             MessageType::Blocked => {
+                self.verify_blocked_envelope(&message)?;
                 let reason = message
                     .envelope
                     .reason_code
@@ -214,7 +272,13 @@ impl RunState {
             ));
         }
 
+        if payload.get("test_commands").is_some() {
+            let commands = string_array_field(&payload, "test_commands")?;
+            self.freeze_test_commands(commands);
+        }
+
         self.current_plan_hash = Some(canonical_json_hash(&payload));
+        self.current_plan_payload = Some(payload);
         self.next_action = NextAction::RequestReviewerPlanVerdict;
         Ok(self.next_action)
     }
@@ -283,6 +347,14 @@ impl RunState {
         self.next_action
     }
 
+    pub fn mark_incompatible(&mut self, reason_code: &str) -> NextAction {
+        self.status = RunStatus::IncompatibleCodex;
+        self.phase = Phase::Blocked;
+        self.reason_code = Some(reason_code.to_owned());
+        self.next_action = NextAction::Stop;
+        self.next_action
+    }
+
     pub fn accept_after_revalidation(&mut self) -> Result<NextAction, StateError> {
         self.require_running()?;
         if self.next_action != NextAction::RevalidateAndAccept
@@ -293,12 +365,122 @@ impl RunState {
                 "the current integration SHA has not received an exact approval",
             ));
         }
+        self.validate_test_evidence()?;
 
+        let accepted_result = AcceptedResult {
+            integration_branch: self.integration_branch.clone().ok_or_else(|| {
+                state_error("INVALID_STATE", "accepted integration branch is missing")
+            })?,
+            integration_sha: self.integration_sha.clone().ok_or_else(|| {
+                state_error("INVALID_STATE", "accepted integration SHA is missing")
+            })?,
+            primary_sha: self.facts.primary_sha.clone(),
+            reviewer_sha: self.facts.reviewer_sha.clone(),
+            tests: self.test_evidence.clone(),
+            source_refs_unchanged: true,
+            publication: PublicationBoundary {
+                local_only: true,
+                pushed: false,
+                pull_request_created: false,
+                merged_into_existing_branch: false,
+            },
+        };
         self.status = RunStatus::Accepted;
         self.phase = Phase::Accepted;
         self.reason_code = None;
         self.next_action = NextAction::Stop;
+        self.accepted_result = Some(accepted_result);
         Ok(self.next_action)
+    }
+
+    pub fn validate_persisted(&self) -> Result<(), StateError> {
+        if self.schema_version != RUN_STATE_SCHEMA_VERSION {
+            return Err(state_error(
+                "INCOMPATIBLE_STATE",
+                format!(
+                    "persisted state schema {} is not supported; expected {}",
+                    self.schema_version, RUN_STATE_SCHEMA_VERSION
+                ),
+            ));
+        }
+        if matches!(
+            self.next_action,
+            NextAction::RequestPrimaryVerification
+                | NextAction::RequestReviewerResultVerdict
+                | NextAction::RevalidateAndAccept
+        ) && (self.current_integration_payload.is_none()
+            || self.integration_branch.is_none()
+            || self.integration_sha.is_none())
+        {
+            return Err(state_error(
+                "INCOMPATIBLE_STATE",
+                "persisted active result state lacks canonical integration evidence",
+            ));
+        }
+        if matches!(
+            self.next_action,
+            NextAction::RequestReviewerResultVerdict | NextAction::RevalidateAndAccept
+        ) {
+            self.validate_test_evidence().map_err(|_| {
+                state_error(
+                    "INCOMPATIBLE_STATE",
+                    "persisted result state lacks authoritative successful tests",
+                )
+            })?;
+        }
+        if self.status == RunStatus::Accepted {
+            if self.phase != Phase::Accepted
+                || self.next_action != NextAction::Stop
+                || self.result_approved_sha.as_deref() != self.integration_sha.as_deref()
+            {
+                return Err(state_error(
+                    "INCOMPATIBLE_STATE",
+                    "persisted accepted state has inconsistent terminal metadata",
+                ));
+            }
+            self.validate_test_evidence().map_err(|_| {
+                state_error(
+                    "INCOMPATIBLE_STATE",
+                    "persisted accepted state lacks authoritative successful tests",
+                )
+            })?;
+            let expected_result = AcceptedResult {
+                integration_branch: self.integration_branch.clone().ok_or_else(|| {
+                    state_error(
+                        "INCOMPATIBLE_STATE",
+                        "persisted accepted state lacks an integration branch",
+                    )
+                })?,
+                integration_sha: self.integration_sha.clone().ok_or_else(|| {
+                    state_error(
+                        "INCOMPATIBLE_STATE",
+                        "persisted accepted state lacks an integration SHA",
+                    )
+                })?,
+                primary_sha: self.facts.primary_sha.clone(),
+                reviewer_sha: self.facts.reviewer_sha.clone(),
+                tests: self.test_evidence.clone(),
+                source_refs_unchanged: true,
+                publication: PublicationBoundary {
+                    local_only: true,
+                    pushed: false,
+                    pull_request_created: false,
+                    merged_into_existing_branch: false,
+                },
+            };
+            if self.accepted_result.as_ref() != Some(&expected_result) {
+                return Err(state_error(
+                    "INCOMPATIBLE_STATE",
+                    "persisted accepted_result does not match authoritative state",
+                ));
+            }
+        } else if self.accepted_result.is_some() {
+            return Err(state_error(
+                "INCOMPATIBLE_STATE",
+                "persisted non-accepted state contains an accepted_result",
+            ));
+        }
+        Ok(())
     }
 
     fn apply_contract(&mut self, message: ProtocolMessage) -> Result<NextAction, StateError> {
@@ -317,14 +499,19 @@ impl RunState {
                 "CONTRACT_READY payload requires a contract",
             )
         })?;
+        let tests = string_array_field(contract, "tests")?;
 
         match self.next_action {
             NextAction::RequestPrimaryContract if role == "PRIMARY" => {
                 self.primary_contract_hash = Some(canonical_json_hash(contract));
+                self.primary_contract = Some(contract.clone());
+                self.freeze_test_commands(tests);
                 self.next_action = NextAction::RequestReviewerContract;
             }
             NextAction::RequestReviewerContract if role == "REVIEWER" => {
                 self.reviewer_contract_hash = Some(canonical_json_hash(contract));
+                self.reviewer_contract = Some(contract.clone());
+                self.freeze_test_commands(tests);
                 self.phase = Phase::PlanReview;
                 self.round = 1;
                 self.plan_revision = Some(1);
@@ -350,8 +537,25 @@ impl RunState {
                 "a primary plan must be recorded before reviewer approval",
             ));
         }
+        let approved_hash = message
+            .payload
+            .get("approved_plan_hash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                state_error(
+                    "INVALID_RESPONSE",
+                    "APPROVED_PLAN requires approved_plan_hash",
+                )
+            })?;
+        if self.current_plan_hash.as_deref() != Some(approved_hash) {
+            return Err(state_error(
+                "STALE_PLAN_HASH",
+                "plan approval does not bind the current canonical plan payload",
+            ));
+        }
 
         self.plan_approved = true;
+        self.plan_approval_payload = Some(message.payload.clone());
         self.request_integration()
     }
 
@@ -369,7 +573,12 @@ impl RunState {
     }
 
     fn apply_integration(&mut self, message: ProtocolMessage) -> Result<NextAction, StateError> {
-        self.require_phase(Phase::Integrate)?;
+        if !matches!(self.phase, Phase::Integrate | Phase::Verify) {
+            return Err(state_error(
+                "WRONG_PHASE",
+                "INTEGRATION_READY requires INTEGRATE or VERIFY state",
+            ));
+        }
         self.require_round(&message, self.round)?;
         self.require_plan_revision(&message)?;
         if !self.plan_approved {
@@ -399,16 +608,53 @@ impl RunState {
             .integration_sha
             .clone()
             .ok_or_else(|| state_error("INVALID_RESPONSE", "integration SHA is missing"))?;
-        let is_initial_result_review = self.integration_sha.is_none();
-        self.integration_branch = Some(branch);
-        self.integration_sha = Some(sha);
+        if self.phase == Phase::Integrate {
+            if message.envelope.phase != MessagePhase::Integrate {
+                return Err(state_error(
+                    "WRONG_PHASE",
+                    "integration creation evidence must use INTEGRATE phase",
+                ));
+            }
+            if message
+                .payload
+                .get("test_evidence")
+                .and_then(Value::as_array)
+                .is_some_and(|evidence| !evidence.is_empty())
+            {
+                return Err(state_error(
+                    "INVALID_RESPONSE",
+                    "integration creation cannot self-report test evidence",
+                ));
+            }
+            let is_initial_result_review = self.integration_sha.is_none();
+            self.integration_branch = Some(branch);
+            self.integration_sha = Some(sha);
+            self.current_integration_payload = Some(message.payload);
+            self.test_evidence.clear();
+            self.verification_worktree = None;
+            self.result_approved_sha = None;
+            self.phase = Phase::Verify;
+            if is_initial_result_review {
+                self.round = 1;
+                self.last_review_fingerprint = None;
+                self.unchanged_review_streak = 0;
+            }
+            self.next_action = NextAction::RequestPrimaryVerification;
+            return Ok(self.next_action);
+        }
+
+        if message.envelope.phase != MessagePhase::Verify {
+            return Err(state_error(
+                "WRONG_PHASE",
+                "test verification evidence must use VERIFY phase",
+            ));
+        }
+        self.require_current_integration(&message)?;
+        let evidence = test_evidence(&message.payload)?;
+        self.test_evidence = evidence;
+        self.current_integration_payload = Some(message.payload);
         self.result_approved_sha = None;
         self.phase = Phase::ResultReview;
-        if is_initial_result_review {
-            self.round = 1;
-            self.last_review_fingerprint = None;
-            self.unchanged_review_streak = 0;
-        }
         self.next_action = NextAction::RequestReviewerResultVerdict;
         Ok(self.next_action)
     }
@@ -465,10 +711,13 @@ impl RunState {
         self.round += 1;
         self.result_approved_sha = None;
         if self.phase == Phase::PlanReview {
+            self.last_plan_feedback = Some(message.payload.clone());
             self.plan_revision = self.plan_revision.map(|revision| revision + 1);
             self.plan_approved = false;
+            self.plan_approval_payload = None;
             self.next_action = NextAction::RequestPrimaryPlan;
         } else {
+            self.last_result_feedback = Some(message.payload.clone());
             self.phase = Phase::Integrate;
             self.next_action = NextAction::RequestPrimaryIntegration;
         }
@@ -492,6 +741,77 @@ impl RunState {
             return Err(state_error(
                 "STALE_REVIEWER_SHA",
                 "message reviewer_sha does not match the frozen source",
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_blocked_envelope(&self, message: &ProtocolMessage) -> Result<(), StateError> {
+        let expected_phase = MessagePhase::from(self.phase);
+        if message.envelope.phase != expected_phase {
+            return Err(state_error(
+                "WRONG_PHASE",
+                "BLOCKED phase does not match the pending action",
+            ));
+        }
+        self.require_round(message, self.round)?;
+        if message.envelope.plan_revision != self.plan_revision {
+            return Err(state_error(
+                "STALE_PLAN_REVISION",
+                "BLOCKED plan revision does not match the current revision",
+            ));
+        }
+        match self.integration_sha.as_deref() {
+            Some(_) => self.require_current_integration(message),
+            None if message.envelope.integration_branch.is_none()
+                && message.envelope.integration_sha.is_none() =>
+            {
+                Ok(())
+            }
+            None => Err(state_error(
+                "STALE_INTEGRATION_SHA",
+                "BLOCKED carries an integration identity before one exists",
+            )),
+        }
+    }
+
+    fn freeze_test_commands(&mut self, commands: Vec<String>) {
+        for command in commands {
+            if !self.required_test_commands.contains(&command) {
+                self.required_test_commands.push(command);
+            }
+        }
+    }
+
+    fn validate_test_evidence(&self) -> Result<(), StateError> {
+        if self.required_test_commands.is_empty()
+            || self.test_evidence.len() != self.required_test_commands.len()
+            || self
+                .required_test_commands
+                .iter()
+                .enumerate()
+                .any(|(index, command)| {
+                    command.trim().is_empty()
+                        || self.required_test_commands[..index].contains(command)
+                })
+            || self.test_evidence.iter().any(|evidence| {
+                evidence.command.trim().is_empty()
+                    || evidence.exit_code != 0
+                    || evidence.turn_id.trim().is_empty()
+                    || evidence.item_id.trim().is_empty()
+                    || !evidence.cwd.is_absolute()
+            })
+            || self.required_test_commands.iter().any(|required| {
+                self.test_evidence
+                    .iter()
+                    .filter(|evidence| evidence.command == *required && evidence.exit_code == 0)
+                    .count()
+                    != 1
+            })
+        {
+            return Err(state_error(
+                "TEST_FAILURE",
+                "acceptance requires exact successful evidence for every frozen test command",
             ));
         }
         Ok(())
@@ -573,6 +893,54 @@ fn revalidate_message(message: ProtocolMessage) -> Result<ProtocolMessage, State
         )
     })?;
     validate_message(value).map_err(|error| state_error("INVALID_RESPONSE", error.to_string()))
+}
+
+fn string_array_field(value: &Value, field: &str) -> Result<Vec<String>, StateError> {
+    let values = value
+        .get(field)
+        .and_then(Value::as_array)
+        .filter(|values| !values.is_empty())
+        .ok_or_else(|| {
+            state_error(
+                "INVALID_RESPONSE",
+                format!("{field} must be a nonempty array of commands"),
+            )
+        })?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|command| !command.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    state_error(
+                        "INVALID_RESPONSE",
+                        format!("{field} entries must be nonempty strings"),
+                    )
+                })
+        })
+        .collect()
+}
+
+fn test_evidence(payload: &Value) -> Result<Vec<TestEvidence>, StateError> {
+    let values = payload
+        .get("test_evidence")
+        .and_then(Value::as_array)
+        .filter(|values| !values.is_empty())
+        .ok_or_else(|| state_error("INVALID_RESPONSE", "test_evidence must be a nonempty array"))?;
+    values
+        .iter()
+        .map(|value| {
+            serde_json::from_value::<TestEvidence>(value.clone()).map_err(|error| {
+                state_error(
+                    "INVALID_RESPONSE",
+                    format!("invalid test_evidence entry: {error}"),
+                )
+            })
+        })
+        .collect()
 }
 
 fn normalized_issue_hash(payload: &Value) -> String {

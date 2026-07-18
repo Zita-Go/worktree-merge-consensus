@@ -1,5 +1,11 @@
 # Worktree Merge Consensus — Design Specification
 
+> Historical design record. The implemented v0.1 safety model was tightened
+> after review: integration and test execution are separate turns, tests run in
+> a detached remote-free clone, and authoritative evidence comes from App
+> Server command items. The current contract is
+> [`docs/protocol-v1.md`](../../protocol-v1.md).
+
 Date: 2026-07-18  
 Status: Approved in conversation; awaiting written-spec review
 

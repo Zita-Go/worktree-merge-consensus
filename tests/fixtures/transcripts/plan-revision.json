@@ -8,7 +8,8 @@
     "reviewer:CHANGES_REQUIRED@1",
     "primary:PLAN_READY@2",
     "reviewer:APPROVED_PLAN@2",
-    "primary:INTEGRATION_READY",
+    "primary:INTEGRATION_READY@INTEGRATE",
+    "primary:INTEGRATION_READY@VERIFY",
     "reviewer:APPROVED_RESULT"
   ],
   "stable_issue_ids": ["missing-reviewer-edge"],
