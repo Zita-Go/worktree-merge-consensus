@@ -29,6 +29,7 @@
     "message_type": {
       "enum": [
         "CONTRACT_READY",
+        "PLAN_READY",
         "CHANGES_REQUIRED",
         "APPROVED_PLAN",
         "INTEGRATION_READY",

@@ -18,6 +18,7 @@ static PROTOCOL_SCHEMA: LazyLock<jsonschema::Validator> = LazyLock::new(|| {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MessageType {
     ContractReady,
+    PlanReady,
     ChangesRequired,
     ApprovedPlan,
     IntegrationReady,
@@ -104,6 +105,7 @@ impl ProtocolMessage {
                 self.require_phase(MessagePhase::Contract)?;
                 self.require_no_integration()?;
             }
+            MessageType::PlanReady => self.validate_plan_ready()?,
             MessageType::ApprovedPlan => self.validate_plan_approval()?,
             MessageType::IntegrationReady => {
                 if !matches!(
@@ -147,6 +149,26 @@ impl ProtocolMessage {
             &self.envelope.reviewer_sha,
         )?;
         require_empty_array(payload, "uncovered_items")?;
+        Ok(())
+    }
+
+    fn validate_plan_ready(&self) -> Result<(), ProtocolError> {
+        self.require_phase(MessagePhase::PlanReview)?;
+        self.require_no_integration()?;
+        self.require_plan_revision()?;
+        let payload = self.payload_object()?;
+        for field in ["primary_contract", "reviewer_contract", "plan"] {
+            if !payload.get(field).is_some_and(Value::is_object) {
+                return Err(invariant(format!(
+                    "PLAN_READY payload.{field} must be a JSON object"
+                )));
+            }
+        }
+        if !payload.get("coverage_matrix").is_some_and(Value::is_array) {
+            return Err(invariant(
+                "PLAN_READY payload.coverage_matrix must be a JSON array",
+            ));
+        }
         Ok(())
     }
 

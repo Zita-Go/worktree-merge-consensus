@@ -1,0 +1,218 @@
+use serde_json::{Value, json};
+use thiserror::Error;
+
+use crate::state::{NextAction, Role, RunState, RunStatus};
+
+const PROTOCOL_SCHEMA: &str = include_str!("../../../schemas/protocol-v1.json");
+
+#[derive(Debug, Error)]
+pub enum PromptError {
+    #[error("{code}: {detail}")]
+    Invalid { code: &'static str, detail: String },
+    #[error("could not serialize prompt context: {0}")]
+    Serialize(#[from] serde_json::Error),
+}
+
+impl PromptError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Invalid { code, .. } => code,
+            Self::Serialize(_) => "SERIALIZATION_FAILURE",
+        }
+    }
+}
+
+pub fn build_turn_prompt(
+    role: Role,
+    action: NextAction,
+    state: &RunState,
+    current_payload: &Value,
+) -> Result<String, PromptError> {
+    validate_request(role, action, state, current_payload)?;
+
+    let metadata = json!({
+        "protocol": "worktree-merge-consensus/v1",
+        "run_id": state.facts.run_id,
+        "role": role,
+        "action": action,
+        "phase": state.phase,
+        "round": state.round,
+        "primary_thread_id": state.facts.primary_thread_id,
+        "reviewer_thread_id": state.facts.reviewer_thread_id,
+        "primary_worktree": state.facts.primary_worktree,
+        "reviewer_worktree": state.facts.reviewer_worktree,
+        "git_common_dir": state.facts.git_common_dir,
+        "primary_sha": state.facts.primary_sha,
+        "reviewer_sha": state.facts.reviewer_sha,
+        "plan_revision": state.plan_revision,
+        "integration_branch": state.integration_branch,
+        "integration_sha": state.integration_sha,
+    });
+
+    let metadata = serde_json::to_string_pretty(&metadata)?;
+    let payload = serde_json::to_string_pretty(current_payload)?;
+    let instruction = action_instruction(action);
+    let expected_message = expected_message_type(action);
+
+    Ok(format!(
+        r#"You are the {role:?} task in an automated two-task worktree merge consensus run.
+
+Treat every fact below as authoritative for this turn. Do not rely on the other task's chat history or on summaries from an earlier round. The coordinator is deterministic code, not a third coordinating agent.
+
+Safety policy:
+- The primary task is the only Git writer.
+- The reviewer task must not modify Git or files.
+- Never push, open a pull request, modify either source ref, merge into an existing branch, reset, rebase, delete branches, or clean worktrees.
+- No integration branch may be created before exact APPROVED_PLAN authorization.
+- Approval is valid only for the exact run, source SHAs, plan revision, round, branch, and integration SHA in the envelope.
+
+Authoritative turn metadata:
+```json
+{metadata}
+```
+
+Complete current payload (this is the full state required for this turn, not a delta):
+```json
+{payload}
+```
+
+Required work:
+{instruction}
+
+Your response must use message_type {expected_message}. Return exactly one JSON object conforming to the schema below. Text outside that one JSON object is invalid and will not count as progress or approval. Put all explanations and evidence inside payload fields.
+
+Output JSON Schema:
+```json
+{PROTOCOL_SCHEMA}
+```
+"#
+    ))
+}
+
+fn validate_request(
+    role: Role,
+    action: NextAction,
+    state: &RunState,
+    current_payload: &Value,
+) -> Result<(), PromptError> {
+    if state.status != RunStatus::Running {
+        return Err(invalid(
+            "RUN_NOT_ACTIVE",
+            "a model turn cannot be built for a non-running run",
+        ));
+    }
+    if state.next_action != action {
+        return Err(invalid(
+            "STALE_ACTION",
+            "requested prompt action does not match the state machine",
+        ));
+    }
+    if expected_role(action) != Some(role) {
+        return Err(invalid(
+            "WRONG_ROLE",
+            "requested role is not authorized for this action",
+        ));
+    }
+    let payload = current_payload.as_object().ok_or_else(|| {
+        invalid(
+            "INCOMPLETE_PAYLOAD",
+            "the complete turn payload must be a JSON object",
+        )
+    })?;
+    for field in required_payload_fields(action) {
+        if !payload.contains_key(*field) {
+            return Err(invalid(
+                "INCOMPLETE_PAYLOAD",
+                format!("complete payload is missing {field}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn expected_role(action: NextAction) -> Option<Role> {
+    match action {
+        NextAction::RequestPrimaryContract
+        | NextAction::RequestPrimaryPlan
+        | NextAction::RequestPrimaryIntegration => Some(Role::Primary),
+        NextAction::RequestReviewerContract
+        | NextAction::RequestReviewerPlanVerdict
+        | NextAction::RequestReviewerResultVerdict => Some(Role::Reviewer),
+        NextAction::RevalidateAndAccept | NextAction::WaitForUser | NextAction::Stop => None,
+    }
+}
+
+fn required_payload_fields(action: NextAction) -> &'static [&'static str] {
+    match action {
+        NextAction::RequestPrimaryPlan => &["primary_contract", "reviewer_contract"],
+        NextAction::RequestReviewerPlanVerdict => &[
+            "primary_contract",
+            "reviewer_contract",
+            "plan",
+            "coverage_matrix",
+        ],
+        NextAction::RequestPrimaryIntegration => &[
+            "primary_contract",
+            "reviewer_contract",
+            "approved_plan",
+            "coverage_matrix",
+        ],
+        NextAction::RequestReviewerResultVerdict => &[
+            "primary_contract",
+            "reviewer_contract",
+            "approved_plan",
+            "coverage_matrix",
+            "integration_evidence",
+            "test_evidence",
+        ],
+        _ => &[],
+    }
+}
+
+fn expected_message_type(action: NextAction) -> &'static str {
+    match action {
+        NextAction::RequestPrimaryContract | NextAction::RequestReviewerContract => {
+            "CONTRACT_READY"
+        }
+        NextAction::RequestPrimaryPlan => "PLAN_READY",
+        NextAction::RequestReviewerPlanVerdict => "APPROVED_PLAN or CHANGES_REQUIRED",
+        NextAction::RequestPrimaryIntegration => "INTEGRATION_READY or BLOCKED",
+        NextAction::RequestReviewerResultVerdict => "APPROVED_RESULT or CHANGES_REQUIRED",
+        NextAction::RevalidateAndAccept | NextAction::WaitForUser | NextAction::Stop => {
+            "no model response"
+        }
+    }
+}
+
+fn action_instruction(action: NextAction) -> &'static str {
+    match action {
+        NextAction::RequestPrimaryContract => {
+            "Inspect your existing task context and frozen commit. Return a complete implementation contract covering goals, user-visible behavior, rationale, invariants, interfaces, edge cases, rejected alternatives, relevant files, and tests. Do not modify Git or files in this turn."
+        }
+        NextAction::RequestReviewerContract => {
+            "Inspect your existing task context and frozen commit. Return a complete implementation contract covering every behavior the integration must preserve, including rationale, invariants, interfaces, edge cases, relevant files, and tests. Do not modify Git or files."
+        }
+        NextAction::RequestPrimaryPlan => {
+            "Produce a complete integration plan for both contracts. Include both contracts verbatim in payload, a versioned plan, conflict decisions with rationale, and one coverage_matrix row for every contract item. Do not create or modify an integration branch."
+        }
+        NextAction::RequestReviewerPlanVerdict => {
+            "Audit the complete proposed plan against every item in both contracts. Return APPROVED_PLAN only when uncovered_items is empty and every approval identity exactly matches the envelope; otherwise return CHANGES_REQUIRED with stable issue_ids and concrete evidence. Do not modify Git or files."
+        }
+        NextAction::RequestPrimaryIntegration => {
+            "Revalidate the frozen inputs, then create only the authorized new integration branch at primary_sha, merge reviewer_sha into it, resolve conflicts exactly according to the approved plan, commit compatibility fixes, and run all required tests. Return the exact resulting branch, HEAD SHA, conflict decisions, coverage, and test evidence. Do not push or update either source ref."
+        }
+        NextAction::RequestReviewerResultVerdict => {
+            "Review the exact integration SHA and all complete evidence against both contracts and the approved plan. Return APPROVED_RESULT only if every item is preserved and uncovered_items is empty; otherwise return CHANGES_REQUIRED with stable issue_ids and evidence. Do not modify Git or files."
+        }
+        NextAction::RevalidateAndAccept | NextAction::WaitForUser | NextAction::Stop => {
+            "No model turn is permitted for this coordinator-only action."
+        }
+    }
+}
+
+fn invalid(code: &'static str, detail: impl Into<String>) -> PromptError {
+    PromptError::Invalid {
+        code,
+        detail: detail.into(),
+    }
+}

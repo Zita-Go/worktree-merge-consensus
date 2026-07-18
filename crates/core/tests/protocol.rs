@@ -85,3 +85,29 @@ fn plan_approval_cannot_leave_uncovered_items() {
 
     assert!(validate_message(value).is_err());
 }
+
+#[test]
+fn primary_plan_is_a_machine_validated_protocol_message() {
+    let value = json!({
+        "protocol": "worktree-merge-consensus/v1",
+        "run_id": "4b230bd8-d870-4ef4-bf20-05a4c61020af",
+        "message_type": "PLAN_READY",
+        "phase": "PLAN_REVIEW",
+        "round": 1,
+        "primary_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "reviewer_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "plan_revision": 1,
+        "integration_branch": null,
+        "integration_sha": null,
+        "reason_code": null,
+        "payload": {
+            "primary_contract": {"goal": "primary behavior"},
+            "reviewer_contract": {"goal": "reviewer behavior"},
+            "plan": {"steps": ["merge", "verify"]},
+            "coverage_matrix": [{"contract_item": "primary behavior", "plan_step": "merge"}]
+        }
+    });
+
+    let parsed = validate_message(value).expect("valid primary plan");
+    assert_eq!(parsed.envelope.message_type, MessageType::PlanReady);
+}
