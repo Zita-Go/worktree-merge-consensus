@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "fixtureVersion": "0.144.5",
+  "protocolFamily": "codex-app-server/experimental-v2",
+  "minimumVersion": "0.144.5",
+  "maximumVersionExclusive": "0.145.0",
+  "requiredMethods": [
+    "initialize",
+    "thread/list",
+    "thread/read",
+    "thread/resume",
+    "turn/start"
+  ],
+  "requiredNotifications": [
+    "thread/status/changed",
+    "turn/started",
+    "turn/completed"
+  ],
+  "requestShape": {
+    "initialize": ["clientInfo"],
+    "thread/list": [],
+    "thread/read": ["threadId", "includeTurns"],
+    "thread/resume": ["threadId"],
+    "turn/start": ["threadId", "input", "outputSchema"]
+  }
+}

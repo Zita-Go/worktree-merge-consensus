@@ -1,0 +1,360 @@
+use std::{
+    collections::VecDeque,
+    fmt,
+    path::PathBuf,
+    process::Stdio,
+    sync::{Arc, Mutex as StdMutex},
+};
+
+use async_trait::async_trait;
+use serde_json::{Value, json};
+use thiserror::Error;
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    process::{Child, Command},
+    sync::Mutex,
+};
+
+use crate::{
+    compat::{REQUIRED_METHODS, check_compatibility},
+    transport::{JsonRpcTransport, RpcError},
+    types::{AppEvent, InitializeInfo, ThreadDetail, ThreadPage, ThreadSummary, TurnHandle},
+};
+
+const STDERR_TAIL_LINES: usize = 40;
+
+#[derive(Debug, Clone)]
+pub struct ConnectOptions {
+    pub codex_binary: PathBuf,
+    pub control_socket: Option<PathBuf>,
+    pub start_daemon: bool,
+}
+
+impl Default for ConnectOptions {
+    fn default() -> Self {
+        Self {
+            codex_binary: PathBuf::from("codex"),
+            control_socket: None,
+            start_daemon: true,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum AppServerError {
+    #[error(transparent)]
+    Rpc(#[from] RpcError),
+    #[error("invalid App Server response: {0}")]
+    InvalidResponse(String),
+    #[error("Codex process failed: {0}")]
+    Process(String),
+    #[error("INCOMPATIBLE_CODEX: {0}")]
+    IncompatibleCodex(String),
+}
+
+#[async_trait]
+pub trait AppServer: Send + Sync {
+    async fn initialize(&self) -> Result<InitializeInfo, AppServerError>;
+    async fn list_threads(
+        &self,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<ThreadPage, AppServerError>;
+    async fn read_thread(&self, thread_id: &str) -> Result<ThreadDetail, AppServerError>;
+    async fn resume_thread(&self, thread_id: &str) -> Result<ThreadDetail, AppServerError>;
+    async fn start_turn(
+        &self,
+        thread_id: &str,
+        prompt: &str,
+        output_schema: Value,
+    ) -> Result<TurnHandle, AppServerError>;
+    async fn next_event(&self) -> Option<AppEvent>;
+}
+
+#[derive(Clone)]
+pub struct CodexAppServer {
+    transport: JsonRpcTransport,
+    process: Option<Arc<ProcessGuard>>,
+    stderr_tail: Arc<Mutex<VecDeque<String>>>,
+}
+
+impl CodexAppServer {
+    pub fn from_transport(transport: JsonRpcTransport) -> Self {
+        Self {
+            transport,
+            process: None,
+            stderr_tail: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    pub fn transport(&self) -> &JsonRpcTransport {
+        &self.transport
+    }
+
+    pub async fn connect(options: ConnectOptions) -> Result<Self, AppServerError> {
+        let version = Command::new(&options.codex_binary)
+            .arg("--version")
+            .output()
+            .await
+            .map_err(|error| {
+                AppServerError::Process(format!("could not execute codex --version: {error}"))
+            })?;
+        if !version.status.success() {
+            return Err(AppServerError::Process(format!(
+                "codex --version exited with {:?}",
+                version.status.code()
+            )));
+        }
+        let version_output = String::from_utf8(version.stdout).map_err(|error| {
+            AppServerError::Process(format!("codex --version returned invalid UTF-8: {error}"))
+        })?;
+        let compatibility = check_compatibility(&version_output, REQUIRED_METHODS);
+        if !compatibility.compatible {
+            return Err(AppServerError::IncompatibleCodex(compatibility.detail));
+        }
+
+        if options.start_daemon {
+            let started = Command::new(&options.codex_binary)
+                .args(["app-server", "daemon", "start"])
+                .output()
+                .await
+                .map_err(|error| {
+                    AppServerError::Process(format!(
+                        "could not start the managed App Server daemon: {error}"
+                    ))
+                })?;
+            if !started.status.success() {
+                return Err(AppServerError::Process(format!(
+                    "App Server daemon start failed: {}",
+                    redact_stderr(&String::from_utf8_lossy(&started.stderr))
+                )));
+            }
+        }
+
+        let mut command = Command::new(&options.codex_binary);
+        command
+            .args(["app-server", "proxy"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        if let Some(socket) = options.control_socket {
+            command.arg("--sock").arg(socket);
+        }
+        let mut child = command.spawn().map_err(|error| {
+            AppServerError::Process(format!("could not start App Server proxy: {error}"))
+        })?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            AppServerError::Process("App Server proxy stdin was unavailable".to_owned())
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            AppServerError::Process("App Server proxy stdout was unavailable".to_owned())
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            AppServerError::Process("App Server proxy stderr was unavailable".to_owned())
+        })?;
+
+        let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
+        tokio::spawn(drain_stderr(stderr, Arc::clone(&stderr_tail)));
+        let client = Self {
+            transport: JsonRpcTransport::new(stdout, stdin),
+            process: Some(Arc::new(ProcessGuard {
+                child: StdMutex::new(child),
+            })),
+            stderr_tail,
+        };
+        client.initialize().await?;
+        Ok(client)
+    }
+
+    pub async fn redacted_stderr_tail(&self) -> Vec<String> {
+        self.stderr_tail.lock().await.iter().cloned().collect()
+    }
+}
+
+impl fmt::Debug for CodexAppServer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CodexAppServer")
+            .field("managed_process", &self.process.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+struct ProcessGuard {
+    child: StdMutex<Child>,
+}
+
+impl Drop for ProcessGuard {
+    fn drop(&mut self) {
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+#[async_trait]
+impl AppServer for CodexAppServer {
+    async fn initialize(&self) -> Result<InitializeInfo, AppServerError> {
+        let raw = self
+            .transport
+            .request(
+                "initialize",
+                json!({
+                    "clientInfo": {
+                        "name": "worktree-merge-consensus",
+                        "title": "Worktree Merge Consensus",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    },
+                    "capabilities": null,
+                }),
+            )
+            .await?;
+        self.transport.notify("initialized", json!({})).await?;
+        Ok(InitializeInfo { raw })
+    }
+
+    async fn list_threads(
+        &self,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<ThreadPage, AppServerError> {
+        let raw = self
+            .transport
+            .request(
+                "thread/list",
+                json!({
+                    "cursor": cursor,
+                    "limit": limit,
+                    "sortKey": "updated_at",
+                    "sortDirection": "desc",
+                }),
+            )
+            .await?;
+        let data = raw
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid("thread/list result is missing data"))?
+            .iter()
+            .cloned()
+            .map(|thread| {
+                serde_json::from_value(thread)
+                    .map_err(|error| invalid(format!("invalid thread summary: {error}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ThreadPage {
+            data,
+            next_cursor: optional_string(&raw, "nextCursor")?,
+            backwards_cursor: optional_string(&raw, "backwardsCursor")?,
+        })
+    }
+
+    async fn read_thread(&self, thread_id: &str) -> Result<ThreadDetail, AppServerError> {
+        let raw = self
+            .transport
+            .request(
+                "thread/read",
+                json!({"threadId": thread_id, "includeTurns": true}),
+            )
+            .await?;
+        parse_thread_response(raw)
+    }
+
+    async fn resume_thread(&self, thread_id: &str) -> Result<ThreadDetail, AppServerError> {
+        let raw = self
+            .transport
+            .request("thread/resume", json!({"threadId": thread_id}))
+            .await?;
+        parse_thread_response(raw)
+    }
+
+    async fn start_turn(
+        &self,
+        thread_id: &str,
+        prompt: &str,
+        output_schema: Value,
+    ) -> Result<TurnHandle, AppServerError> {
+        let raw = self
+            .transport
+            .request(
+                "turn/start",
+                json!({
+                    "threadId": thread_id,
+                    "input": [{
+                        "type": "text",
+                        "text": prompt,
+                        "text_elements": [],
+                    }],
+                    "outputSchema": output_schema,
+                }),
+            )
+            .await?;
+        let turn = raw
+            .get("turn")
+            .cloned()
+            .ok_or_else(|| invalid("turn/start result is missing turn"))?;
+        serde_json::from_value(turn)
+            .map_err(|error| invalid(format!("invalid turn/start result: {error}")))
+    }
+
+    async fn next_event(&self) -> Option<AppEvent> {
+        self.transport.next_event().await
+    }
+}
+
+fn parse_thread_response(raw: Value) -> Result<ThreadDetail, AppServerError> {
+    let thread = raw
+        .get("thread")
+        .cloned()
+        .ok_or_else(|| invalid("thread response is missing thread"))?;
+    let summary = serde_json::from_value::<ThreadSummary>(thread.clone())
+        .map_err(|error| invalid(format!("invalid thread response: {error}")))?;
+    let turns = thread
+        .get("turns")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(ThreadDetail {
+        summary,
+        turns,
+        raw: thread,
+    })
+}
+
+fn optional_string(value: &Value, key: &str) -> Result<Option<String>, AppServerError> {
+    match value.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(invalid(format!("{key} must be a string or null"))),
+    }
+}
+
+fn invalid(detail: impl Into<String>) -> AppServerError {
+    AppServerError::InvalidResponse(detail.into())
+}
+
+async fn drain_stderr(stderr: tokio::process::ChildStderr, tail: Arc<Mutex<VecDeque<String>>>) {
+    let mut lines = BufReader::new(stderr).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let mut tail = tail.lock().await;
+        if tail.len() == STDERR_TAIL_LINES {
+            tail.pop_front();
+        }
+        tail.push_back(redact_stderr(&line));
+    }
+}
+
+fn redact_stderr(value: &str) -> String {
+    let lowercase = value.to_ascii_lowercase();
+    if ["authorization", "api_key", "api-key", "secret", "token"]
+        .iter()
+        .any(|marker| lowercase.contains(marker))
+    {
+        return "[redacted sensitive App Server diagnostic]".to_owned();
+    }
+    let mut redacted = value.to_owned();
+    if let Some(home) = std::env::var_os("HOME").and_then(|home| home.into_string().ok()) {
+        redacted = redacted.replace(&home, "~");
+    }
+    redacted.chars().take(2_000).collect()
+}
