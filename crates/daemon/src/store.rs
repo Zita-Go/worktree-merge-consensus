@@ -22,6 +22,8 @@ pub struct PendingSend {
     pub phase: String,
     pub round: u32,
     pub message_hash: String,
+    pub thread_id: Option<String>,
+    pub turn_id: Option<String>,
     pub full_prompt: Option<String>,
 }
 
@@ -219,9 +221,9 @@ impl SqliteRunStore {
         let connection = self.lock()?;
         connection
             .query_row(
-                "SELECT run_id, role, phase, round, message_hash
+                "SELECT run_id, role, phase, round, message_hash, thread_id, turn_id
                  FROM turns
-                 WHERE run_id = ?1 AND delivery_state = 'PENDING'
+                 WHERE run_id = ?1 AND delivery_state IN ('PENDING', 'SENT')
                  ORDER BY id DESC LIMIT 1",
                 [run_id],
                 |row| {
@@ -231,12 +233,35 @@ impl SqliteRunStore {
                         phase: row.get(2)?,
                         round: row.get(3)?,
                         message_hash: row.get(4)?,
+                        thread_id: row.get(5)?,
+                        turn_id: row.get(6)?,
                         full_prompt: None,
                     })
                 },
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn record_turn_started(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<(), StoreError> {
+        let changed = self.lock()?.execute(
+            "UPDATE turns
+             SET delivery_state = 'SENT', thread_id = ?1, turn_id = ?2
+             WHERE run_id = ?3 AND message_hash = ?4
+               AND delivery_state IN ('PENDING', 'SENT')",
+            params![thread_id, turn_id, run_id, message_hash],
+        )?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(StoreError::PendingSendNotFound(run_id.to_owned()))
+        }
     }
 
     pub fn accept_response_and_advance(
@@ -262,7 +287,7 @@ impl SqliteRunStore {
         let pending_id = transaction
             .query_row(
                 "SELECT id FROM turns
-                 WHERE run_id = ?1 AND delivery_state = 'PENDING'
+                 WHERE run_id = ?1 AND delivery_state IN ('PENDING', 'SENT')
                  ORDER BY id DESC LIMIT 1",
                 [run_id],
                 |row| row.get::<_, i64>(0),
@@ -272,7 +297,7 @@ impl SqliteRunStore {
         let changed = transaction.execute(
             "UPDATE turns
              SET delivery_state = 'ACCEPTED', response_hash = ?1, accepted_at = ?2
-             WHERE id = ?3 AND delivery_state = 'PENDING'",
+             WHERE id = ?3 AND delivery_state IN ('PENDING', 'SENT')",
             params![response_hash, now_unix(), pending_id],
         )?;
         if changed != 1 {

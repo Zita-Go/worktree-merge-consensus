@@ -6,9 +6,10 @@ use thiserror::Error;
 use uuid::Uuid;
 
 const PROTOCOL_V1: &str = "worktree-merge-consensus/v1";
+const PROTOCOL_SCHEMA_JSON: &str = include_str!("../../../schemas/protocol-v1.json");
 
 static PROTOCOL_SCHEMA: LazyLock<jsonschema::Validator> = LazyLock::new(|| {
-    let schema = serde_json::from_str(include_str!("../../../schemas/protocol-v1.json"))
+    let schema = serde_json::from_str(PROTOCOL_SCHEMA_JSON)
         .expect("the checked-in protocol schema must be valid JSON");
     jsonschema::validator_for(&schema)
         .expect("the checked-in protocol schema must be a valid JSON Schema")
@@ -92,6 +93,11 @@ pub fn validate_message(value: Value) -> Result<ProtocolMessage, ProtocolError> 
     let message: ProtocolMessage = serde_json::from_value(value)?;
     message.validate_invariants()?;
     Ok(message)
+}
+
+pub fn output_schema() -> Value {
+    serde_json::from_str(PROTOCOL_SCHEMA_JSON)
+        .expect("the checked-in protocol schema must be valid JSON")
 }
 
 impl ProtocolMessage {

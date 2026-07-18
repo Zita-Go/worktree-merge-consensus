@@ -87,6 +87,10 @@ pub struct RunState {
     pub integration_sha: Option<String>,
     pub reason_code: Option<String>,
     pub next_action: NextAction,
+    #[serde(default)]
+    pub target_integration_branch: Option<String>,
+    #[serde(default)]
+    pub required_test_commands: Vec<String>,
     pub max_review_rounds: u32,
     pub no_progress_rounds: u8,
     primary_contract_hash: Option<String>,
@@ -127,6 +131,8 @@ impl RunState {
             integration_sha: None,
             reason_code: None,
             next_action: NextAction::RequestPrimaryContract,
+            target_integration_branch: None,
+            required_test_commands: Vec::new(),
             max_review_rounds: DEFAULT_MAX_REVIEW_ROUNDS,
             no_progress_rounds: DEFAULT_NO_PROGRESS_ROUNDS,
             primary_contract_hash: None,
@@ -137,6 +143,42 @@ impl RunState {
             plan_approved: false,
             result_approved_sha: None,
         }
+    }
+
+    pub fn configure_integration(
+        &mut self,
+        target_branch: impl Into<String>,
+        test_commands: Vec<String>,
+    ) -> Result<(), StateError> {
+        self.require_running()?;
+        if self.phase != Phase::Contract
+            || self.next_action != NextAction::RequestPrimaryContract
+            || self.target_integration_branch.is_some()
+        {
+            return Err(state_error(
+                "POLICY_ALREADY_FROZEN",
+                "integration policy can only be configured once before the first turn",
+            ));
+        }
+        let target_branch = target_branch.into();
+        if target_branch.trim().is_empty() {
+            return Err(state_error(
+                "INVALID_BRANCH_NAME",
+                "target integration branch cannot be empty",
+            ));
+        }
+        if test_commands
+            .iter()
+            .any(|command| command.trim().is_empty())
+        {
+            return Err(state_error(
+                "INVALID_TEST_COMMAND",
+                "required test commands cannot be empty",
+            ));
+        }
+        self.target_integration_branch = Some(target_branch);
+        self.required_test_commands = test_commands;
+        Ok(())
     }
 
     pub fn apply_message(&mut self, message: ProtocolMessage) -> Result<NextAction, StateError> {
@@ -193,9 +235,31 @@ impl RunState {
     }
 
     pub fn pause(&mut self, reason_code: impl Into<String>) -> Result<(), StateError> {
-        self.require_running()?;
+        if !matches!(self.status, RunStatus::Running | RunStatus::WaitingThread) {
+            return Err(state_error(
+                "RUN_NOT_ACTIVE",
+                "only a running or waiting run can be paused",
+            ));
+        }
         self.status = RunStatus::PausedUserAction;
         self.reason_code = Some(reason_code.into());
+        Ok(())
+    }
+
+    pub fn wait_for_thread(&mut self) -> Result<(), StateError> {
+        self.require_running()?;
+        self.status = RunStatus::WaitingThread;
+        Ok(())
+    }
+
+    pub fn thread_became_idle(&mut self) -> Result<(), StateError> {
+        if self.status != RunStatus::WaitingThread {
+            return Err(state_error(
+                "NOT_WAITING_THREAD",
+                "run is not waiting for a task turn",
+            ));
+        }
+        self.status = RunStatus::Running;
         Ok(())
     }
 
@@ -320,6 +384,16 @@ impl RunState {
             .integration_branch
             .clone()
             .ok_or_else(|| state_error("INVALID_RESPONSE", "integration branch is missing"))?;
+        if self
+            .target_integration_branch
+            .as_deref()
+            .is_some_and(|target| target != branch)
+        {
+            return Err(state_error(
+                "UNEXPECTED_INTEGRATION_BRANCH",
+                "reported integration branch does not match the authorized new branch",
+            ));
+        }
         let sha = message
             .envelope
             .integration_sha
@@ -482,7 +556,7 @@ impl RunState {
         Ok(())
     }
 
-    fn block(&mut self, reason_code: &str) -> NextAction {
+    pub fn block(&mut self, reason_code: &str) -> NextAction {
         self.status = RunStatus::Blocked;
         self.phase = Phase::Blocked;
         self.reason_code = Some(reason_code.to_owned());

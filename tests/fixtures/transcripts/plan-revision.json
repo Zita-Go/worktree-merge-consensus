@@ -1,0 +1,16 @@
+{
+  "scenario": "plan-revision",
+  "expected_status": "ACCEPTED",
+  "request_order": [
+    "primary:CONTRACT_READY",
+    "reviewer:CONTRACT_READY",
+    "primary:PLAN_READY@1",
+    "reviewer:CHANGES_REQUIRED@1",
+    "primary:PLAN_READY@2",
+    "reviewer:APPROVED_PLAN@2",
+    "primary:INTEGRATION_READY",
+    "reviewer:APPROVED_RESULT"
+  ],
+  "stable_issue_ids": ["missing-reviewer-edge"],
+  "approved_plan_revision": 2
+}

@@ -6,16 +6,27 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+use crate::coordinator::StartRequest;
+
 const MAX_WIRE_LINE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum DaemonRequest {
     Ping,
-    Status { run_id: Option<String> },
-    Start { state: Box<RunState> },
-    Resume { run_id: String },
-    Cancel { run_id: String },
+    Status {
+        run_id: Option<String>,
+    },
+    Start {
+        state: Box<RunState>,
+        request: StartRequest,
+    },
+    Resume {
+        run_id: String,
+    },
+    Cancel {
+        run_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

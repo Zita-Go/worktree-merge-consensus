@@ -1,5 +1,8 @@
 use std::{fs, path::PathBuf};
 
+use app_server_client::AppServer;
+use async_trait::async_trait;
+use consensus_core::state::RunState;
 use serde_json::json;
 use thiserror::Error;
 use tokio::{
@@ -8,9 +11,49 @@ use tokio::{
 };
 
 use crate::{
+    coordinator::{Coordinator, CoordinatorError, RepositorySafety, StartRequest},
     store::{SqliteRunStore, StoreError},
     wire::{DaemonRequest, DaemonResponse, ping_result},
 };
+
+#[async_trait]
+pub trait RunController: Send + Sync {
+    async fn start_run(
+        &self,
+        state: RunState,
+        request: StartRequest,
+    ) -> Result<RunState, CoordinatorError>;
+    async fn drive_run(&self, run_id: &str) -> Result<RunState, CoordinatorError>;
+    async fn prepare_resume_run(&self, run_id: &str) -> Result<RunState, CoordinatorError>;
+    async fn cancel_run(&self, run_id: &str) -> Result<RunState, CoordinatorError>;
+}
+
+#[async_trait]
+impl<A, R> RunController for Coordinator<A, R>
+where
+    A: AppServer + 'static,
+    R: RepositorySafety + 'static,
+{
+    async fn start_run(
+        &self,
+        state: RunState,
+        request: StartRequest,
+    ) -> Result<RunState, CoordinatorError> {
+        Coordinator::start(self, state, request).await
+    }
+
+    async fn drive_run(&self, run_id: &str) -> Result<RunState, CoordinatorError> {
+        Coordinator::drive(self, run_id).await
+    }
+
+    async fn prepare_resume_run(&self, run_id: &str) -> Result<RunState, CoordinatorError> {
+        Coordinator::prepare_resume(self, run_id).await
+    }
+
+    async fn cancel_run(&self, run_id: &str) -> Result<RunState, CoordinatorError> {
+        Coordinator::cancel(self, run_id).await
+    }
+}
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
@@ -50,6 +93,26 @@ pub enum ServerError {
 pub async fn run_server(
     config: ServerConfig,
     store: SqliteRunStore,
+    shutdown: oneshot::Receiver<()>,
+) -> Result<(), ServerError> {
+    run_server_inner(config, store, None, shutdown).await
+}
+
+#[cfg(unix)]
+pub async fn run_server_with_controller(
+    config: ServerConfig,
+    store: SqliteRunStore,
+    controller: std::sync::Arc<dyn RunController>,
+    shutdown: oneshot::Receiver<()>,
+) -> Result<(), ServerError> {
+    run_server_inner(config, store, Some(controller), shutdown).await
+}
+
+#[cfg(unix)]
+async fn run_server_inner(
+    config: ServerConfig,
+    store: SqliteRunStore,
+    controller: Option<std::sync::Arc<dyn RunController>>,
     mut shutdown: oneshot::Receiver<()>,
 ) -> Result<(), ServerError> {
     use std::os::unix::fs::PermissionsExt;
@@ -73,6 +136,16 @@ pub async fn run_server(
     fs::write(&config.pid_path, format!("{}\n", std::process::id()))?;
     fs::set_permissions(&config.pid_path, fs::Permissions::from_mode(0o600))?;
 
+    if let Some(controller) = &controller {
+        for run in store
+            .list_runs()?
+            .into_iter()
+            .filter(|run| matches!(run.status.as_str(), "RUNNING" | "WAITING_THREAD"))
+        {
+            dispatch_drive(std::sync::Arc::clone(controller), run.run_id);
+        }
+    }
+
     let result = loop {
         tokio::select! {
             _ = &mut shutdown => break Ok(()),
@@ -80,8 +153,9 @@ pub async fn run_server(
                 match accepted {
                     Ok((stream, _)) => {
                         let store = store.clone();
+                        let controller = controller.clone();
                         tokio::spawn(async move {
-                            let _ = serve_connection(stream, store).await;
+                            let _ = serve_connection(stream, store, controller).await;
                         });
                     }
                     Err(error) => break Err(ServerError::Io(error)),
@@ -105,10 +179,21 @@ pub async fn run_server(
     Err(ServerError::UnsupportedPlatform)
 }
 
+#[cfg(not(unix))]
+pub async fn run_server_with_controller(
+    _config: ServerConfig,
+    _store: SqliteRunStore,
+    _controller: std::sync::Arc<dyn RunController>,
+    _shutdown: oneshot::Receiver<()>,
+) -> Result<(), ServerError> {
+    Err(ServerError::UnsupportedPlatform)
+}
+
 #[cfg(unix)]
 async fn serve_connection(
     stream: tokio::net::UnixStream,
     store: SqliteRunStore,
+    controller: Option<std::sync::Arc<dyn RunController>>,
 ) -> Result<(), std::io::Error> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -122,7 +207,7 @@ async fn serve_connection(
             DaemonResponse::failure("REQUEST_TOO_LARGE", "daemon request exceeds 1 MiB")
         } else {
             match serde_json::from_str::<DaemonRequest>(&line) {
-                Ok(request) => handle_request(&store, request),
+                Ok(request) => handle_request(&store, controller.as_ref(), request).await,
                 Err(error) => DaemonResponse::failure("INVALID_REQUEST", error.to_string()),
             }
         };
@@ -141,7 +226,11 @@ async fn serve_connection(
     Ok(())
 }
 
-fn handle_request(store: &SqliteRunStore, request: DaemonRequest) -> DaemonResponse {
+async fn handle_request(
+    store: &SqliteRunStore,
+    controller: Option<&std::sync::Arc<dyn RunController>>,
+    request: DaemonRequest,
+) -> DaemonResponse {
     match request {
         DaemonRequest::Ping => DaemonResponse::success(ping_result()),
         DaemonRequest::Status { run_id } => match run_id {
@@ -155,39 +244,73 @@ fn handle_request(store: &SqliteRunStore, request: DaemonRequest) -> DaemonRespo
                 Err(error) => store_failure(error),
             },
         },
-        DaemonRequest::Start { state } => {
+        DaemonRequest::Start { state, request } => {
             let run_id = state.facts.run_id.to_string();
-            match store.insert_run(&state) {
-                Ok(()) => DaemonResponse::success(json!({"run_id": run_id})),
-                Err(error) => store_failure(error),
-            }
-        }
-        DaemonRequest::Resume { run_id } => match store.load_run(&run_id) {
-            Ok(Some(mut state)) => match state.resume() {
-                Ok(action) => match store.save_state(&state) {
-                    Ok(()) => DaemonResponse::success(json!({
-                        "run_id": run_id,
-                        "next_action": action,
-                        "state": state,
-                    })),
-                    Err(error) => store_failure(error),
-                },
-                Err(error) => DaemonResponse::failure(error.code(), error.to_string()),
-            },
-            Ok(None) => DaemonResponse::failure("RUN_NOT_FOUND", "run does not exist"),
-            Err(error) => store_failure(error),
-        },
-        DaemonRequest::Cancel { run_id } => match store.load_run(&run_id) {
-            Ok(Some(mut state)) => {
-                state.cancel();
-                match store.save_state(&state) {
-                    Ok(()) => serialize_success(&state),
+            if let Some(controller) = controller {
+                match controller.start_run(*state, request).await {
+                    Ok(state) => {
+                        dispatch_drive(std::sync::Arc::clone(controller), run_id.clone());
+                        DaemonResponse::success(json!({
+                            "run_id": run_id,
+                            "status": state.status,
+                        }))
+                    }
+                    Err(error) => coordinator_failure(error),
+                }
+            } else {
+                match store.insert_run(&state) {
+                    Ok(()) => DaemonResponse::success(json!({"run_id": run_id})),
                     Err(error) => store_failure(error),
                 }
             }
-            Ok(None) => DaemonResponse::failure("RUN_NOT_FOUND", "run does not exist"),
-            Err(error) => store_failure(error),
-        },
+        }
+        DaemonRequest::Resume { run_id } => {
+            if let Some(controller) = controller {
+                match controller.prepare_resume_run(&run_id).await {
+                    Ok(state) => {
+                        dispatch_drive(std::sync::Arc::clone(controller), run_id.clone());
+                        serialize_success(&state)
+                    }
+                    Err(error) => coordinator_failure(error),
+                }
+            } else {
+                match store.load_run(&run_id) {
+                    Ok(Some(mut state)) => match state.resume() {
+                        Ok(action) => match store.save_state(&state) {
+                            Ok(()) => DaemonResponse::success(json!({
+                                "run_id": run_id,
+                                "next_action": action,
+                                "state": state,
+                            })),
+                            Err(error) => store_failure(error),
+                        },
+                        Err(error) => DaemonResponse::failure(error.code(), error.to_string()),
+                    },
+                    Ok(None) => DaemonResponse::failure("RUN_NOT_FOUND", "run does not exist"),
+                    Err(error) => store_failure(error),
+                }
+            }
+        }
+        DaemonRequest::Cancel { run_id } => {
+            if let Some(controller) = controller {
+                match controller.cancel_run(&run_id).await {
+                    Ok(state) => serialize_success(&state),
+                    Err(error) => coordinator_failure(error),
+                }
+            } else {
+                match store.load_run(&run_id) {
+                    Ok(Some(mut state)) => {
+                        state.cancel();
+                        match store.save_state(&state) {
+                            Ok(()) => serialize_success(&state),
+                            Err(error) => store_failure(error),
+                        }
+                    }
+                    Ok(None) => DaemonResponse::failure("RUN_NOT_FOUND", "run does not exist"),
+                    Err(error) => store_failure(error),
+                }
+            }
+        }
     }
 }
 
@@ -200,6 +323,17 @@ fn serialize_success(value: &impl serde::Serialize) -> DaemonResponse {
 
 fn store_failure(error: StoreError) -> DaemonResponse {
     DaemonResponse::failure(error.code(), error.to_string())
+}
+
+fn coordinator_failure(error: CoordinatorError) -> DaemonResponse {
+    let code = error.code().to_owned();
+    DaemonResponse::failure(code, error.to_string())
+}
+
+fn dispatch_drive(controller: std::sync::Arc<dyn RunController>, run_id: String) {
+    tokio::spawn(async move {
+        let _ = controller.drive_run(&run_id).await;
+    });
 }
 
 fn remove_if_exists(path: &std::path::Path) -> Result<(), std::io::Error> {

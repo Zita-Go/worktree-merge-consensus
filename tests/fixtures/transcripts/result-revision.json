@@ -1,0 +1,12 @@
+{
+  "scenario": "result-revision",
+  "expected_status": "ACCEPTED",
+  "request_order": [
+    "primary:INTEGRATION_READY@cccccccccccccccccccccccccccccccccccccccc",
+    "reviewer:CHANGES_REQUIRED@cccccccccccccccccccccccccccccccccccccccc",
+    "primary:INTEGRATION_READY@dddddddddddddddddddddddddddddddddddddddd",
+    "reviewer:APPROVED_RESULT@dddddddddddddddddddddddddddddddddddddddd"
+  ],
+  "rejected_sha": "cccccccccccccccccccccccccccccccccccccccc",
+  "accepted_sha": "dddddddddddddddddddddddddddddddddddddddd"
+}

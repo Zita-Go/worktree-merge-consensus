@@ -1,0 +1,14 @@
+{
+  "scenario": "conflict-free",
+  "expected_status": "ACCEPTED",
+  "request_order": [
+    "primary:CONTRACT_READY",
+    "reviewer:CONTRACT_READY",
+    "primary:PLAN_READY",
+    "reviewer:APPROVED_PLAN",
+    "primary:INTEGRATION_READY",
+    "reviewer:APPROVED_RESULT"
+  ],
+  "plan_revision": 1,
+  "integration_sha": "cccccccccccccccccccccccccccccccccccccccc"
+}

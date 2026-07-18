@@ -47,6 +47,8 @@ pub fn build_turn_prompt(
         "plan_revision": state.plan_revision,
         "integration_branch": state.integration_branch,
         "integration_sha": state.integration_sha,
+        "target_integration_branch": state.target_integration_branch,
+        "required_test_commands": state.required_test_commands,
     });
 
     let metadata = serde_json::to_string_pretty(&metadata)?;

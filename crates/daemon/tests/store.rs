@@ -27,6 +27,32 @@ fn pending_send_survives_reopen_without_storing_prompt() {
 }
 
 #[test]
+fn started_turn_identity_survives_reopen_for_crash_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let run = fixture_run(RUN_ID, "/repo/.git");
+    let store = SqliteRunStore::open(&path).unwrap();
+    store.insert_run(&run).unwrap();
+    store
+        .record_pending_send(RUN_ID, "PRIMARY", "CONTRACT", 1, "request-hash")
+        .unwrap();
+    store
+        .record_turn_started(RUN_ID, "request-hash", "primary-thread", "turn-7")
+        .unwrap();
+    drop(store);
+
+    let pending = SqliteRunStore::open(path)
+        .unwrap()
+        .pending_send(RUN_ID)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(pending.thread_id.as_deref(), Some("primary-thread"));
+    assert_eq!(pending.turn_id.as_deref(), Some("turn-7"));
+    assert!(pending.full_prompt.is_none());
+}
+
+#[test]
 fn run_state_round_trips_as_structured_state() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();

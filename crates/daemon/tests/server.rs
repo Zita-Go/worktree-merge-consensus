@@ -1,10 +1,20 @@
 #![cfg(unix)]
 
-use std::{os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
+use std::{
+    os::unix::fs::PermissionsExt,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
+use async_trait::async_trait;
 use consensus_core::state::{RunFacts, RunState};
 use consensus_daemon::{
-    server::{ServerConfig, ServerError, run_server},
+    coordinator::{CoordinatorError, StartRequest},
+    server::{RunController, ServerConfig, ServerError, run_server, run_server_with_controller},
     store::SqliteRunStore,
     wire::{DaemonClient, DaemonRequest},
 };
@@ -62,6 +72,7 @@ async fn start_rpc_rejects_second_active_run_for_repository() {
     let response = client
         .request(DaemonRequest::Start {
             state: Box::new(second),
+            request: Default::default(),
         })
         .await
         .unwrap();
@@ -70,6 +81,112 @@ async fn start_rpc_rejects_second_active_run_for_repository() {
     assert_eq!(response.error.unwrap().code, "ACTIVE_RUN_EXISTS");
     shutdown_tx.send(()).unwrap();
     server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn controller_backed_start_returns_immediately_and_dispatches_background_drive() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = ServerConfig::new(temp.path());
+    let store = SqliteRunStore::open(&config.database_path).unwrap();
+    let controller = Arc::new(FakeRunController {
+        store: store.clone(),
+        drives: AtomicUsize::new(0),
+    });
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let mut server = tokio::spawn(run_server_with_controller(
+        config.clone(),
+        store.clone(),
+        controller.clone(),
+        shutdown_rx,
+    ));
+    let client = wait_for_daemon(&config.socket_path, &mut server).await;
+    let run = fixture_run(RUN_ID, "/repo/.git");
+
+    let response = client
+        .request(DaemonRequest::Start {
+            state: Box::new(run),
+            request: StartRequest::default(),
+        })
+        .await
+        .unwrap();
+
+    assert!(response.ok);
+    for _ in 0..100 {
+        if controller.drives.load(Ordering::SeqCst) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert_eq!(controller.drives.load(Ordering::SeqCst), 1);
+    assert!(store.load_run(RUN_ID).unwrap().is_some());
+    shutdown_tx.send(()).unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn daemon_restart_redispatches_only_recoverable_runs() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = ServerConfig::new(temp.path());
+    let store = SqliteRunStore::open(&config.database_path).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+    let controller = Arc::new(FakeRunController {
+        store: store.clone(),
+        drives: AtomicUsize::new(0),
+    });
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let mut server = tokio::spawn(run_server_with_controller(
+        config.clone(),
+        store,
+        controller.clone(),
+        shutdown_rx,
+    ));
+    let _client = wait_for_daemon(&config.socket_path, &mut server).await;
+
+    for _ in 0..100 {
+        if controller.drives.load(Ordering::SeqCst) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+
+    assert_eq!(controller.drives.load(Ordering::SeqCst), 1);
+    shutdown_tx.send(()).unwrap();
+    server.await.unwrap().unwrap();
+}
+
+struct FakeRunController {
+    store: SqliteRunStore,
+    drives: AtomicUsize,
+}
+
+#[async_trait]
+impl RunController for FakeRunController {
+    async fn start_run(
+        &self,
+        state: RunState,
+        _request: StartRequest,
+    ) -> Result<RunState, CoordinatorError> {
+        self.store.insert_run(&state)?;
+        Ok(state)
+    }
+
+    async fn drive_run(&self, run_id: &str) -> Result<RunState, CoordinatorError> {
+        self.drives.fetch_add(1, Ordering::SeqCst);
+        Ok(self.store.load_run(run_id)?.unwrap())
+    }
+
+    async fn prepare_resume_run(&self, run_id: &str) -> Result<RunState, CoordinatorError> {
+        Ok(self.store.load_run(run_id)?.unwrap())
+    }
+
+    async fn cancel_run(&self, run_id: &str) -> Result<RunState, CoordinatorError> {
+        let mut state = self.store.load_run(run_id)?.unwrap();
+        state.cancel();
+        self.store.save_state(&state)?;
+        Ok(state)
+    }
 }
 
 async fn wait_for_daemon(

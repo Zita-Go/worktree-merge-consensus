@@ -1,5 +1,6 @@
 //! Persistent coordinator daemon for worktree merge consensus.
 
+pub mod coordinator;
 pub mod lifecycle;
 pub mod server;
 pub mod store;

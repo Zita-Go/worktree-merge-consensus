@@ -300,6 +300,29 @@ impl GitInspector {
         })
     }
 
+    pub fn verify_source_refs_unchanged(
+        &self,
+        repository: impl AsRef<Path>,
+        facts: &RunFacts,
+    ) -> Result<(), GitSafetyError> {
+        let primary =
+            self.optional_ref_target(repository.as_ref(), facts.primary_ref.as_deref())?;
+        let reviewer =
+            self.optional_ref_target(repository.as_ref(), facts.reviewer_ref.as_deref())?;
+        verify_source_ref_target(
+            "primary",
+            facts.primary_ref.as_deref(),
+            &facts.primary_sha,
+            primary.as_deref(),
+        )?;
+        verify_source_ref_target(
+            "reviewer",
+            facts.reviewer_ref.as_deref(),
+            &facts.reviewer_sha,
+            reviewer.as_deref(),
+        )
+    }
+
     fn read_source_ref(&self, worktree: &Path) -> Result<Option<SourceRef>, GitSafetyError> {
         let output = self.git_output_allow_status(
             worktree,
@@ -516,7 +539,7 @@ fn canonical_git_path(base: &Path, raw: &str) -> Result<PathBuf, GitSafetyError>
     })
 }
 
-fn normalize_branch_name(branch: &str) -> Result<String, GitSafetyError> {
+pub fn normalize_branch_name(branch: &str) -> Result<String, GitSafetyError> {
     let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
     let forbidden = [' ', '~', '^', ':', '?', '*', '[', '\\'];
     let valid = !branch.is_empty()
