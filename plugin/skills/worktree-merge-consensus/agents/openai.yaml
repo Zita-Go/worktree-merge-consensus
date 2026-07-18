@@ -1,0 +1,4 @@
+interface:
+  display_name: "Worktree Merge Consensus"
+  short_description: "Start safe two-task worktree integration"
+  default_prompt: "Use $worktree-merge-consensus to start reviewed integration between two existing Codex tasks."

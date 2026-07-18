@@ -1,0 +1,20 @@
+{
+  "name": "worktree-merge-consensus",
+  "interface": {
+    "displayName": "Worktree Merge Consensus"
+  },
+  "plugins": [
+    {
+      "name": "worktree-merge-consensus",
+      "source": {
+        "source": "local",
+        "path": "./plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

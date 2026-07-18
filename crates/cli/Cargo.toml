@@ -7,9 +7,11 @@ license.workspace = true
 
 [dependencies]
 app-server-client = { path = "../app-server-client" }
+async-trait.workspace = true
 clap.workspace = true
 consensus-core = { path = "../core" }
 consensus-daemon = { path = "../daemon" }
+consensus-mcp-server = { path = "../mcp-server" }
 dialoguer.workspace = true
 serde.workspace = true
 serde_json.workspace = true

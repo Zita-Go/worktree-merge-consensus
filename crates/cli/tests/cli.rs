@@ -59,3 +59,36 @@ fn hidden_daemon_help_is_available_for_lifecycle_startup() {
         .success()
         .stdout(predicate::str::contains("--state-dir"));
 }
+
+#[test]
+fn hidden_mcp_server_mode_serves_the_protocol_over_stdio() {
+    let input = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        "\n",
+    );
+    let output = Command::cargo_bin("codex-consensus")
+        .unwrap()
+        .arg("mcp-server")
+        .write_stdin(input)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let responses = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 6);
+}

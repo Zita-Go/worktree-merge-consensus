@@ -253,9 +253,11 @@ version = "0.1.0"
 dependencies = [
  "app-server-client",
  "assert_cmd",
+ "async-trait",
  "clap",
  "consensus-core",
  "consensus-daemon",
+ "consensus-mcp-server",
  "dialoguer",
  "predicates",
  "serde",
@@ -300,6 +302,17 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "consensus-mcp-server"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

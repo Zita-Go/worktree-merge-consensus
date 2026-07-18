@@ -12,6 +12,7 @@ use std::{
 
 use app_server_client::{AppServer, CodexAppServer, ConnectOptions, ThreadDetail, ThreadSummary};
 use args::{Cli, Command, DaemonCommand, RunArgs, ThreadsCommand};
+use async_trait::async_trait;
 use clap::Parser;
 use consensus_core::{
     git::{GitInspector, WorktreeSnapshot, verify_frozen_sources, verify_same_repository},
@@ -24,8 +25,10 @@ use consensus_daemon::{
     store::SqliteRunStore,
     wire::{DaemonRequest, DaemonResponse},
 };
+use consensus_mcp_server::{BackendError, ToolBackend, serve_stdio};
 use output::{emit_error, emit_serializable, emit_value, human_json};
 use select::{SelectedTasks, TerminalTaskSelector, select_tasks, task_label};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::sync::oneshot;
@@ -48,6 +51,10 @@ impl CliError {
 
     pub fn code(&self) -> &str {
         &self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
     }
 }
 
@@ -115,14 +122,22 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 serve_daemon(state_dir, arguments.codex_binary).await
             }
         },
-        Command::McpServer => Err(CliError::new(
-            "MCP_NOT_AVAILABLE",
-            "MCP server support is not included in this build stage",
-        )),
+        Command::McpServer => serve_mcp(state_dir).await,
     }
 }
 
 async fn doctor(state_dir: &Path, json_output: bool) -> Result<(), CliError> {
+    let value = doctor_value(state_dir).await?;
+    emit_value(&value, json_output, || {
+        format!(
+            "Ready: Git, compatible Codex App Server, private state at {}, and consensus daemon",
+            state_dir.display()
+        )
+    });
+    Ok(())
+}
+
+async fn doctor_value(state_dir: &Path) -> Result<Value, CliError> {
     let git = std::process::Command::new("git")
         .arg("--version")
         .output()
@@ -153,18 +168,11 @@ async fn doctor(state_dir: &Path, json_output: bool) -> Result<(), CliError> {
         "state_dir": state_dir,
         "sampled_threads": page.data.len(),
     });
-    emit_value(&value, json_output, || {
-        format!(
-            "Ready: Git, compatible Codex App Server, private state at {}, and consensus daemon",
-            state_dir.display()
-        )
-    });
-    Ok(())
+    Ok(value)
 }
 
 async fn list_threads(json_output: bool) -> Result<(), CliError> {
-    let app = connect_app_server().await?;
-    let threads = all_threads(&app).await?;
+    let threads = local_threads().await?;
     emit_serializable(&threads, json_output, || {
         if threads.is_empty() {
             "No local Codex tasks found.".into()
@@ -178,7 +186,33 @@ async fn list_threads(json_output: bool) -> Result<(), CliError> {
     })
 }
 
+async fn list_threads_value() -> Result<Value, CliError> {
+    let threads = local_threads().await?;
+    serde_json::to_value(threads)
+        .map_err(|error| CliError::new("SERIALIZATION_FAILURE", error.to_string()))
+}
+
+async fn local_threads() -> Result<Vec<ThreadSummary>, CliError> {
+    let app = connect_app_server().await?;
+    all_threads(&app).await
+}
+
 async fn start_run(state_dir: &Path, arguments: RunArgs) -> Result<(), CliError> {
+    let json_output = arguments.json;
+    let result = start_run_value(state_dir, &arguments).await?;
+    let run_id = result
+        .get("run_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    emit_value(&result, json_output, || {
+        format!(
+            "Started consensus run {run_id}. Use `codex-consensus status {run_id}` to follow it."
+        )
+    });
+    Ok(())
+}
+
+async fn start_run_value(state_dir: &Path, arguments: &RunArgs) -> Result<Value, CliError> {
     let app = connect_app_server().await?;
     let selected = if let (Some(primary), Some(reviewer)) = (
         arguments.primary_thread.as_deref(),
@@ -201,7 +235,6 @@ async fn start_run(state_dir: &Path, arguments: RunArgs) -> Result<(), CliError>
         .map_err(|error| CliError::new("TASK_SELECTION_FAILED", error.to_string()))?
     };
     let facts = freeze_selected(&selected)?;
-    let run_id = facts.run_id.to_string();
     let state = RunState::new(facts);
     let config = ServerConfig::new(state_dir);
     let client = ensure_daemon(&config)
@@ -211,19 +244,13 @@ async fn start_run(state_dir: &Path, arguments: RunArgs) -> Result<(), CliError>
         .request(DaemonRequest::Start {
             state: Box::new(state),
             request: StartRequest {
-                integration_branch: arguments.integration_branch,
-                test_commands: arguments.test_commands,
+                integration_branch: arguments.integration_branch.clone(),
+                test_commands: arguments.test_commands.clone(),
             },
         })
         .await
         .map_err(|error| CliError::new("DAEMON_UNREACHABLE", error.to_string()))?;
-    let result = response_result(response)?;
-    emit_value(&result, arguments.json, || {
-        format!(
-            "Started consensus run {run_id}. Use `codex-consensus status {run_id}` to follow it."
-        )
-    });
-    Ok(())
+    response_result(response)
 }
 
 async fn daemon_request(
@@ -231,6 +258,12 @@ async fn daemon_request(
     request: DaemonRequest,
     json_output: bool,
 ) -> Result<(), CliError> {
+    let value = daemon_request_value(state_dir, request).await?;
+    emit_value(&value, json_output, || human_json(&value));
+    Ok(())
+}
+
+async fn daemon_request_value(state_dir: &Path, request: DaemonRequest) -> Result<Value, CliError> {
     let config = ServerConfig::new(state_dir);
     let client = ensure_daemon(&config)
         .await
@@ -239,9 +272,7 @@ async fn daemon_request(
         .request(request)
         .await
         .map_err(|error| CliError::new("DAEMON_UNREACHABLE", error.to_string()))?;
-    let value = response_result(response)?;
-    emit_value(&value, json_output, || human_json(&value));
-    Ok(())
+    response_result(response)
 }
 
 async fn serve_daemon(state_dir: PathBuf, codex_binary: PathBuf) -> Result<(), CliError> {
@@ -276,6 +307,107 @@ async fn serve_daemon(state_dir: PathBuf, codex_binary: PathBuf) -> Result<(), C
         .map_err(|error| CliError::new("DAEMON_FAILED", error.to_string()));
     drop(shutdown_tx);
     result
+}
+
+async fn serve_mcp(state_dir: PathBuf) -> Result<(), CliError> {
+    serve_stdio(Arc::new(CliMcpBackend { state_dir }))
+        .await
+        .map_err(|error| CliError::new("MCP_SERVER_FAILED", error.to_string()))
+}
+
+struct CliMcpBackend {
+    state_dir: PathBuf,
+}
+
+#[async_trait]
+impl ToolBackend for CliMcpBackend {
+    async fn call(&self, tool: &str, arguments: Value) -> Result<Value, BackendError> {
+        let result = match tool {
+            "consensus_doctor" => doctor_value(&self.state_dir).await,
+            "consensus_list_threads" => list_threads_value()
+                .await
+                .map(|threads| json!({"threads": threads})),
+            "consensus_start" => {
+                let arguments: McpStartArguments = decode_mcp_arguments(arguments)?;
+                start_run_value(
+                    &self.state_dir,
+                    &RunArgs {
+                        primary_thread: Some(arguments.primary_thread),
+                        reviewer_thread: Some(arguments.reviewer_thread),
+                        integration_branch: arguments.integration_branch,
+                        test_commands: arguments.test_commands,
+                        json: true,
+                    },
+                )
+                .await
+            }
+            "consensus_status" => {
+                let arguments: McpStatusArguments = decode_mcp_arguments(arguments)?;
+                daemon_request_value(
+                    &self.state_dir,
+                    DaemonRequest::Status {
+                        run_id: arguments.run_id,
+                    },
+                )
+                .await
+            }
+            "consensus_resume" => {
+                let arguments: McpRunIdArguments = decode_mcp_arguments(arguments)?;
+                daemon_request_value(
+                    &self.state_dir,
+                    DaemonRequest::Resume {
+                        run_id: arguments.run_id,
+                    },
+                )
+                .await
+            }
+            "consensus_cancel" => {
+                let arguments: McpRunIdArguments = decode_mcp_arguments(arguments)?;
+                daemon_request_value(
+                    &self.state_dir,
+                    DaemonRequest::Cancel {
+                        run_id: arguments.run_id,
+                    },
+                )
+                .await
+            }
+            _ => {
+                return Err(BackendError::new(
+                    "UNKNOWN_TOOL",
+                    format!("unsupported MCP tool {tool}"),
+                ));
+            }
+        };
+        result.map_err(cli_backend_error)
+    }
+}
+
+#[derive(Deserialize)]
+struct McpStartArguments {
+    primary_thread: String,
+    reviewer_thread: String,
+    integration_branch: Option<String>,
+    #[serde(default)]
+    test_commands: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct McpStatusArguments {
+    run_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct McpRunIdArguments {
+    run_id: String,
+}
+
+fn decode_mcp_arguments<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, BackendError> {
+    serde_json::from_value(value)
+        .map_err(|error| BackendError::new("INVALID_ARGUMENTS", error.to_string()))
+}
+
+fn cli_backend_error(error: CliError) -> BackendError {
+    BackendError::new(error.code(), error.message())
 }
 
 async fn connect_app_server() -> Result<CodexAppServer, CliError> {

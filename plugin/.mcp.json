@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "worktreeMergeConsensus": {
+      "title": "Worktree Merge Consensus",
+      "description": "Coordinate reviewed integration across two existing Codex tasks.",
+      "cwd": ".",
+      "command": "codex-consensus",
+      "args": [
+        "mcp-server"
+      ]
+    }
+  }
+}
