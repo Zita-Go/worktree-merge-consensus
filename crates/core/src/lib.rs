@@ -1,5 +1,6 @@
 //! Shared protocol and coordination primitives for worktree merge consensus.
 
+pub mod git;
 pub mod hash;
 pub mod prompts;
 pub mod protocol;
