@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/worktree-merge-consensus/worktree-merge-consensus/schemas/protocol-v1.json",
+  "title": "Worktree Merge Consensus Protocol v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "run_id",
+    "message_type",
+    "phase",
+    "round",
+    "primary_sha",
+    "reviewer_sha",
+    "plan_revision",
+    "integration_branch",
+    "integration_sha",
+    "reason_code",
+    "payload"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "worktree-merge-consensus/v1"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "message_type": {
+      "enum": [
+        "CONTRACT_READY",
+        "CHANGES_REQUIRED",
+        "APPROVED_PLAN",
+        "INTEGRATION_READY",
+        "APPROVED_RESULT",
+        "BLOCKED"
+      ]
+    },
+    "phase": {
+      "enum": [
+        "DISCOVER",
+        "FREEZE",
+        "CONTRACT",
+        "PLAN_REVIEW",
+        "INTEGRATE",
+        "VERIFY",
+        "RESULT_REVIEW",
+        "ACCEPTED",
+        "BLOCKED",
+        "PAUSED_USER_ACTION",
+        "CANCELLED"
+      ]
+    },
+    "round": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "primary_sha": {
+      "$ref": "#/$defs/sha"
+    },
+    "reviewer_sha": {
+      "$ref": "#/$defs/sha"
+    },
+    "plan_revision": {
+      "oneOf": [
+        { "type": "integer", "minimum": 1 },
+        { "type": "null" }
+      ]
+    },
+    "integration_branch": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "null" }
+      ]
+    },
+    "integration_sha": {
+      "oneOf": [
+        { "$ref": "#/$defs/sha" },
+        { "type": "null" }
+      ]
+    },
+    "reason_code": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "null" }
+      ]
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{40}$"
+    }
+  }
+}

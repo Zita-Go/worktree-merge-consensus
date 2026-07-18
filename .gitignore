@@ -1,0 +1,9 @@
+/target/
+/.codex-consensus/
+*.db
+*.db-shm
+*.db-wal
+*.sock
+.DS_Store
+*.swp
+*~
