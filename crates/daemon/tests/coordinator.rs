@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -445,6 +445,35 @@ async fn permission_during_integration_resumes_the_authorized_in_progress_turn()
 }
 
 #[tokio::test]
+async fn recovered_integration_turn_skips_the_first_action_frozen_head_check() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(FakeAppServer::deferred(
+        conflict_free_replies(),
+        5,
+        DeferMode::Permission,
+    ));
+    let safety = Arc::new(InProgressRecoverySafety::default());
+    let coordinator =
+        Coordinator::new(Arc::clone(&app), store, Arc::clone(&safety), fast_options());
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let paused = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+
+    safety
+        .integration_branch_active
+        .store(true, Ordering::SeqCst);
+    app.complete_deferred_turns();
+    let result = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Accepted);
+    assert!(safety.in_progress_calls.load(Ordering::SeqCst) >= 2);
+}
+
+#[tokio::test]
 async fn cancellation_stops_new_turns_without_interrupting_the_active_turn() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -614,6 +643,48 @@ impl RepositorySafety for RecordingSafety {
             .lock()
             .unwrap()
             .push(format!("result:{branch}:{sha}"));
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct InProgressRecoverySafety {
+    integration_branch_active: AtomicBool,
+    in_progress_calls: AtomicUsize,
+}
+
+impl RepositorySafety for InProgressRecoverySafety {
+    fn verify_frozen(&self, _facts: &RunFacts) -> Result<(), SafetyError> {
+        if self.integration_branch_active.load(Ordering::SeqCst) {
+            Err(SafetyError::new(
+                "SOURCE_DRIFT",
+                "primary HEAD has moved to the authorized integration branch",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn verify_branch_absent(&self, _facts: &RunFacts, _branch: &str) -> Result<(), SafetyError> {
+        Ok(())
+    }
+
+    fn verify_integration_in_progress(
+        &self,
+        _facts: &RunFacts,
+        _target_branch: &str,
+    ) -> Result<(), SafetyError> {
+        self.in_progress_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn verify_integration(
+        &self,
+        _facts: &RunFacts,
+        _branch: &str,
+        _sha: &str,
+        _changed_files: &[PathBuf],
+    ) -> Result<(), SafetyError> {
         Ok(())
     }
 }

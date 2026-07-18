@@ -556,7 +556,6 @@ where
                 &changed_files(&integration.message.payload)?,
             )?;
         } else {
-            self.safety.verify_frozen(&state.facts)?;
             if action == NextAction::RequestPrimaryIntegration {
                 let branch = state.target_integration_branch.as_deref().ok_or_else(|| {
                     CoordinatorError::operational(
@@ -564,7 +563,16 @@ where
                         "target integration branch is missing",
                     )
                 })?;
-                self.safety.verify_branch_absent(&state.facts, branch)?;
+                let run_id = state.facts.run_id.to_string();
+                if self.store.pending_send(&run_id)?.is_some() {
+                    self.safety
+                        .verify_integration_in_progress(&state.facts, branch)?;
+                } else {
+                    self.safety.verify_frozen(&state.facts)?;
+                    self.safety.verify_branch_absent(&state.facts, branch)?;
+                }
+            } else {
+                self.safety.verify_frozen(&state.facts)?;
             }
         }
         Ok(())

@@ -305,6 +305,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "consensus-e2e"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "consensus-fake-app-server"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "consensus-mcp-server"
 version = "0.1.0"
 dependencies = [

@@ -5,6 +5,8 @@ members = [
     "crates/core",
     "crates/daemon",
     "crates/mcp-server",
+    "tests/e2e",
+    "tests/fake-app-server",
 ]
 resolver = "3"
 
