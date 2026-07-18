@@ -1,0 +1,193 @@
+# Worktree Merge Consensus
+
+[English](README.md)
+
+`worktree-merge-consensus` 用于协调两个已有 Codex 任务之间经过复核的临时集成。
+两个任务的实现分别提交在同一 Git 仓库的不同 worktree 中：主修任务负责提出方案并写入
+集成结果，复核任务负责确认自己的功能与实现细节没有丢失。流程最终停在一个新的本地分支。
+
+> **实验性依赖：** 本项目使用实验性的 Codex App Server 协议。v0.1 仅支持
+> Codex CLI `>=0.144.5, <0.145.0`，超出适配范围就失败关闭。真实集成前请先运行
+> `codex-consensus doctor`。
+
+## 安全模型
+
+协调器在复核前冻结两个任务 ID、worktree 路径、源引用与 commit SHA，然后强制执行：
+
+1. 两个任务分别陈述行为、约束、测试及必须保留的实现细节。
+2. 主修任务提出覆盖方案。
+3. 复核任务持续提出具体缺口，直到认可某一个精确的方案版本。
+4. 只有主修任务可以创建唯一的新本地集成分支并组合两个冻结提交。
+5. 执行指定测试并检查 Git 不变量。
+6. 复核任务审计精确的集成 SHA；只有该 SHA 能被记录为验收通过。
+
+`same-host`（同机）和 `no-push`（不推送）是刻意设定的边界。两个任务、两个
+worktree、Git common directory、Codex App Server 和协调器必须位于同一台机器。
+协调器不会 push、创建 PR、合并到已有分支、更新任一源引用、rebase、reset、删除或
+清理 worktree。
+
+精确边界见 [v1 协议](docs/protocol-v1.md)、
+[兼容性策略](docs/compatibility.md)与[安全策略](SECURITY.md)。
+
+## 前置条件
+
+- 发布二进制支持 Linux x86_64 与 ARM64；其他 Unix 系统只可视为开发环境。
+- `PATH` 中可以调用 Git 与 Codex CLI。
+- Codex CLI `>=0.144.5, <0.145.0`，且提供所需的实验性 App Server 方法。
+- 同一台机器、同一本地账号下恰好选择两个已有 Codex 任务。
+- 两个任务使用同一 Git common directory 下不同的 worktree。
+- 两边实现均已提交且 worktree 均干净。源 HEAD 可以处于 detached 状态，因为身份按 SHA
+  冻结；结果仍会创建在新的 attached 本地分支上。
+
+## 安装独立二进制
+
+从本仓库的 GitHub Release 下载 `x86_64-unknown-linux-gnu` 或
+`aarch64-unknown-linux-gnu` 产物，并同时下载 `SHA256SUMS`。解压前校验全部产物：
+
+```bash
+sha256sum --check SHA256SUMS
+tar -xzf codex-consensus-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+install -m 0755 codex-consensus-v0.1.0-x86_64-unknown-linux-gnu/codex-consensus ~/.local/bin/codex-consensus
+```
+
+Release 还包含 CycloneDX JSON SBOM 与 Codex 插件包。在真实 Codex 验收记录完成之前，
+v0.1 会标记为预发布；参见[真实环境冒烟测试记录](docs/real-codex-smoke-test.md)。
+
+也可以从源码安装：
+
+```bash
+cargo install --locked --path crates/cli
+```
+
+构建 workspace 需要 Rust 1.85 或更高版本。
+
+## 安装 Codex 插件
+
+先确保 `codex-consensus` 已位于 `PATH`。在源码 checkout 中，将本仓库注册为本地
+marketplace，再安装插件：
+
+```bash
+codex plugin marketplace add /absolute/path/to/worktree-merge-consensus
+codex plugin add worktree-merge-consensus@worktree-merge-consensus
+```
+
+如果下载的是插件压缩包，请先解压，再注册包含
+`.agents/plugins/marketplace.json` 的目录。安装后重启 Codex。在 Codex 任务中调用
+`$worktree-merge-consensus`；Skill 只通过六个 MCP 工具启动和控制持久协调器，不会引入
+第三个 agent 代为转发复核对话。
+
+## 使用 CLI
+
+先检查环境并列出本机任务：
+
+```bash
+codex-consensus doctor
+codex-consensus threads list
+```
+
+交互选择主修与复核任务：
+
+```bash
+codex-consensus run
+```
+
+脚本调用必须同时给出两个任务 ID。分支参数可省略；省略时协调器保留
+`consensus/<run-id>`。每个 `--test` 都是主修集成时必须执行并报告的命令。
+
+```bash
+codex-consensus run \
+  --primary-thread THREAD_ID_A \
+  --reviewer-thread THREAD_ID_B \
+  --integration-branch consensus/my-integration \
+  --test "cargo test --workspace" \
+  --json
+```
+
+查看单个运行或全部运行：
+
+```bash
+codex-consensus status RUN_ID
+codex-consensus status --json
+```
+
+若运行因明确的用户操作暂停，请先解决显示的原因，再恢复同一个持久运行：
+
+```bash
+codex-consensus resume RUN_ID
+```
+
+确认要终止时再取消。取消不会回滚或删除已经存在的 Git 状态，包括已创建的集成分支：
+
+```bash
+codex-consensus cancel RUN_ID
+```
+
+六个公开命令组是 `codex-consensus doctor`、`codex-consensus threads`、
+`codex-consensus run`、`codex-consensus status`、`codex-consensus resume` 和
+`codex-consensus cancel`。需要自动化时，可在 `--help` 标明的操作叶节点使用稳定 JSON
+输出。
+
+## 状态与恢复
+
+| 状态 | 含义 |
+| --- | --- |
+| `RUNNING` | daemon 可以发送下一个确定性步骤。 |
+| `WAITING_THREAD` | 某个选中任务已有进行中的 turn。 |
+| `PAUSED_USER_ACTION` | 需要权限确认或其他外部操作；解决原因后再恢复。 |
+| `ACCEPTED` | 测试、源引用不变量和复核认可均对应精确的集成 SHA。 |
+| `BLOCKED` | 协议、安全、轮次上限或无进展条件使运行终止。 |
+| `CANCELLED` | 用户取消；已有 Git 状态保持不变。 |
+| `INCOMPATIBLE_CODEX` | Codex 超出已验证适配范围，或缺少必要方法。 |
+
+daemon 在每次 App Server turn 前先把待发送动作写入 SQLite。进程重启后，下一次 CLI 或
+MCP 请求会重新连接 daemon，并以幂等方式恢复可继续的工作。不要对 `BLOCKED` 或
+`CANCELLED` 运行调用 `resume`。
+
+## 状态、日志与隐私
+
+默认状态目录为 `$XDG_STATE_HOME/codex-consensus`；若未设置 `XDG_STATE_HOME`，则为
+`~/.local/state/codex-consensus`。可用全局参数 `--state-dir DIR` 覆盖。目录中包含：
+
+- `state.db`：SQLite 运行状态、冻结的 Git 事实、状态迁移和待发送元数据；
+- `daemon.sock`：权限为 `0600` 的本地 Unix socket；
+- `daemon.pid`：托管 daemon 的进程 ID。
+
+目录权限为 `0700`。数据库不保存任务会话全文或生成的 prompt；Codex 自身仍会在两个
+选中任务的历史中保留消息。敏感 App Server 诊断会被脱敏。托管 daemon 默认不创建持久
+日志文件，因此 CLI 输出、Codex 任务历史和 `status --json` 是运行记录。
+
+## 故障排查
+
+- `INCOMPATIBLE_CODEX`：检查 `codex --version`，再与
+  [兼容窗口](docs/compatibility.md)对照；未知版本不会被猜测为兼容。
+- `DIRTY_WORKTREE`：新运行前先提交或有意识地处理两个源 worktree 的本地修改。
+- `INTEGRATION_BRANCH_EXISTS`：选择新的分支名；协调器不会复用或删除已有分支。
+- `SOURCE_DRIFT`：冻结的源引用或 worktree HEAD 已变化；检查 Git 后用新的提交重新运行。
+- `PERMISSION_REQUIRED`：在对应 Codex 任务中处理权限请求，再执行
+  `codex-consensus resume RUN_ID`。
+- `NO_PROGRESS` 或 `ROUND_LIMIT`：这是终止状态；应修订契约后新建运行，不能强行验收。
+- daemon 启动失败：检查状态目录所有权与权限；程序不会自动删除文件，必要时通过
+  `--state-dir` 隔离后重试 `codex-consensus doctor`。
+
+## v0.1 不做什么
+
+- 跨机器、跨账号通信。
+- 单次运行协调两个以上任务。
+- 绕过普通 App Server 历史去读取另一个任务的隐藏上下文。
+- push、创建 PR、合并到目标分支，或替用户决定部署基线。
+- 复用、覆盖、删除或清理源分支、集成分支及 worktree。
+- 替代安全敏感或生产发布中的人工复核。
+
+## 开发
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+bash tests/docs.sh
+```
+
+端到端测试使用进程级 fake App Server 与一次性 Git 仓库；真实 Codex 发布仍须完成单独的
+[冒烟测试清单](docs/real-codex-smoke-test.md)。
+
+本项目采用 [Apache License 2.0](LICENSE)。

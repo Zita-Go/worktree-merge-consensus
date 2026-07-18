@@ -1,0 +1,133 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            printf 'release tag must be semantic: %s\n' "$GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+
+      - name: Install Rust target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add "${{ matrix.target }}"
+
+      - name: Build locked release binary
+        run: cargo build --locked --release --target "${{ matrix.target }}" -p codex-consensus
+
+      - name: Package binary and documentation
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          asset="codex-consensus-${GITHUB_REF_NAME}-${TARGET}"
+          mkdir -p "dist/${asset}"
+          install -m 0755 "target/${TARGET}/release/codex-consensus" "dist/${asset}/codex-consensus"
+          cp README.md README.zh-CN.md SECURITY.md LICENSE "dist/${asset}/"
+          cp -R docs "dist/${asset}/docs"
+          tar -C dist -czf "dist/${asset}.tar.gz" "${asset}"
+          tar -tzf "dist/${asset}.tar.gz" >/dev/null
+
+      - name: Upload immutable build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish-prerelease:
+    name: Verify and publish pre-release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Download architecture artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: linux-*
+          path: dist
+          merge-multiple: true
+
+      - name: Package Codex plugin
+        shell: bash
+        run: |
+          package="worktree-merge-consensus-plugin-${GITHUB_REF_NAME}"
+          mkdir -p "dist/${package}/.agents/plugins"
+          cp .agents/plugins/marketplace.json "dist/${package}/.agents/plugins/marketplace.json"
+          cp -R plugin "dist/${package}/plugin"
+          cp README.md README.zh-CN.md SECURITY.md LICENSE "dist/${package}/"
+          tar -C dist -czf "dist/${package}.tar.gz" "${package}"
+          rm -rf "dist/${package}"
+
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: dist/worktree-merge-consensus-${{ github.ref_name }}.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Create and verify SHA-256 checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum *.tar.gz *.cdx.json > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          for archive in *.tar.gz; do
+            tar -tzf "$archive" >/dev/null
+          done
+          python3 - <<'PY'
+          import glob
+          import json
+
+          for path in glob.glob("*.cdx.json"):
+              with open(path, encoding="utf-8") as handle:
+                  document = json.load(handle)
+              if document.get("bomFormat") != "CycloneDX":
+                  raise SystemExit(f"invalid CycloneDX SBOM: {path}")
+          PY
+
+      - name: Publish verified pre-release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --verify-tag
+          --generate-notes
+          --prerelease
+          --title "Worktree Merge Consensus $GITHUB_REF_NAME"
