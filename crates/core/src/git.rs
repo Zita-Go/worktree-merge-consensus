@@ -41,6 +41,23 @@ pub struct WorktreeSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeIssue {
+    pub code: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisteredWorktree {
+    pub worktree: PathBuf,
+    pub common_dir: PathBuf,
+    pub head_sha: Option<String>,
+    pub source_ref: Option<SourceRef>,
+    pub clean: Option<bool>,
+    pub bare: bool,
+    pub issue: Option<WorktreeIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntegrationSnapshot {
     pub worktree: WorktreeSnapshot,
     pub branch: String,
@@ -80,13 +97,13 @@ pub fn verify_same_repository(
 ) -> Result<(), GitSafetyError> {
     if primary.common_dir != reviewer.common_dir {
         return Err(git_error(
-            "DIFFERENT_REPOSITORY",
+            "REPOSITORY_MISMATCH",
             "selected worktrees do not share one canonical Git common directory",
         ));
     }
     if primary.worktree == reviewer.worktree {
         return Err(git_error(
-            "SAME_WORKTREE",
+            "DUPLICATE_WORKTREE",
             "primary and reviewer must use different canonical worktree paths",
         ));
     }
@@ -219,6 +236,153 @@ pub fn verify_reported_changed_files(
 }
 
 impl GitInspector {
+    pub fn list_registered_worktrees(
+        &self,
+        repository: impl AsRef<Path>,
+    ) -> Result<Vec<RegisteredWorktree>, GitSafetyError> {
+        let anchor = self.inspect_worktree(repository)?;
+        let output = self.git_output(
+            &anchor.worktree,
+            ["worktree", "list", "--porcelain", "-z"].map(OsString::from),
+        )?;
+        let records = parse_worktree_records(&output.stdout)?;
+        let mut entries = records
+            .into_iter()
+            .map(|record| {
+                if record.bare {
+                    let source_ref = record.source_ref();
+                    return RegisteredWorktree {
+                        worktree: record.worktree,
+                        common_dir: anchor.common_dir.clone(),
+                        head_sha: record.head_sha,
+                        source_ref,
+                        clean: None,
+                        bare: true,
+                        issue: None,
+                    };
+                }
+                match self.inspect_worktree(&record.worktree) {
+                    Ok(snapshot) if snapshot.common_dir == anchor.common_dir => {
+                        RegisteredWorktree {
+                            worktree: snapshot.worktree,
+                            common_dir: snapshot.common_dir,
+                            head_sha: Some(snapshot.head_sha),
+                            source_ref: snapshot.source_ref,
+                            clean: Some(snapshot.clean),
+                            bare: false,
+                            issue: None,
+                        }
+                    }
+                    Ok(snapshot) => RegisteredWorktree {
+                        worktree: snapshot.worktree,
+                        common_dir: snapshot.common_dir,
+                        head_sha: Some(snapshot.head_sha),
+                        source_ref: snapshot.source_ref,
+                        clean: Some(snapshot.clean),
+                        bare: false,
+                        issue: Some(WorktreeIssue {
+                            code: "REPOSITORY_MISMATCH".into(),
+                            detail: "registered entry resolved to a different Git common directory"
+                                .into(),
+                        }),
+                    },
+                    Err(error) => RegisteredWorktree {
+                        worktree: record.worktree,
+                        common_dir: anchor.common_dir.clone(),
+                        head_sha: None,
+                        source_ref: None,
+                        clean: None,
+                        bare: false,
+                        issue: Some(WorktreeIssue {
+                            code: "WORKTREE_UNAVAILABLE".into(),
+                            detail: error.detail().to_owned(),
+                        }),
+                    },
+                }
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.worktree.cmp(&right.worktree));
+        Ok(entries)
+    }
+
+    pub fn inspect_registered_worktree(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<WorktreeSnapshot, GitSafetyError> {
+        let path = path.as_ref();
+        if !path.is_absolute() {
+            return Err(git_error(
+                "UNREGISTERED_WORKTREE",
+                "selected worktree path must be absolute",
+            ));
+        }
+        let canonical = fs::canonicalize(path).map_err(|error| {
+            git_error(
+                "WORKTREE_UNAVAILABLE",
+                format!(
+                    "cannot access selected worktree {}: {error}",
+                    path.display()
+                ),
+            )
+        })?;
+        let snapshot = self.inspect_worktree(&canonical).map_err(|error| {
+            git_error(
+                "UNREGISTERED_WORKTREE",
+                format!(
+                    "selected path {} is not a registered worktree root: {}",
+                    path.display(),
+                    error.detail()
+                ),
+            )
+        })?;
+        if canonical != snapshot.worktree {
+            return Err(git_error(
+                "UNREGISTERED_WORKTREE",
+                "selected path must be the registered worktree root, not a path inside it",
+            ));
+        }
+        let registered = self.list_registered_worktrees(&snapshot.worktree)?;
+        let entry = registered
+            .iter()
+            .find(|entry| entry.worktree == snapshot.worktree)
+            .ok_or_else(|| {
+                git_error(
+                    "UNREGISTERED_WORKTREE",
+                    "selected path is not present in git worktree list --porcelain",
+                )
+            })?;
+        if entry.bare {
+            return Err(git_error(
+                "UNREGISTERED_WORKTREE",
+                "bare repositories cannot be selected as source worktrees",
+            ));
+        }
+        if let Some(issue) = &entry.issue {
+            return Err(git_error(
+                "WORKTREE_UNAVAILABLE",
+                format!("registered worktree is unavailable: {}", issue.detail),
+            ));
+        }
+        Ok(snapshot)
+    }
+
+    pub fn inspect_registered_pair(
+        &self,
+        primary: impl AsRef<Path>,
+        reviewer: impl AsRef<Path>,
+    ) -> Result<(WorktreeSnapshot, WorktreeSnapshot), GitSafetyError> {
+        let primary = self.inspect_registered_worktree(primary)?;
+        let reviewer = self.inspect_registered_worktree(reviewer)?;
+        verify_same_repository(&primary, &reviewer)?;
+        if !primary.clean || !reviewer.clean {
+            return Err(git_error(
+                "DIRTY_WORKTREE",
+                "both selected source worktrees must be clean",
+            ));
+        }
+        Ok((primary, reviewer))
+    }
+
     pub fn materialize_verification_clone(
         &self,
         source_worktree: impl AsRef<Path>,
@@ -737,6 +901,7 @@ fn validate_read_only_command(args: &[OsString]) -> Result<(), GitSafetyError> {
     let allowed = match utf8.as_slice() {
         ["rev-parse", "--show-toplevel" | "--git-common-dir" | "HEAD"] => true,
         ["status", "--porcelain=v1", "-z"] => true,
+        ["worktree", "list", "--porcelain", "-z"] => true,
         ["symbolic-ref", "--quiet", "HEAD"] => true,
         ["show-ref", "--verify", "--hash", reference]
         | ["show-ref", "--verify", "--quiet", reference] => reference.starts_with("refs/heads/"),
@@ -757,6 +922,83 @@ fn validate_read_only_command(args: &[OsString]) -> Result<(), GitSafetyError> {
             "GitInspector refused a command outside its read-only allowlist",
         ))
     }
+}
+
+#[derive(Debug, Default)]
+struct WorktreeRecord {
+    worktree: PathBuf,
+    head_sha: Option<String>,
+    branch: Option<String>,
+    bare: bool,
+}
+
+impl WorktreeRecord {
+    fn source_ref(&self) -> Option<SourceRef> {
+        Some(SourceRef {
+            name: self.branch.clone()?,
+            target_sha: self.head_sha.clone()?,
+        })
+    }
+}
+
+fn parse_worktree_records(bytes: &[u8]) -> Result<Vec<WorktreeRecord>, GitSafetyError> {
+    let mut records = Vec::new();
+    let mut current = WorktreeRecord::default();
+    let mut has_fields = false;
+    for raw in bytes.split(|byte| *byte == 0) {
+        if raw.is_empty() {
+            if has_fields {
+                validate_worktree_record(&current)?;
+                records.push(std::mem::take(&mut current));
+                has_fields = false;
+            }
+            continue;
+        }
+        has_fields = true;
+        let field = std::str::from_utf8(raw).map_err(|error| {
+            git_error(
+                "INVALID_GIT_OUTPUT",
+                format!("git worktree list returned non-UTF-8 data: {error}"),
+            )
+        })?;
+        if let Some(path) = field.strip_prefix("worktree ") {
+            current.worktree = PathBuf::from(path);
+        } else if let Some(head) = field.strip_prefix("HEAD ") {
+            validate_sha(head, "registered worktree HEAD")?;
+            current.head_sha = Some(head.to_owned());
+        } else if let Some(branch) = field.strip_prefix("branch ") {
+            if !branch.starts_with("refs/heads/") {
+                return Err(git_error(
+                    "INVALID_GIT_OUTPUT",
+                    "registered worktree branch is not a local branch ref",
+                ));
+            }
+            current.branch = Some(branch.to_owned());
+        } else if field == "bare" {
+            current.bare = true;
+        }
+    }
+    if has_fields {
+        validate_worktree_record(&current)?;
+        records.push(current);
+    }
+    Ok(records)
+}
+
+fn validate_worktree_record(record: &WorktreeRecord) -> Result<(), GitSafetyError> {
+    if !record.worktree.is_absolute() {
+        return Err(git_error(
+            "INVALID_GIT_OUTPUT",
+            "git worktree list returned a missing or non-absolute worktree path",
+        ));
+    }
+    if record.head_sha.is_none() && !record.bare {
+        return Err(git_error(
+            "INVALID_GIT_OUTPUT",
+            "git worktree list returned a non-bare entry without HEAD",
+        ));
+    }
+    Ok(())
 }
 
 fn canonical_git_path(base: &Path, raw: &str) -> Result<PathBuf, GitSafetyError> {

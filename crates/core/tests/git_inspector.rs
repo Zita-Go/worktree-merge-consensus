@@ -27,6 +27,134 @@ fn two_worktrees_share_objects_without_sharing_paths() {
 }
 
 #[test]
+fn registered_worktree_discovery_reports_canonical_git_facts() {
+    let fixture = GitFixture::two_worktrees();
+    let inspector = GitInspector::default();
+    let reviewer = inspector.inspect_worktree(fixture.reviewer()).unwrap();
+
+    let entries = inspector
+        .list_registered_worktrees(fixture.primary())
+        .unwrap();
+
+    let discovered = entries
+        .iter()
+        .find(|entry| entry.worktree == reviewer.worktree)
+        .expect("reviewer worktree must remain discoverable");
+    assert_eq!(discovered.common_dir, reviewer.common_dir);
+    assert_eq!(
+        discovered.head_sha.as_deref(),
+        Some(reviewer.head_sha.as_str())
+    );
+    assert_eq!(discovered.source_ref, reviewer.source_ref);
+    assert_eq!(discovered.clean, Some(true));
+    assert!(!discovered.bare);
+    assert_eq!(discovered.issue, None);
+}
+
+#[test]
+fn unavailable_registered_worktree_is_reported_without_pruning() {
+    let fixture = GitFixture::two_worktrees();
+    let declared = fixture.reviewer().to_path_buf();
+    let registered = fs::canonicalize(declared.parent().unwrap())
+        .unwrap()
+        .join(declared.file_name().unwrap());
+    let moved = declared.with_extension("temporarily-moved");
+    fs::rename(&declared, moved).unwrap();
+
+    let entries = GitInspector::default()
+        .list_registered_worktrees(fixture.primary())
+        .unwrap();
+
+    let unavailable = entries
+        .iter()
+        .find(|entry| entry.worktree == registered)
+        .expect("stale registered worktree must be reported");
+    assert_eq!(unavailable.head_sha, None);
+    assert_eq!(unavailable.clean, None);
+    assert_eq!(
+        unavailable.issue.as_ref().map(|issue| issue.code.as_str()),
+        Some("WORKTREE_UNAVAILABLE")
+    );
+}
+
+#[test]
+fn explicit_registered_pair_is_clean_distinct_and_in_one_repository() {
+    let fixture = GitFixture::two_worktrees();
+
+    let (primary, reviewer) = GitInspector::default()
+        .inspect_registered_pair(fixture.primary(), fixture.reviewer())
+        .unwrap();
+
+    assert_ne!(primary.worktree, reviewer.worktree);
+    assert_eq!(primary.common_dir, reviewer.common_dir);
+    assert!(primary.clean);
+    assert!(reviewer.clean);
+}
+
+#[test]
+fn explicit_pair_rejects_duplicate_worktree() {
+    let fixture = GitFixture::two_worktrees();
+
+    let error = GitInspector::default()
+        .inspect_registered_pair(fixture.primary(), fixture.primary())
+        .unwrap_err();
+
+    assert_eq!(error.code(), "DUPLICATE_WORKTREE");
+}
+
+#[test]
+fn explicit_pair_rejects_relative_and_non_root_paths() {
+    let fixture = GitFixture::two_worktrees();
+    let nested = fixture.primary().join("nested");
+    fs::create_dir(&nested).unwrap();
+    let inspector = GitInspector::default();
+
+    let relative = inspector
+        .inspect_registered_worktree(Path::new("relative-worktree"))
+        .unwrap_err();
+    let nested = inspector.inspect_registered_worktree(nested).unwrap_err();
+
+    assert_eq!(relative.code(), "UNREGISTERED_WORKTREE");
+    assert_eq!(nested.code(), "UNREGISTERED_WORKTREE");
+}
+
+#[test]
+fn explicit_pair_rejects_missing_worktree() {
+    let fixture = GitFixture::two_worktrees();
+    let missing = fixture.primary().parent().unwrap().join("missing-worktree");
+
+    let error = GitInspector::default()
+        .inspect_registered_pair(fixture.primary(), missing)
+        .unwrap_err();
+
+    assert_eq!(error.code(), "WORKTREE_UNAVAILABLE");
+}
+
+#[test]
+fn explicit_pair_rejects_dirty_source() {
+    let fixture = GitFixture::two_worktrees();
+    fs::write(fixture.reviewer().join("dirty.txt"), "dirty\n").unwrap();
+
+    let error = GitInspector::default()
+        .inspect_registered_pair(fixture.primary(), fixture.reviewer())
+        .unwrap_err();
+
+    assert_eq!(error.code(), "DIRTY_WORKTREE");
+}
+
+#[test]
+fn explicit_pair_accepts_detached_source() {
+    let fixture = GitFixture::two_worktrees();
+    fixture.git(fixture.reviewer(), &["switch", "--detach"]);
+
+    let (_, reviewer) = GitInspector::default()
+        .inspect_registered_pair(fixture.primary(), fixture.reviewer())
+        .unwrap();
+
+    assert_eq!(reviewer.source_ref, None);
+}
+
+#[test]
 fn dirty_source_worktree_is_rejected() {
     let fixture = GitFixture::two_worktrees();
     let clean_primary = inspect_worktree(fixture.primary()).unwrap();
@@ -65,7 +193,19 @@ fn separate_repositories_are_rejected() {
 
     let error = verify_same_repository(&primary, &unrelated).unwrap_err();
 
-    assert_eq!(error.code(), "DIFFERENT_REPOSITORY");
+    assert_eq!(error.code(), "REPOSITORY_MISMATCH");
+}
+
+#[test]
+fn explicit_pair_rejects_separate_repositories() {
+    let first = GitFixture::two_worktrees();
+    let second = GitFixture::two_worktrees();
+
+    let error = GitInspector::default()
+        .inspect_registered_pair(first.primary(), second.reviewer())
+        .unwrap_err();
+
+    assert_eq!(error.code(), "REPOSITORY_MISMATCH");
 }
 
 #[test]
