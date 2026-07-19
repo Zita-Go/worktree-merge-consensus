@@ -8,7 +8,7 @@ use app_server_client::{CodexAppServer, client::ConnectOptions};
 async fn compatible_binary_starts_daemon_then_proxy_and_initializes() {
     let temp = tempfile::tempdir().unwrap();
     let log = temp.path().join("calls.log");
-    let binary = fake_codex(temp.path(), &log, "0.144.5");
+    let binary = fake_codex(temp.path(), &log, "0.144.1");
 
     let client = CodexAppServer::connect(ConnectOptions {
         codex_binary: binary,
@@ -29,7 +29,7 @@ async fn compatible_binary_starts_daemon_then_proxy_and_initializes() {
 async fn incompatible_binary_never_starts_daemon_or_proxy() {
     let temp = tempfile::tempdir().unwrap();
     let log = temp.path().join("calls.log");
-    let binary = fake_codex(temp.path(), &log, "0.144.1");
+    let binary = fake_codex(temp.path(), &log, "0.144.0");
 
     let error = CodexAppServer::connect(ConnectOptions {
         codex_binary: binary,

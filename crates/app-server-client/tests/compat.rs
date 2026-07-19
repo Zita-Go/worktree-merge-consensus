@@ -2,11 +2,11 @@ use app_server_client::compat::{REQUIRED_METHODS, check_compatibility};
 use serde_json::Value;
 
 #[test]
-fn first_supported_codex_version_passes() {
-    let report = check_compatibility("codex-cli 0.144.5");
+fn minimum_supported_codex_version_passes() {
+    let report = check_compatibility("codex-cli 0.144.1");
 
     assert!(report.compatible);
-    assert_eq!(report.installed_version.as_deref(), Some("0.144.5"));
+    assert_eq!(report.installed_version.as_deref(), Some("0.144.1"));
 }
 
 #[test]
@@ -32,16 +32,24 @@ fn malformed_version_output_fails_closed() {
 }
 
 #[test]
-fn unknown_future_protocol_version_fails_closed() {
-    let report = check_compatibility("codex-cli 0.145.0");
+fn future_codex_versions_have_no_version_ceiling() {
+    let report = check_compatibility("codex-cli 1.0.0");
+
+    assert!(report.compatible);
+    assert_eq!(report.installed_version.as_deref(), Some("1.0.0"));
+}
+
+#[test]
+fn version_below_minimum_is_rejected() {
+    let report = check_compatibility("codex-cli 0.144.0");
 
     assert!(!report.compatible);
     assert_eq!(report.reason_code.as_deref(), Some("INCOMPATIBLE_CODEX"));
 }
 
 #[test]
-fn older_patch_release_is_not_silently_accepted() {
-    let report = check_compatibility("codex-cli 0.144.1");
+fn prerelease_of_minimum_version_is_rejected() {
+    let report = check_compatibility("codex-cli 0.144.1-beta.1");
 
     assert!(!report.compatible);
     assert_eq!(report.reason_code.as_deref(), Some("INCOMPATIBLE_CODEX"));
@@ -50,11 +58,13 @@ fn older_patch_release_is_not_silently_accepted() {
 #[test]
 fn pinned_fixture_distinguishes_integration_and_verification_write_roots() {
     let fixture: Value = serde_json::from_str(include_str!(
-        "../../../schemas/app-server/0.144.5-methods.json"
+        "../../../schemas/app-server/supported-methods.json"
     ))
     .unwrap();
     let profiles = &fixture["turnPolicyProfiles"];
 
+    assert_eq!(fixture["minimumVersion"], "0.144.1");
+    assert!(fixture.get("maximumVersionExclusive").is_none());
     assert_eq!(
         profiles["primaryIntegrationWorkspaceWrite"]["writableRootRoles"],
         serde_json::json!(["primaryWorktree", "sourceGitCommonDirectory"])

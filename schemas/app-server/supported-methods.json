@@ -1,9 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "fixtureVersion": "0.144.5",
+  "fixtureVersion": "minimum-0.144.1",
   "protocolFamily": "codex-app-server/experimental-v2",
-  "minimumVersion": "0.144.5",
-  "maximumVersionExclusive": "0.145.0",
+  "minimumVersion": "0.144.1",
   "requiredMethods": [
     "initialize",
     "thread/list",

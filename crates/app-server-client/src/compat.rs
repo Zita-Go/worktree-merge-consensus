@@ -10,7 +10,8 @@ pub const REQUIRED_METHODS: &[&str] = &[
     "turn/start",
 ];
 
-const METHOD_FIXTURE: &str = include_str!("../../../schemas/app-server/0.144.5-methods.json");
+const METHOD_FIXTURE: &str =
+    include_str!("../../../schemas/app-server/supported-methods.json");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompatibilityReport {
@@ -25,7 +26,6 @@ pub struct CompatibilityReport {
 #[serde(rename_all = "camelCase")]
 struct MethodFixture {
     minimum_version: String,
-    maximum_version_exclusive: String,
     required_methods: Vec<String>,
 }
 
@@ -60,17 +60,6 @@ pub fn check_compatibility(version_output: &str) -> CompatibilityReport {
             );
         }
     };
-    let maximum = match Version::parse(&fixture.maximum_version_exclusive) {
-        Ok(version) => version,
-        Err(error) => {
-            return incompatible(
-                Some(&installed),
-                vec![],
-                format!("invalid maximum version in compatibility fixture: {error}"),
-            );
-        }
-    };
-
     if fixture.required_methods != REQUIRED_METHODS {
         return incompatible(
             Some(&installed),
@@ -78,13 +67,11 @@ pub fn check_compatibility(version_output: &str) -> CompatibilityReport {
             "checked-in method fixture does not match the compiled protocol contract".to_owned(),
         );
     }
-    if installed < minimum || installed >= maximum {
+    if installed < minimum {
         return incompatible(
             Some(&installed),
             vec![],
-            format!(
-                "supported range is >= {minimum} and < {maximum}; unknown protocols fail closed"
-            ),
+            format!("supported versions are >= {minimum}"),
         );
     }
 
