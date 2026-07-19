@@ -1,22 +1,30 @@
 use std::{
     collections::VecDeque,
-    fmt,
+    fmt, io,
     path::PathBuf,
+    pin::Pin,
     process::Stdio,
     sync::{Arc, Mutex as StdMutex},
+    task::{Context, Poll},
+    time::Duration,
 };
 
 use async_trait::async_trait;
+use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    process::{Child, Command},
+    io::{
+        AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf, duplex, split,
+    },
+    process::{Child, ChildStdin, ChildStdout, Command},
     sync::Mutex,
+    time::timeout,
 };
+use tokio_tungstenite::{WebSocketStream, client_async, tungstenite::Message};
 
 use crate::{
-    compat::{check_compatibility, parse_codex_version},
+    compat::{check_compatibility, parse_managed_user_agent},
     transport::{JsonRpcTransport, RpcError},
     types::{
         AppEvent, InitializeInfo, ThreadDetail, ThreadPage, ThreadSummary, TurnExecutionPolicy,
@@ -25,6 +33,7 @@ use crate::{
 };
 
 const STDERR_TAIL_LINES: usize = 40;
+const PROXY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct ConnectOptions {
@@ -161,14 +170,36 @@ impl CodexAppServer {
 
         let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
         tokio::spawn(drain_stderr(stderr, Arc::clone(&stderr_tail)));
+        let proxy_stream = ProxyStdio { stdin, stdout };
+        let (websocket, _) = timeout(
+            PROXY_HANDSHAKE_TIMEOUT,
+            client_async("ws://localhost/", proxy_stream),
+        )
+        .await
+        .map_err(|_| {
+            AppServerError::Process(
+                "timed out waiting for App Server proxy WebSocket handshake".to_owned(),
+            )
+        })?
+        .map_err(|error| {
+            AppServerError::Process(format!(
+                "App Server proxy WebSocket handshake failed: {error}"
+            ))
+        })?;
         let client = Self {
-            transport: JsonRpcTransport::new(stdout, stdin),
+            transport: websocket_json_transport(websocket),
             process: Some(Arc::new(ProcessGuard {
                 child: StdMutex::new(child),
             })),
             stderr_tail,
         };
-        let initialized = client.initialize().await?;
+        let initialized = timeout(PROXY_HANDSHAKE_TIMEOUT, client.initialize())
+            .await
+            .map_err(|_| {
+                AppServerError::Process(
+                    "timed out waiting for App Server initialize response".to_owned(),
+                )
+            })??;
         let installed_version = compatibility.installed_version.as_deref().ok_or_else(|| {
             AppServerError::IncompatibleCodex(
                 "compatible version report omitted the installed version".to_owned(),
@@ -193,6 +224,134 @@ impl CodexAppServer {
                 "required App Server method {method} is unavailable: {message}"
             ))),
             Err(error) => Err(error.into()),
+        }
+    }
+}
+
+struct ProxyStdio {
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+}
+
+impl AsyncRead for ProxyStdio {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stdout).poll_read(context, buffer)
+    }
+}
+
+impl AsyncWrite for ProxyStdio {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stdin).poll_write(context, buffer)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stdin).poll_flush(context)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stdin).poll_shutdown(context)
+    }
+}
+
+fn websocket_json_transport(websocket: WebSocketStream<ProxyStdio>) -> JsonRpcTransport {
+    let (transport_side, bridge_side) = duplex(256 * 1024);
+    let (transport_reader, transport_writer) = split(transport_side);
+    let (bridge_reader, bridge_writer) = split(bridge_side);
+    let transport = JsonRpcTransport::new(transport_reader, transport_writer);
+    tokio::spawn(run_websocket_bridge(
+        websocket,
+        bridge_reader,
+        bridge_writer,
+        transport.clone(),
+    ));
+    transport
+}
+
+async fn run_websocket_bridge(
+    websocket: WebSocketStream<ProxyStdio>,
+    bridge_reader: tokio::io::ReadHalf<tokio::io::DuplexStream>,
+    mut bridge_writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    transport: JsonRpcTransport,
+) {
+    let (mut websocket_writer, mut websocket_reader) = websocket.split();
+    let mut outgoing = BufReader::new(bridge_reader).lines();
+    loop {
+        tokio::select! {
+            line = outgoing.next_line() => {
+                match line {
+                    Ok(Some(line)) => {
+                        if let Err(error) = websocket_writer.send(Message::Text(line)).await {
+                            transport.close_with_error(RpcError::Io(format!(
+                                "App Server proxy WebSocket send failed: {error}"
+                            ))).await;
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        transport.close_with_error(RpcError::Io(format!(
+                            "App Server proxy outbound bridge failed: {error}"
+                        ))).await;
+                        break;
+                    }
+                }
+            }
+            message = websocket_reader.next() => {
+                match message {
+                    Some(Ok(Message::Text(text))) => {
+                        let delivered = async {
+                            bridge_writer.write_all(text.as_bytes()).await?;
+                            bridge_writer.write_all(b"\n").await?;
+                            bridge_writer.flush().await
+                        }.await;
+                        if let Err(error) = delivered {
+                            transport.close_with_error(RpcError::Io(format!(
+                                "App Server proxy inbound bridge failed: {error}"
+                            ))).await;
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        if let Err(error) = websocket_writer.send(Message::Pong(payload)).await {
+                            transport.close_with_error(RpcError::Io(format!(
+                                "App Server proxy WebSocket pong failed: {error}"
+                            ))).await;
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Close(_))) | None => {
+                        transport.close_with_error(RpcError::Closed).await;
+                        break;
+                    }
+                    Some(Err(error)) => {
+                        transport.close_with_error(RpcError::Protocol(format!(
+                            "App Server proxy WebSocket failed: {error}"
+                        ))).await;
+                        break;
+                    }
+                    Some(Ok(Message::Binary(_))) => {
+                        transport.close_with_error(RpcError::Protocol(
+                            "App Server proxy sent an unsupported binary WebSocket frame".to_owned(),
+                        )).await;
+                        break;
+                    }
+                    Some(Ok(Message::Frame(_))) => {
+                        transport.close_with_error(RpcError::Protocol(
+                            "App Server proxy sent an unsupported raw WebSocket frame".to_owned(),
+                        )).await;
+                        break;
+                    }
+                }
+            }
         }
     }
 }
@@ -424,9 +583,9 @@ fn validate_managed_identity(
     info: &InitializeInfo,
     installed_version: &str,
 ) -> Result<(), AppServerError> {
-    let managed_version = parse_codex_version(&info.user_agent).ok_or_else(|| {
+    let managed_version = parse_managed_user_agent(&info.user_agent).ok_or_else(|| {
         AppServerError::IncompatibleCodex(
-            "initialize.userAgent does not contain an exact codex-cli version".to_owned(),
+            "initialize.userAgent is not a recognized managed Codex identity".to_owned(),
         )
     })?;
     if managed_version.to_string() != installed_version {

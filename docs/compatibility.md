@@ -10,15 +10,18 @@ Version 0.1 has one checked Codex adapter:
 | App Server family | `codex-app-server/experimental-v2` |
 | Consensus protocol | `worktree-merge-consensus/v1` |
 | Release OS/architecture | Linux x86_64 and Linux ARM64 |
-| Local transport | Unix domain socket |
+| Local transport | WebSocket over the managed Unix domain socket |
 | Rust MSRV | 1.85 |
 
 The executable parses an exact semantic version from `codex --version` before
-starting `codex app-server daemon start` and `codex app-server proxy`. An
-unparseable version or a version below `0.144.1` returns
-`INCOMPATIBLE_CODEX`. There is no maximum-version gate. The managed App Server
-identity, required methods, and typed response shapes are still validated at
-runtime and fail closed on mismatch.
+starting `codex app-server daemon start` and `codex app-server proxy`. It then
+performs the standard WebSocket HTTP Upgrade through the byte proxy and carries
+one App Server message per text frame; the managed Unix-socket transport is not
+the JSONL transport used by `codex app-server --stdio`. An unparseable version,
+a proxy-handshake or initialization timeout, or a version below `0.144.1` fails
+closed. There is no maximum-version gate. The managed App Server identity,
+required methods, and typed response shapes are still validated at runtime and
+fail closed on mismatch.
 
 ## Required App Server contract
 
@@ -43,10 +46,11 @@ evidence.
 
 The `initialize` response is decoded against the pinned required fields
 `codexHome`, `platformFamily`, `platformOs`, and `userAgent`. `codexHome` must
-be absolute, the platform family must be Unix, and the App Server user-agent
-version must exactly match `codex --version`. The initialization shape used by
-this adapter does not advertise a method inventory; therefore each required
-operational method is invoked through a typed adapter, and JSON-RPC
+be absolute, the platform family must be Unix, and the exact semantic version
+in either the managed `codex-cli/...` or `Codex Desktop/...` user-agent form
+must match `codex --version`. The initialization shape used by this adapter
+does not advertise a method inventory; therefore each required operational
+method is invoked through a typed adapter, and JSON-RPC
 `Method not found` or a shape mismatch fails closed when reached. The checked-in
 fixture is an adapter contract, not a claim that the server echoed the client's
 own method list.

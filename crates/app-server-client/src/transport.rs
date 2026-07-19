@@ -12,6 +12,11 @@ use crate::types::AppEvent;
 type PendingResult = Result<Value, RpcError>;
 type PendingMap = HashMap<u64, oneshot::Sender<PendingResult>>;
 
+struct RequestState {
+    pending: PendingMap,
+    closed: Option<RpcError>,
+}
+
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum RpcError {
     #[error("JSON-RPC remote error {code}: {message}")]
@@ -35,7 +40,7 @@ pub struct JsonRpcTransport {
 
 struct Inner {
     writer: Mutex<Box<dyn AsyncWrite + Send + Unpin>>,
-    pending: Mutex<PendingMap>,
+    requests: Mutex<RequestState>,
     events_tx: mpsc::UnboundedSender<AppEvent>,
     events_rx: Mutex<mpsc::UnboundedReceiver<AppEvent>>,
     next_id: std::sync::atomic::AtomicU64,
@@ -50,7 +55,10 @@ impl JsonRpcTransport {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(Inner {
             writer: Mutex::new(Box::new(writer)),
-            pending: Mutex::new(HashMap::new()),
+            requests: Mutex::new(RequestState {
+                pending: HashMap::new(),
+                closed: None,
+            }),
             events_tx,
             events_rx: Mutex::new(events_rx),
             next_id: std::sync::atomic::AtomicU64::new(1),
@@ -70,7 +78,13 @@ impl JsonRpcTransport {
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
-        self.inner.pending.lock().await.insert(id, sender);
+        {
+            let mut requests = self.inner.requests.lock().await;
+            if let Some(error) = &requests.closed {
+                return Err(error.clone());
+            }
+            requests.pending.insert(id, sender);
+        }
 
         let message = json!({
             "jsonrpc": "2.0",
@@ -79,7 +93,7 @@ impl JsonRpcTransport {
             "params": params,
         });
         if let Err(error) = self.write_message(&message).await {
-            self.inner.pending.lock().await.remove(&id);
+            self.inner.requests.lock().await.pending.remove(&id);
             return Err(error);
         }
 
@@ -116,6 +130,15 @@ impl JsonRpcTransport {
 
     pub async fn next_event(&self) -> Option<AppEvent> {
         self.inner.events_rx.lock().await.recv().await
+    }
+
+    pub(crate) async fn close_with_error(&self, error: RpcError) {
+        fail_pending(&self.inner, error.clone()).await;
+        let _ = self.inner.events_tx.send(AppEvent {
+            id: None,
+            method: "transport/error".to_owned(),
+            params: json!({"message": error.to_string()}),
+        });
     }
 
     async fn write_message(&self, message: &Value) -> Result<(), RpcError> {
@@ -191,7 +214,7 @@ async fn dispatch_message(inner: &Arc<Inner>, message: Value) {
         });
         return;
     };
-    let Some(sender) = inner.pending.lock().await.remove(&id) else {
+    let Some(sender) = inner.requests.lock().await.pending.remove(&id) else {
         return;
     };
 
@@ -216,7 +239,13 @@ async fn dispatch_message(inner: &Arc<Inner>, message: Value) {
 }
 
 async fn fail_pending(inner: &Arc<Inner>, error: RpcError) {
-    let pending = std::mem::take(&mut *inner.pending.lock().await);
+    let pending = {
+        let mut requests = inner.requests.lock().await;
+        if requests.closed.is_none() {
+            requests.closed = Some(error.clone());
+        }
+        std::mem::take(&mut requests.pending)
+    };
     for (_, sender) in pending {
         let _ = sender.send(Err(error.clone()));
     }

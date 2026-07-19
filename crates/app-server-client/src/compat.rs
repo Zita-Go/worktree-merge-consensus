@@ -105,6 +105,21 @@ pub fn parse_codex_version(output: &str) -> Option<Version> {
         .and_then(|version| Version::parse(version.trim_start_matches('v')).ok())
 }
 
+pub fn parse_managed_user_agent(user_agent: &str) -> Option<Version> {
+    if user_agent.trim() != user_agent {
+        return None;
+    }
+    if let Some(version) = user_agent.strip_prefix("codex-cli/") {
+        return Version::parse(version.trim_start_matches('v')).ok();
+    }
+    let desktop = user_agent.strip_prefix("Codex Desktop/")?;
+    let (version, metadata) = desktop.split_once(' ')?;
+    if !metadata.starts_with('(') || !metadata.ends_with(')') || metadata.contains(['\r', '\n']) {
+        return None;
+    }
+    Version::parse(version.trim_start_matches('v')).ok()
+}
+
 fn incompatible(
     installed: Option<&Version>,
     missing_methods: Vec<String>,

@@ -2,13 +2,14 @@ use std::{
     collections::HashMap,
     env,
     fs::{self, OpenOptions},
-    io::{self, BufRead, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitCode, Output},
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tungstenite::{Message, accept};
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -59,10 +60,17 @@ fn serve_proxy() -> Result<(), String> {
         .map_err(|error| format!("create fake state: {error}"))?;
     append_event(&config, "proxy started")?;
 
-    let stdin = io::stdin();
-    let mut stdout = io::stdout().lock();
-    for line in stdin.lock().lines() {
-        let line = line.map_err(|error| format!("read request: {error}"))?;
+    let mut websocket =
+        accept(StdioStream).map_err(|error| format!("accept websocket upgrade: {error}"))?;
+    loop {
+        let message = match websocket.read() {
+            Ok(message) => message,
+            Err(tungstenite::Error::ConnectionClosed) => break,
+            Err(error) => return Err(format!("read websocket request: {error}")),
+        };
+        let Message::Text(line) = message else {
+            continue;
+        };
         let request: Value =
             serde_json::from_str(&line).map_err(|error| format!("parse request: {error}"))?;
         let Some(id) = request.get("id").cloned() else {
@@ -75,18 +83,38 @@ fn serve_proxy() -> Result<(), String> {
         let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
         let result = handle_request(&config, method, &params)?;
         let response = json!({"jsonrpc": "2.0", "id": id, "result": result});
-        writeln!(
-            stdout,
-            "{}",
-            serde_json::to_string(&response).map_err(|error| error.to_string())?
-        )
-        .map_err(|error| format!("write response: {error}"))?;
-        stdout
-            .flush()
-            .map_err(|error| format!("flush response: {error}"))?;
-        emit_post_response(&config, method, &result, &mut stdout)?;
+        websocket
+            .send(Message::Text(
+                serde_json::to_string(&response).map_err(|error| error.to_string())?,
+            ))
+            .map_err(|error| format!("write response: {error}"))?;
+        for notification in emit_post_response(&config, method, &result)? {
+            websocket
+                .send(Message::Text(
+                    serde_json::to_string(&notification).map_err(|error| error.to_string())?,
+                ))
+                .map_err(|error| format!("write notification: {error}"))?;
+        }
     }
     Ok(())
+}
+
+struct StdioStream;
+
+impl Read for StdioStream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        io::stdin().read(buffer)
+    }
+}
+
+impl Write for StdioStream {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        io::stdout().write(buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        io::stdout().flush()
+    }
 }
 
 fn handle_request(config: &Config, method: &str, params: &Value) -> Result<Value, String> {
@@ -708,14 +736,10 @@ fn pending_path(config: &Config, turn_id: &str) -> PathBuf {
         .join(format!("pending-{turn_id}.json"))
 }
 
-fn emit_post_response(
-    config: &Config,
-    method: &str,
-    result: &Value,
-    writer: &mut impl Write,
-) -> Result<(), String> {
+fn emit_post_response(config: &Config, method: &str, result: &Value) -> Result<Vec<Value>, String> {
+    let mut notifications = Vec::new();
     if method != "turn/start" {
-        return Ok(());
+        return Ok(notifications);
     }
     let turn_id = result
         .get("turn")
@@ -724,15 +748,12 @@ fn emit_post_response(
         .ok_or_else(|| "turn/start response is missing turn id".to_owned())?;
     let status = result["turn"]["status"].as_str().unwrap_or_default();
     if config.scenario == "user_input_pause" && status == "inProgress" {
-        write_json_line(
-            writer,
-            &json!({
-                "jsonrpc": "2.0",
-                "id": 900,
-                "method": "item/tool/requestUserInput",
-                "params": {"threadId": config.primary_thread, "turnId": turn_id}
-            }),
-        )?;
+        notifications.push(json!({
+            "jsonrpc": "2.0",
+            "id": 900,
+            "method": "item/tool/requestUserInput",
+            "params": {"threadId": config.primary_thread, "turnId": turn_id}
+        }));
         append_event(config, "user input notification")?;
     }
     if config.scenario == "duplicate_notification" && turn_id == "turn-1" {
@@ -742,22 +763,11 @@ fn emit_post_response(
             "params": {"threadId": config.primary_thread, "turnId": turn_id}
         });
         for _ in 0..2 {
-            write_json_line(writer, &notification)?;
+            notifications.push(notification.clone());
             append_event(config, "duplicate notification")?;
         }
     }
-    writer
-        .flush()
-        .map_err(|error| format!("flush notification: {error}"))
-}
-
-fn write_json_line(writer: &mut impl Write, value: &Value) -> Result<(), String> {
-    writeln!(
-        writer,
-        "{}",
-        serde_json::to_string(value).map_err(|error| error.to_string())?
-    )
-    .map_err(|error| format!("write notification: {error}"))
+    Ok(notifications)
 }
 
 fn in_progress_turn(turn_id: &str, prompt: &str) -> Value {

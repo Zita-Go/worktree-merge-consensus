@@ -1,4 +1,4 @@
-use app_server_client::compat::{REQUIRED_METHODS, check_compatibility};
+use app_server_client::compat::{REQUIRED_METHODS, check_compatibility, parse_managed_user_agent};
 use serde_json::Value;
 
 #[test]
@@ -7,6 +7,18 @@ fn minimum_supported_codex_version_passes() {
 
     assert!(report.compatible);
     assert_eq!(report.installed_version.as_deref(), Some("0.144.1"));
+}
+
+#[test]
+fn desktop_app_server_user_agent_exposes_exact_codex_version() {
+    let version = parse_managed_user_agent(
+        "Codex Desktop/0.144.1 (Mac OS 26.2.0; arm64) dumb (worktree-merge-consensus; 0.1.0)",
+    );
+
+    assert_eq!(
+        version.map(|version| version.to_string()).as_deref(),
+        Some("0.144.1")
+    );
 }
 
 #[test]

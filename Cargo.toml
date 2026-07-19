@@ -21,6 +21,7 @@ async-trait = "0.1"
 assert_cmd = "2.0"
 clap = { version = "4.5", features = ["derive"] }
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
+futures-util = "0.3"
 hex = "0.4.3"
 jsonschema = { version = "0.30.0", default-features = false }
 predicates = "3.1"
@@ -33,4 +34,6 @@ shell-words = "1.1"
 thiserror = "2.0"
 tempfile = "3.20"
 tokio = { version = "1.44", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 uuid = { version = "1.0", features = ["serde", "v4"] }
