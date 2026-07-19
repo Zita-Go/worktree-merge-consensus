@@ -9,9 +9,9 @@ reviewer task checks that its own behavior and implementation details survive.
 The result stops on a new local branch.
 
 > **Experimental dependency:** this project uses the experimental Codex App
-> Server protocol. Version 0.1 supports Codex CLI `>=0.144.5, <0.145.0` and
-> fails closed outside that adapter range. Run `codex-consensus doctor` before
-> starting a real integration.
+> Server protocol. Version 0.1 supports Codex CLI `>=0.144.1`. App Server
+> identity, required-method, and response-shape mismatches still fail closed.
+> Run `codex-consensus doctor` before starting a real integration.
 
 ## Safety model
 
@@ -58,8 +58,7 @@ for the exact boundaries.
 - Linux x86_64 or ARM64 for released binaries. Other Unix systems may work for
   development but are not release targets in v0.1.
 - Git and Codex CLI available in `PATH`.
-- Codex CLI `>=0.144.5, <0.145.0` with the required experimental App Server
-  methods.
+- Codex CLI `>=0.144.1` with the required experimental App Server methods.
 - Exactly two existing Codex tasks under the same local account and host.
 - Each task has a different worktree in the same Git common directory.
 - Both implementations are committed and both worktrees are clean. A detached
@@ -206,8 +205,8 @@ persistent log file by default, so CLI output, Codex task history, and
 ## Troubleshooting
 
 - `INCOMPATIBLE_CODEX`: confirm `codex --version`, then compare it with
-  [the compatibility window](docs/compatibility.md). Unknown versions are not
-  guessed compatible.
+  [the compatibility policy](docs/compatibility.md). Versions below `0.144.1`,
+  malformed output, and App Server identity/method/shape mismatches fail closed.
 - `INCOMPATIBLE_STATE`: a prerelease database has a missing or unknown run-state
   schema. Preserve it for audit and use a fresh `--state-dir`; do not edit
   SQLite manually.

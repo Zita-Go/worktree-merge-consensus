@@ -6,7 +6,7 @@ Version 0.1 has one checked Codex adapter:
 
 | Component | Supported value |
 | --- | --- |
-| Codex CLI | `>=0.144.5, <0.145.0` |
+| Codex CLI | `>=0.144.1` |
 | App Server family | `codex-app-server/experimental-v2` |
 | Consensus protocol | `worktree-merge-consensus/v1` |
 | Release OS/architecture | Linux x86_64 and Linux ARM64 |
@@ -15,13 +15,15 @@ Version 0.1 has one checked Codex adapter:
 
 The executable parses an exact semantic version from `codex --version` before
 starting `codex app-server daemon start` and `codex app-server proxy`. An
-unparseable version, a version below `0.144.5`, or a version at or above
-`0.145.0` returns `INCOMPATIBLE_CODEX`. There is no optimistic fallback.
+unparseable version or a version below `0.144.1` returns
+`INCOMPATIBLE_CODEX`. There is no maximum-version gate. The managed App Server
+identity, required methods, and typed response shapes are still validated at
+runtime and fail closed on mismatch.
 
 ## Required App Server contract
 
 The adapter is based on
-[`schemas/app-server/0.144.5-methods.json`](../schemas/app-server/0.144.5-methods.json)
+[`schemas/app-server/supported-methods.json`](../schemas/app-server/supported-methods.json)
 and requires these JSON-RPC methods:
 
 - `initialize`
@@ -42,11 +44,12 @@ evidence.
 The `initialize` response is decoded against the pinned required fields
 `codexHome`, `platformFamily`, `platformOs`, and `userAgent`. `codexHome` must
 be absolute, the platform family must be Unix, and the App Server user-agent
-version must exactly match `codex --version`. Codex 0.144.5 does not advertise
-a method inventory in `initialize`; therefore each required operational method
-is invoked through a typed adapter, and JSON-RPC `Method not found` or a shape
-mismatch fails closed when reached. The version fixture is an adapter contract,
-not a claim that the server echoed the client's own method list.
+version must exactly match `codex --version`. The initialization shape used by
+this adapter does not advertise a method inventory; therefore each required
+operational method is invoked through a typed adapter, and JSON-RPC
+`Method not found` or a shape mismatch fails closed when reached. The checked-in
+fixture is an adapter contract, not a claim that the server echoed the client's
+own method list.
 
 Every `turn/start` also carries the pinned role-specific cwd, runtime workspace
 roots, approval policy, an empty `environments` array that disables inherited
@@ -55,10 +58,10 @@ review, offline primary integration with source worktree/Git-common writes, or
 offline primary verification with only the isolated clone writable. The
 integration profile disables temporary-directory writes; the verification
 profile permits temporary build artifacts but has no source Git-common root.
-These fields are part of the 0.144.5 shape fixture and are process-tested; an
-adapter upgrade must revalidate their semantics and the `commandExecution`
-item fields (`id`, `command`, `cwd`, `status`, `exitCode`, and optional `source`)
-before widening the supported range.
+These fields are part of the checked-in `supported-methods` fixture and are
+process-tested. An adapter change must revalidate their semantics and the
+`commandExecution` item fields (`id`, `command`, `cwd`, `status`, `exitCode`,
+and optional `source`) before changing the runtime contract.
 
 ## Persisted-state compatibility
 
@@ -79,27 +82,27 @@ All participants must satisfy the `same-host` constraint. Cross-host App Server
 connections, Git transfer, SSH relays, and shared-network SQLite files are not
 supported.
 
-## Upgrade procedure
+## Adapter maintenance procedure
 
-Supporting a new Codex minor line requires all of the following:
+The version gate admits new Codex versions automatically. If a new version
+changes an App Server method, shape, or behavior used by this project, adapting
+to that change requires all of the following:
 
-1. Capture a new checked-in method/shape fixture; do not widen the old maximum
-   before verifying the protocol.
-2. Add compatibility tests for the first accepted version, the previous
-   boundary, malformed version output, handshake identity, turn policy shapes,
-   and operational method failures.
+1. Update the checked-in method/shape fixture in a reviewed change.
+2. Add boundary, malformed-version, handshake-identity, turn-policy-shape, and
+   operational-method regression tests for the observed behavior.
 3. Run the complete fake-App-Server E2E suite, including recovery, duplicated
    notifications, cancellation, plan revision, result revision, Git drift,
    exact-SHA isolated verification, and authoritative command-item evidence.
 4. Complete and record
    [the real Codex smoke test](real-codex-smoke-test.md) on both release
    architectures where practical.
-5. Widen or add the adapter gate in a reviewed release.
-
-Unknown future versions continue to fail closed until this process is complete.
+5. Publish the adapter change only after its runtime checks fail closed on the
+   incompatible shape.
 
 ## Version support
 
 The project follows pre-1.0 semantic versioning: a minor release may change
 unstable CLI or plugin details, but published protocol identifiers remain
-explicit. Patch releases do not silently widen the Codex adapter range.
+explicit. The minimum supported Codex version remains an explicit release
+contract even though there is no maximum-version gate.

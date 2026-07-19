@@ -2,15 +2,16 @@
 
 ## Release gate
 
-No disposable real-Codex run has yet been recorded for Codex CLI `0.144.5`.
-Automated tests use a process-level fake App Server and do not satisfy this
-gate. Therefore v0.1 release automation creates a GitHub **pre-release** until a
-maintainer completes this checklist and commits the evidence below.
+No disposable real-Codex run has yet been recorded for the supported Codex CLI
+range beginning at `0.144.1`. Automated tests use a process-level fake App
+Server and do not satisfy this gate. Therefore v0.1 release automation creates
+a GitHub **pre-release** until a maintainer completes this checklist and commits
+the evidence below.
 
 ## Required environment
 
 - A supported Linux x86_64 or ARM64 host.
-- Exact `codex --version` output within `>=0.144.5, <0.145.0`.
+- Exact `codex --version` output satisfying `>=0.144.1`.
 - One disposable local Git repository with two committed branches checked out
   in two distinct worktrees.
 - Two existing Codex tasks, each attached to one of those worktrees under the

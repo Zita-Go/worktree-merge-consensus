@@ -3,8 +3,8 @@
 ## Supported versions
 
 Only the latest published 0.1.x release receives security fixes while the
-project remains pre-1.0. The supported Codex adapter range is narrower and is
-listed in [the compatibility policy](docs/compatibility.md).
+project remains pre-1.0. The supported Codex version floor and runtime adapter
+checks are listed in [the compatibility policy](docs/compatibility.md).
 
 ## Report a vulnerability privately
 
@@ -47,7 +47,8 @@ secrets, and local filesystem identities.
   is bound to a canonical payload hash. Verification evidence is derived from
   successful App Server `commandExecution` items, including the exact turn,
   item, command, cwd, and exit code; model-reported evidence cannot replace it.
-  Unknown Codex protocol or persisted-state versions fail closed.
+  Malformed or missing required App Server responses and unknown persisted-state
+  versions fail closed.
 - Sensitive App Server diagnostics containing authorization, key, secret, or
   token markers are redacted; home-directory prefixes are shortened.
 

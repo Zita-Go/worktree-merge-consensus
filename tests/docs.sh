@@ -17,6 +17,7 @@ required_files=(
   docs/protocol-v1.md
   docs/compatibility.md
   docs/real-codex-smoke-test.md
+  schemas/app-server/supported-methods.json
   .github/workflows/ci.yml
   .github/workflows/release.yml
   tests/release.sh
@@ -34,13 +35,23 @@ for readme in README.md README.zh-CN.md; do
       fail "$readme does not document codex-consensus $command"
   done
 
-  for marker in same-host 0.144.5 no-push SHA256SUMS; do
+  for marker in same-host '>=0.144.1' no-push SHA256SUMS; do
     grep -Fq "$marker" "$readme" || fail "$readme is missing the $marker contract"
   done
 
   grep -Fq 'codex plugin marketplace add' "$readme" ||
     fail "$readme is missing marketplace registration"
   grep -Fq 'codex plugin add' "$readme" || fail "$readme is missing plugin installation"
+done
+
+[[ ! -e schemas/app-server/0.144.5-methods.json ]] ||
+  fail 'obsolete version-specific App Server fixture still exists'
+
+for document in README.md README.zh-CN.md docs/compatibility.md docs/real-codex-smoke-test.md; do
+  grep -Fq '>=0.144.1' "$document" || fail "$document is missing the Codex version floor"
+  if grep -Fq '<0.145.0' "$document"; then
+    fail "$document still documents an obsolete Codex version ceiling"
+  fi
 done
 
 help_bin="${CODEX_CONSENSUS_BIN:-target/debug/codex-consensus}"
