@@ -10,6 +10,7 @@ fn help_lists_public_commands_but_not_internal_modes() {
         .success()
         .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("threads"))
+        .stdout(predicate::str::contains("worktrees"))
         .stdout(predicate::str::contains("run"))
         .stdout(predicate::str::contains("status"))
         .stdout(predicate::str::contains("resume"))
@@ -29,6 +30,55 @@ fn run_requires_both_thread_flags_together() {
         .stderr(predicate::str::contains(
             "--primary-thread and --reviewer-thread must be provided together",
         ));
+}
+
+#[test]
+fn run_requires_both_worktree_flags_together() {
+    Command::cargo_bin("codex-consensus")
+        .unwrap()
+        .args(["run", "--primary-worktree", "/repo/primary"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--primary-worktree and --reviewer-worktree must be provided together",
+        ));
+}
+
+#[test]
+fn json_run_requires_all_four_binding_flags() {
+    let output = Command::cargo_bin("codex-consensus")
+        .unwrap()
+        .args([
+            "run",
+            "--primary-thread",
+            "primary",
+            "--reviewer-thread",
+            "reviewer",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stderr.is_empty());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "INVALID_ARGUMENTS");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("all four binding flags")
+    );
+}
+
+#[test]
+fn worktree_discovery_help_requires_repository_anchor() {
+    Command::cargo_bin("codex-consensus")
+        .unwrap()
+        .args(["worktrees", "list", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--repository"));
 }
 
 #[test]

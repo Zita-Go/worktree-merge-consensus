@@ -26,6 +26,19 @@ impl Cli {
                     "--primary-thread and --reviewer-thread must be provided together".into(),
                 );
             }
+            let primary_worktree = arguments.primary_worktree.is_some();
+            let reviewer_worktree = arguments.reviewer_worktree.is_some();
+            if primary_worktree != reviewer_worktree {
+                return Err(
+                    "--primary-worktree and --reviewer-worktree must be provided together".into(),
+                );
+            }
+            if arguments.json && !(primary && reviewer && primary_worktree && reviewer_worktree) {
+                return Err(
+                    "JSON runs require all four binding flags: --primary-thread, --reviewer-thread, --primary-worktree, and --reviewer-worktree"
+                        .into(),
+                );
+            }
         }
         Ok(())
     }
@@ -35,6 +48,9 @@ impl Cli {
             Command::Doctor(arguments) => arguments.json,
             Command::Threads(arguments) => match &arguments.command {
                 ThreadsCommand::List(output) => output.json,
+            },
+            Command::Worktrees(arguments) => match &arguments.command {
+                WorktreesCommand::List(output) => output.json,
             },
             Command::Run(arguments) => arguments.json,
             Command::Status(arguments) => arguments.json,
@@ -50,6 +66,8 @@ pub enum Command {
     Doctor(OutputArgs),
     /// List locally available Codex tasks.
     Threads(ThreadsArgs),
+    /// List registered Git worktrees in one repository.
+    Worktrees(WorktreesArgs),
     /// Start a reviewed integration run.
     Run(RunArgs),
     /// Show one run or all runs.
@@ -84,11 +102,38 @@ pub enum ThreadsCommand {
 }
 
 #[derive(Debug, Args)]
+pub struct WorktreesArgs {
+    #[command(subcommand)]
+    pub command: WorktreesCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorktreesCommand {
+    /// List registered worktrees without pruning or repairing them.
+    List(WorktreeListArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WorktreeListArgs {
+    #[arg(long, value_name = "PATH")]
+    pub repository: PathBuf,
+    /// Emit exactly one JSON value.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct RunArgs {
     #[arg(long, value_name = "THREAD_ID")]
     pub primary_thread: Option<String>,
     #[arg(long, value_name = "THREAD_ID")]
     pub reviewer_thread: Option<String>,
+    #[arg(long, value_name = "PATH")]
+    pub primary_worktree: Option<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    pub reviewer_worktree: Option<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    pub repository: Option<PathBuf>,
     #[arg(long, value_name = "NEW_BRANCH")]
     pub integration_branch: Option<String>,
     #[arg(long = "test", value_name = "COMMAND")]

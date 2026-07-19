@@ -11,11 +11,11 @@ use std::{
 };
 
 use app_server_client::{AppServer, CodexAppServer, ConnectOptions, ThreadDetail, ThreadSummary};
-use args::{Cli, Command, DaemonCommand, RunArgs, ThreadsCommand};
+use args::{Cli, Command, DaemonCommand, RunArgs, ThreadsCommand, WorktreesCommand};
 use async_trait::async_trait;
 use clap::Parser;
 use consensus_core::{
-    git::{GitInspector, WorktreeSnapshot, verify_frozen_sources, verify_same_repository},
+    git::{GitInspector, WorktreeSnapshot, verify_frozen_sources},
     state::{RunFacts, RunState},
 };
 use consensus_daemon::{
@@ -27,7 +27,10 @@ use consensus_daemon::{
 };
 use consensus_mcp_server::{BackendError, ToolBackend, serve_stdio};
 use output::{emit_error, emit_serializable, emit_value, human_json};
-use select::{SelectedTasks, TerminalTaskSelector, select_tasks, task_label};
+use select::{
+    SelectedBinding, SelectedTasks, TaskSelector, TerminalTaskSelector, confirm_binding,
+    select_tasks, select_worktrees, task_label, worktree_label,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -85,6 +88,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Doctor(arguments) => doctor(&state_dir, arguments.json).await,
         Command::Threads(arguments) => match arguments.command {
             ThreadsCommand::List(output) => list_threads(output.json).await,
+        },
+        Command::Worktrees(arguments) => match arguments.command {
+            WorktreesCommand::List(arguments) => {
+                list_worktrees(&arguments.repository, arguments.json)
+            }
         },
         Command::Run(arguments) => start_run(&state_dir, arguments).await,
         Command::Status(arguments) => {
@@ -197,6 +205,28 @@ async fn local_threads() -> Result<Vec<ThreadSummary>, CliError> {
     all_threads(&app).await
 }
 
+fn list_worktrees(repository: &Path, json_output: bool) -> Result<(), CliError> {
+    let value = list_worktrees_value(repository)?;
+    emit_value(&value, json_output, || {
+        value["worktrees"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| serde_json::from_value(entry.clone()).ok())
+            .map(|entry| worktree_label(&entry))
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
+    Ok(())
+}
+
+fn list_worktrees_value(repository: &Path) -> Result<Value, CliError> {
+    let worktrees = GitInspector::default()
+        .list_registered_worktrees(repository)
+        .map_err(git_error)?;
+    Ok(json!({"worktrees": worktrees}))
+}
+
 async fn start_run(state_dir: &Path, arguments: RunArgs) -> Result<(), CliError> {
     let json_output = arguments.json;
     let result = start_run_value(state_dir, &arguments).await?;
@@ -213,27 +243,54 @@ async fn start_run(state_dir: &Path, arguments: RunArgs) -> Result<(), CliError>
 }
 
 async fn start_run_value(state_dir: &Path, arguments: &RunArgs) -> Result<Value, CliError> {
+    let has_tasks = arguments.primary_thread.is_some() && arguments.reviewer_thread.is_some();
+    let has_worktrees =
+        arguments.primary_worktree.is_some() && arguments.reviewer_worktree.is_some();
+    let needs_interaction = !has_tasks || !has_worktrees;
+    if needs_interaction && (arguments.json || !std::io::stdin().is_terminal()) {
+        return Err(CliError::new(
+            "INTERACTIVE_TTY_REQUIRED",
+            "non-interactive runs require all four binding flags: --primary-thread, --reviewer-thread, --primary-worktree, and --reviewer-worktree",
+        ));
+    }
+
     let app = connect_app_server().await?;
-    let selected = if let (Some(primary), Some(reviewer)) = (
+    let mut selector = TerminalTaskSelector::default();
+    let tasks = if let (Some(primary), Some(reviewer)) = (
         arguments.primary_thread.as_deref(),
         arguments.reviewer_thread.as_deref(),
     ) {
-        select_explicit(&app, primary, reviewer).await?
+        select_explicit_tasks(&app, primary, reviewer).await?
     } else {
-        if !std::io::stdin().is_terminal() {
-            return Err(CliError::new(
-                "INTERACTIVE_TTY_REQUIRED",
-                "interactive task selection requires a TTY; provide both thread flags for automation",
-            ));
-        }
         let threads = all_threads(&app).await?;
-        select_tasks(
-            &threads,
-            &GitInspector::default(),
-            &mut TerminalTaskSelector::default(),
-        )
-        .map_err(|error| CliError::new("TASK_SELECTION_FAILED", error.to_string()))?
+        select_tasks(&threads, &mut selector)
+            .map_err(|error| CliError::new("TASK_SELECTION_FAILED", error.to_string()))?
     };
+    let inspector = GitInspector::default();
+    let (primary_snapshot, reviewer_snapshot) = if let (Some(primary), Some(reviewer)) = (
+        arguments.primary_worktree.as_ref(),
+        arguments.reviewer_worktree.as_ref(),
+    ) {
+        inspector
+            .inspect_registered_pair(primary, reviewer)
+            .map_err(git_error)?
+    } else {
+        let entries = interactive_worktrees(arguments, &inspector, &mut selector)?;
+        let selected = select_worktrees(&entries, &mut selector)
+            .map_err(|error| CliError::new("WORKTREE_SELECTION_FAILED", error.to_string()))?;
+        inspector
+            .inspect_registered_pair(&selected.primary, &selected.reviewer)
+            .map_err(git_error)?
+    };
+    let selected = SelectedBinding {
+        tasks,
+        primary_snapshot,
+        reviewer_snapshot,
+    };
+    if needs_interaction {
+        confirm_binding(&selected, &mut selector)
+            .map_err(|error| CliError::new("SELECTION_CANCELLED", error.to_string()))?;
+    }
     let facts = freeze_selected(&selected)?;
     let state = RunState::new(facts);
     let config = ServerConfig::new(state_dir);
@@ -334,6 +391,9 @@ impl ToolBackend for CliMcpBackend {
                     &RunArgs {
                         primary_thread: Some(arguments.primary_thread),
                         reviewer_thread: Some(arguments.reviewer_thread),
+                        primary_worktree: None,
+                        reviewer_worktree: None,
+                        repository: None,
                         integration_branch: arguments.integration_branch,
                         test_commands: arguments.test_commands,
                         json: true,
@@ -446,7 +506,30 @@ async fn all_threads(app: &impl AppServer) -> Result<Vec<ThreadSummary>, CliErro
     Ok(threads)
 }
 
-async fn select_explicit(
+fn interactive_worktrees(
+    arguments: &RunArgs,
+    inspector: &GitInspector,
+    selector: &mut impl TaskSelector,
+) -> Result<Vec<consensus_core::git::RegisteredWorktree>, CliError> {
+    if let Some(repository) = &arguments.repository {
+        return inspector
+            .list_registered_worktrees(repository)
+            .map_err(git_error);
+    }
+    if let Ok(current) = std::env::current_dir()
+        && let Ok(entries) = inspector.list_registered_worktrees(&current)
+    {
+        return Ok(entries);
+    }
+    let repository = selector
+        .input_repository()
+        .map_err(|error| CliError::new("WORKTREE_SELECTION_FAILED", error.to_string()))?;
+    inspector
+        .list_registered_worktrees(repository)
+        .map_err(git_error)
+}
+
+async fn select_explicit_tasks(
     app: &impl AppServer,
     primary_id: &str,
     reviewer_id: &str,
@@ -465,34 +548,32 @@ async fn select_explicit(
         .read_thread(reviewer_id)
         .await
         .map_err(app_server_error)?;
-    selected_from_details(primary, reviewer)
+    selected_from_details(primary_id, reviewer_id, primary, reviewer)
 }
 
 fn selected_from_details(
+    primary_id: &str,
+    reviewer_id: &str,
     primary: ThreadDetail,
     reviewer: ThreadDetail,
 ) -> Result<SelectedTasks, CliError> {
-    let inspector = GitInspector::default();
-    let primary_snapshot = inspector
-        .inspect_worktree(&primary.summary.cwd)
-        .map_err(git_error)?;
-    let reviewer_snapshot = inspector
-        .inspect_worktree(&reviewer.summary.cwd)
-        .map_err(git_error)?;
-    verify_same_repository(&primary_snapshot, &reviewer_snapshot).map_err(git_error)?;
+    if primary.summary.id != primary_id || reviewer.summary.id != reviewer_id {
+        return Err(CliError::new(
+            "AMBIGUOUS_THREAD",
+            "App Server returned a different task than requested",
+        ));
+    }
     Ok(SelectedTasks {
         primary: primary.summary,
         reviewer: reviewer.summary,
-        primary_snapshot,
-        reviewer_snapshot,
     })
 }
 
-fn freeze_selected(selected: &SelectedTasks) -> Result<RunFacts, CliError> {
+fn freeze_selected(selected: &SelectedBinding) -> Result<RunFacts, CliError> {
     let facts = RunFacts {
         run_id: Uuid::new_v4(),
-        primary_thread_id: selected.primary.id.clone(),
-        reviewer_thread_id: selected.reviewer.id.clone(),
+        primary_thread_id: selected.tasks.primary.id.clone(),
+        reviewer_thread_id: selected.tasks.reviewer.id.clone(),
         primary_worktree: selected.primary_snapshot.worktree.clone(),
         reviewer_worktree: selected.reviewer_snapshot.worktree.clone(),
         git_common_dir: selected.primary_snapshot.common_dir.clone(),
