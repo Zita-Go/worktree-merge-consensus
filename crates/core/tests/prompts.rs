@@ -43,6 +43,44 @@ fn every_prompt_is_self_contained_and_declares_strict_output() {
 }
 
 #[test]
+fn prompt_declares_role_binding_and_binding_mismatch_protocol() {
+    let state = RunState::new(facts());
+
+    let primary = build_turn_prompt(
+        Role::Primary,
+        NextAction::RequestPrimaryContract,
+        &state,
+        &json!({"task_context": "derive the primary contract from this task"}),
+    )
+    .unwrap();
+
+    for required in [
+        "/repo/primary",
+        "refs/heads/primary",
+        PRIMARY_SHA,
+        "SOURCE_BINDING_MISMATCH",
+        "Do not search for or switch to another source directory",
+    ] {
+        assert!(primary.contains(required), "missing {required:?}");
+    }
+
+    let mut reviewer_state = state;
+    reviewer_state
+        .apply_message(contract_ready("PRIMARY", "primary contract"))
+        .unwrap();
+    let reviewer = build_turn_prompt(
+        Role::Reviewer,
+        NextAction::RequestReviewerContract,
+        &reviewer_state,
+        &json!({"task_context": "derive the reviewer contract from this task"}),
+    )
+    .unwrap();
+    for required in ["/repo/reviewer", "refs/heads/reviewer", REVIEWER_SHA] {
+        assert!(reviewer.contains(required), "missing {required:?}");
+    }
+}
+
+#[test]
 fn plan_verdict_prompt_contains_both_contracts_plan_and_coverage() {
     let mut state = plan_state();
     state

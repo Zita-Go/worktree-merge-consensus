@@ -18,7 +18,10 @@ use consensus_core::{
     state::{NextAction, RunFacts, RunState, RunStatus},
 };
 use consensus_daemon::{
-    coordinator::{Coordinator, CoordinatorOptions, RepositorySafety, SafetyError, StartRequest},
+    coordinator::{
+        Coordinator, CoordinatorOptions, GitRepositorySafety, RepositorySafety, SafetyError,
+        StartRequest,
+    },
     store::SqliteRunStore,
 };
 use serde_json::{Value, json};
@@ -42,8 +45,19 @@ fn checked_in_transcript_fixtures_are_valid_json() {
     }
 }
 
+#[test]
+fn unavailable_frozen_worktree_has_stable_public_reason_code() {
+    let facts = fixture_run().facts;
+
+    let error = GitRepositorySafety::default()
+        .verify_frozen(&facts)
+        .unwrap_err();
+
+    assert_eq!(error.code(), "WORKTREE_UNAVAILABLE");
+}
+
 #[tokio::test]
-async fn conflict_free_run_waits_for_plan_approval_and_accepts_exact_result() {
+async fn task_cwd_is_metadata_and_bound_worktrees_drive_turns() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
     let app = Arc::new(FakeAppServer::new(conflict_free_replies()));
@@ -105,8 +119,21 @@ async fn conflict_free_run_waits_for_plan_approval_and_accepts_exact_result() {
         .unwrap();
     assert!(approval < integration_request);
     assert!(safety_events.contains(&format!("result:consensus/test-run:{INTEGRATION_SHA}")));
+    assert!(!safety_events.iter().any(|event| event == "thread-cwd"));
     let policies = app.policies();
     assert_eq!(policies.len(), 7);
+    for (index, expected) in [
+        (0, "/repo/primary"),
+        (1, "/repo/reviewer"),
+        (2, "/repo/primary"),
+        (3, "/repo/reviewer"),
+        (6, "/repo/reviewer"),
+    ] {
+        assert!(matches!(
+            &policies[index],
+            TurnExecutionPolicy::ReadOnly { cwd } if cwd == &PathBuf::from(expected)
+        ));
+    }
     assert!(matches!(
         &policies[4],
         TurnExecutionPolicy::PrimaryIntegration { cwd, git_common_dir }
@@ -1327,7 +1354,7 @@ async fn wait_for_request(app: &FakeAppServer) {
 fn summary(thread_id: &str) -> ThreadSummary {
     ThreadSummary {
         id: thread_id.into(),
-        cwd: PathBuf::from(format!("/repo/{thread_id}")),
+        cwd: PathBuf::from("/unrelated/non-git/task-home"),
         name: Some(thread_id.into()),
         preview: String::new(),
         cli_version: "0.144.5".into(),

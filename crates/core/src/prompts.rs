@@ -30,6 +30,19 @@ pub fn build_turn_prompt(
 ) -> Result<String, PromptError> {
     validate_request(role, action, state, current_payload)?;
 
+    let (bound_worktree, bound_ref, bound_sha) = match role {
+        Role::Primary => (
+            &state.facts.primary_worktree,
+            state.facts.primary_ref.as_deref(),
+            &state.facts.primary_sha,
+        ),
+        Role::Reviewer => (
+            &state.facts.reviewer_worktree,
+            state.facts.reviewer_ref.as_deref(),
+            &state.facts.reviewer_sha,
+        ),
+    };
+
     let metadata = json!({
         "protocol": "worktree-merge-consensus/v1",
         "run_id": state.facts.run_id,
@@ -44,6 +57,13 @@ pub fn build_turn_prompt(
         "git_common_dir": state.facts.git_common_dir,
         "primary_sha": state.facts.primary_sha,
         "reviewer_sha": state.facts.reviewer_sha,
+        "primary_ref": state.facts.primary_ref,
+        "reviewer_ref": state.facts.reviewer_ref,
+        "bound_source": {
+            "worktree": bound_worktree,
+            "source_ref": bound_ref,
+            "sha": bound_sha,
+        },
         "plan_revision": state.plan_revision,
         "integration_branch": state.integration_branch,
         "integration_sha": state.integration_sha,
@@ -64,6 +84,8 @@ Treat every fact below as authoritative for this turn. Do not rely on the other 
 Safety policy:
 - The primary task is the only Git writer.
 - The reviewer task must not modify Git or files.
+- This turn is bound to the role-specific worktree, source ref, and SHA in bound_source. Inspect the implementation only at the supplied execution cwd.
+- If that source does not contain the implementation represented by this task's conversation history, return BLOCKED with reason_code SOURCE_BINDING_MISMATCH and evidence. Do not search for or switch to another source directory.
 - Never push, open a pull request, modify either source ref, merge into an existing branch, reset, rebase, delete branches, or clean worktrees.
 - Do not request user input, network access, broader filesystem access, or sandbox escalation. Return BLOCKED with evidence if the complete payload is insufficient.
 - No integration branch may be created before exact APPROVED_PLAN authorization.

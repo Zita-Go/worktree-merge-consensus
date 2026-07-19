@@ -1,11 +1,17 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use app_server_client::{AppEvent, AppServer, AppServerError, ThreadDetail, TurnExecutionPolicy};
 use consensus_core::{
     canonical_json_hash,
     git::{
-        GitInspector, GitSafetyError, normalize_branch_name, verify_frozen_sources,
-        verify_integration_result, verify_reported_changed_files, verify_same_repository,
+        GitInspector, GitSafetyError, WorktreeSnapshot, normalize_branch_name,
+        verify_frozen_sources, verify_integration_result, verify_reported_changed_files,
+        verify_same_repository,
     },
     prompts::{PromptError, build_turn_prompt},
     protocol::{MessageType, ProtocolMessage, output_schema, validate_message},
@@ -80,15 +86,6 @@ impl From<GitSafetyError> for SafetyError {
 }
 
 pub trait RepositorySafety: Send + Sync {
-    fn verify_thread_worktree(
-        &self,
-        _facts: &RunFacts,
-        _role: Role,
-        _cwd: &std::path::Path,
-    ) -> Result<(), SafetyError> {
-        Ok(())
-    }
-
     fn verify_frozen(&self, facts: &RunFacts) -> Result<(), SafetyError>;
 
     fn verify_branch_absent(&self, facts: &RunFacts, branch: &str) -> Result<(), SafetyError>;
@@ -131,30 +128,29 @@ pub struct GitRepositorySafety {
     inspector: GitInspector,
 }
 
-impl RepositorySafety for GitRepositorySafety {
-    fn verify_thread_worktree(
+impl GitRepositorySafety {
+    fn inspect_frozen_worktree(
         &self,
-        facts: &RunFacts,
-        role: Role,
-        cwd: &std::path::Path,
-    ) -> Result<(), SafetyError> {
-        let snapshot = self.inspector.inspect_worktree(cwd)?;
-        let expected = match role {
-            Role::Primary => &facts.primary_worktree,
-            Role::Reviewer => &facts.reviewer_worktree,
-        };
-        if snapshot.worktree != *expected || snapshot.common_dir != facts.git_common_dir {
-            return Err(SafetyError::new(
-                "SOURCE_DRIFT",
-                "task working directory no longer resolves to its frozen worktree",
-            ));
-        }
-        Ok(())
+        path: &Path,
+        role: &str,
+    ) -> Result<WorktreeSnapshot, SafetyError> {
+        fs::canonicalize(path).map_err(|error| {
+            SafetyError::new(
+                "WORKTREE_UNAVAILABLE",
+                format!(
+                    "{role} frozen worktree {} is unavailable: {error}",
+                    path.display()
+                ),
+            )
+        })?;
+        self.inspector.inspect_worktree(path).map_err(Into::into)
     }
+}
 
+impl RepositorySafety for GitRepositorySafety {
     fn verify_frozen(&self, facts: &RunFacts) -> Result<(), SafetyError> {
-        let primary = self.inspector.inspect_worktree(&facts.primary_worktree)?;
-        let reviewer = self.inspector.inspect_worktree(&facts.reviewer_worktree)?;
+        let primary = self.inspect_frozen_worktree(&facts.primary_worktree, "primary")?;
+        let reviewer = self.inspect_frozen_worktree(&facts.reviewer_worktree, "reviewer")?;
         verify_same_repository(&primary, &reviewer)?;
         verify_frozen_sources(facts, &primary, &reviewer).map_err(Into::into)
     }
@@ -170,8 +166,8 @@ impl RepositorySafety for GitRepositorySafety {
         facts: &RunFacts,
         target_branch: &str,
     ) -> Result<(), SafetyError> {
-        let primary = self.inspector.inspect_worktree(&facts.primary_worktree)?;
-        let reviewer = self.inspector.inspect_worktree(&facts.reviewer_worktree)?;
+        let primary = self.inspect_frozen_worktree(&facts.primary_worktree, "primary")?;
+        let reviewer = self.inspect_frozen_worktree(&facts.reviewer_worktree, "reviewer")?;
         verify_reviewer_frozen(facts, &reviewer)?;
         if primary.worktree != facts.primary_worktree || primary.common_dir != facts.git_common_dir
         {
@@ -205,7 +201,7 @@ impl RepositorySafety for GitRepositorySafety {
         sha: &str,
         changed_files: &[PathBuf],
     ) -> Result<(), SafetyError> {
-        let reviewer = self.inspector.inspect_worktree(&facts.reviewer_worktree)?;
+        let reviewer = self.inspect_frozen_worktree(&facts.reviewer_worktree, "reviewer")?;
         verify_reviewer_frozen(facts, &reviewer)?;
         let integration = self
             .inspector
@@ -980,8 +976,6 @@ where
                 "App Server returned a different task than requested",
             ));
         }
-        self.safety
-            .verify_thread_worktree(&state.facts, role, detail.summary.cwd.as_path())?;
         Ok(())
     }
 
