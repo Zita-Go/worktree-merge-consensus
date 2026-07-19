@@ -60,7 +60,9 @@ for the exact boundaries.
 - Git and Codex CLI available in `PATH`.
 - Codex CLI `>=0.144.1` with the required experimental App Server methods.
 - Exactly two existing Codex tasks under the same local account and host.
-- Each task has a different worktree in the same Git common directory.
+- Two different registered source worktrees in the same Git common directory,
+  selected independently from the tasks. A task cwd is display metadata only;
+  both tasks may report the same cwd or a directory outside Git.
 - Both implementations are committed and both worktrees are clean. A detached
   source HEAD is allowed because identity is frozen by SHA; the result is still
   created on a new attached local branch.
@@ -91,8 +93,9 @@ Rust 1.85 or newer is required to build the workspace.
 
 ## Install the Codex plugin
 
-The `codex-consensus` binary must already be in `PATH`. From a source checkout,
-register this repository as a local marketplace and install its plugin:
+The `codex-consensus` binary must already be in `PATH`. The binary/plugin
+artifacts must come from the same release. From a source checkout, register
+this repository as a local marketplace and install its plugin:
 
 ```bash
 codex plugin marketplace add /absolute/path/to/worktree-merge-consensus
@@ -101,9 +104,15 @@ codex plugin add worktree-merge-consensus@worktree-merge-consensus
 
 If you downloaded the plugin archive, extract it and register the directory
 that contains `.agents/plugins/marketplace.json`. Restart Codex after plugin
-installation. In a Codex task, invoke `$worktree-merge-consensus`; the Skill
-uses six MCP tools only to launch and control the persistent coordinator. It
-does not relay review turns through a third agent.
+installation or update, then restart Codex or open a new task. In a Codex task,
+invoke `$worktree-merge-consensus`; the Skill uses seven MCP tools, including
+`consensus_list_worktrees`, only to launch and control the persistent
+coordinator. It does not relay review turns through a third agent.
+
+If `codex-consensus doctor` reports `LEGACY_SKILL_CONFLICT`, an older manually
+installed `$CODEX_HOME/skills/worktree-merge-consensus` is shadowing the plugin
+workflow. Back it up or remove it manually, reinstall matching binary/plugin
+versions, and restart Codex or open a new task. The tool never deletes it.
 
 ## Use the CLI
 
@@ -112,24 +121,30 @@ Check the environment first:
 ```bash
 codex-consensus doctor
 codex-consensus threads list
+codex-consensus worktrees list --repository /absolute/path/to/repo --json
 ```
 
-Start interactively to choose the primary and reviewer from local tasks:
+Start interactively to choose the two task roles and then independently choose
+the two registered source worktrees. The task cwd shown in task rows is not a
+source binding:
 
 ```bash
 codex-consensus run
 ```
 
-For scripts, provide both task IDs. The branch flag is optional; without it the
-coordinator reserves `consensus/<run-id>`. Every `--test` value is an exact
-direct command the primary must run during the isolated verification turn.
+For scripts and JSON calls, provide both task IDs and both absolute worktree
+paths. The branch flag is optional; without it the coordinator reserves
+`consensus/<run-id>`. Every `--test` value is an exact direct command the
+primary must run during the isolated verification turn.
 Git commands, shell control operators, and dynamic shell/interpreter launchers
 are rejected. For composed checks, invoke a committed test script directly.
 
 ```bash
 codex-consensus run \
   --primary-thread THREAD_ID_A \
+  --primary-worktree /repo/.worktrees/change-a \
   --reviewer-thread THREAD_ID_B \
+  --reviewer-worktree /repo/.worktrees/change-b \
   --integration-branch consensus/my-integration \
   --test "cargo test --workspace" \
   --json
@@ -156,10 +171,11 @@ including any integration branch already created:
 codex-consensus cancel RUN_ID
 ```
 
-The six public command groups are therefore `codex-consensus doctor`,
-`codex-consensus threads`, `codex-consensus run`, `codex-consensus status`,
-`codex-consensus resume`, and `codex-consensus cancel`. All support stable
-machine-readable JSON at their operational leaf where shown by `--help`.
+The seven public command groups are therefore `codex-consensus doctor`,
+`codex-consensus threads`, `codex-consensus worktrees`, `codex-consensus run`,
+`codex-consensus status`, `codex-consensus resume`, and
+`codex-consensus cancel`. All support stable machine-readable JSON at their
+operational leaf where shown by `--help`.
 
 ## Statuses and recovery
 
@@ -212,6 +228,14 @@ persistent log file by default, so CLI output, Codex task history, and
   SQLite manually.
 - `DIRTY_WORKTREE`: commit or intentionally remove local changes in both source
   worktrees before starting a new run.
+- `UNREGISTERED_WORKTREE`, `DUPLICATE_WORKTREE`, or `REPOSITORY_MISMATCH`:
+  select two different paths returned by `codex-consensus worktrees list` for
+  one repository.
+- `WORKTREE_UNAVAILABLE`: a selected frozen worktree is missing or
+  inaccessible; restore it and start a new run.
+- `SOURCE_BINDING_MISMATCH`: a task determined that the confirmed worktree does
+  not contain the implementation represented by its history. Correct the
+  mapping and start a new run; `resume` cannot remap frozen identity.
 - `INTEGRATION_BRANCH_EXISTS`: choose a new branch name. Existing branches are
   never reused or deleted.
 - `SOURCE_DRIFT`: a frozen source ref or worktree HEAD changed. Inspect the Git

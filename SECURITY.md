@@ -41,6 +41,10 @@ secrets, and local filesystem identities.
   explicitly disables inherited sticky execution environments.
 - Both source refs and SHAs are frozen and revalidated. Integration may occur
   only on a unique new local branch.
+- Task IDs and source worktrees are selected independently. App Server task cwd
+  metadata is never trusted as source identity; preflight accepts only two
+  different clean paths registered in one Git common directory, and every turn
+  receives its frozen explicit path and workspace root.
 - There is no remote push, PR creation, credential management, source-ref
   update, reset, rebase, deletion, or cleanup capability.
 - Structured task responses are schema- and invariant-validated. Plan approval
@@ -51,6 +55,9 @@ secrets, and local filesystem identities.
   versions fail closed.
 - Sensitive App Server diagnostics containing authorization, key, secret, or
   token markers are redacted; home-directory prefixes are shortened.
+- A manually installed legacy Skill with the plugin's public name is reported
+  as `LEGACY_SKILL_CONFLICT`. Diagnostics never delete or overwrite it; users
+  must migrate it manually and restart Codex or open a new task.
 
 ## Stored data
 

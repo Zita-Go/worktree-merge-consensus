@@ -28,7 +28,7 @@ for path in "${required_files[@]}"; do
   [[ -f "$path" ]] || fail "missing required file: $path"
 done
 
-commands=(doctor threads run status resume cancel)
+commands=(doctor threads worktrees run status resume cancel)
 for readme in README.md README.zh-CN.md; do
   for command in "${commands[@]}"; do
     grep -Fq "codex-consensus $command" "$readme" ||
@@ -37,6 +37,16 @@ for readme in README.md README.zh-CN.md; do
 
   for marker in same-host '>=0.144.1' no-push SHA256SUMS; do
     grep -Fq "$marker" "$readme" || fail "$readme is missing the $marker contract"
+  done
+
+  for marker in \
+    consensus_list_worktrees \
+    --primary-worktree \
+    --reviewer-worktree \
+    LEGACY_SKILL_CONFLICT \
+    'task cwd' \
+    'binary/plugin'; do
+    grep -Fq -- "$marker" "$readme" || fail "$readme is missing the $marker contract"
   done
 
   grep -Fq 'codex plugin marketplace add' "$readme" ||

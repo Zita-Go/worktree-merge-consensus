@@ -3,11 +3,13 @@
 ## Preconditions
 
 - Exactly two existing Codex tasks are selected on one host.
-- Their committed heads are in different worktrees of the same Git common directory.
+- Their committed heads are in different registered worktrees of the same Git common directory.
 - The primary task is the only integration writer.
 - The reviewer task protects the intent and implementation details of its frozen commit.
 
-The start operation freezes both task IDs, worktree paths, commit SHAs, and source refs. A mismatch fails closed before integration.
+Task IDs and source worktrees are selected independently. A task's App Server cwd is orientation metadata only and may be identical or outside Git. The confirmed start operation freezes both task IDs, canonical registered worktree paths, commit SHAs, and source refs. A mismatch fails closed before integration.
+
+Discovery uses `consensus_list_worktrees` with `repository_path`; start requires `primary_thread`, `reviewer_thread`, `primary_worktree`, and `reviewer_worktree`. `UNREGISTERED_WORKTREE`, `DUPLICATE_WORKTREE`, `REPOSITORY_MISMATCH`, `DIRTY_WORKTREE`, or `WORKTREE_UNAVAILABLE` stops preflight. A task that finds its explicitly bound source inconsistent with its conversation history returns `SOURCE_BINDING_MISMATCH`.
 
 ## Lifecycle
 

@@ -31,6 +31,13 @@ Before the first task turn, the coordinator records:
 - user-supplied test commands. Contract and approved-plan test commands are
   added to this set and frozen before integration starts.
 
+Task identity and source identity are selected independently. A task's App
+Server cwd is non-authoritative display metadata and may be shared by both
+tasks or outside Git. New runs explicitly bind each task ID to one absolute
+path returned by registered-worktree discovery. Preflight requires different
+task IDs, different clean worktree roots, and one canonical Git common
+directory before recording the mapping.
+
 Every frozen test command must be a direct command. Git executables, shell
 control operators, and dynamic shell/interpreter command launchers are invalid.
 
@@ -39,6 +46,12 @@ immutable for the life of the run. Source drift, a dirty worktree, a mismatched
 repository, or a pre-existing target branch fails closed. A source worktree may
 start detached because it is frozen by SHA; an accepted integration result must
 be attached to its authorized new local branch.
+
+Preflight reason codes include `UNREGISTERED_WORKTREE`,
+`DUPLICATE_WORKTREE`, `REPOSITORY_MISMATCH`, `DIRTY_WORKTREE`, and
+`WORKTREE_UNAVAILABLE`. Once frozen, a task may reject an incorrect
+user-confirmed association with `SOURCE_BINDING_MISMATCH`; the mapping cannot
+be replaced by `resume`.
 
 ## Envelope
 
@@ -151,7 +164,9 @@ Any primary amendment produces a new SHA and requires another reviewer verdict.
 Requires a nonempty reason code and the exact current phase, round, plan
 revision, and integration identity. It reports that the task cannot safely
 produce the expected message. Stale blocks are rejected instead of terminating
-the current run.
+the current run. If the supplied role worktree does not represent the
+implementation in that task's history, it must use
+`SOURCE_BINDING_MISMATCH` and may not search for or switch to another source.
 
 ## Bounded review
 
@@ -168,8 +183,9 @@ terminates with `FORBIDDEN_OPERATION`. Explicit task input may pause as
 ## App Server execution policy
 
 Every turn supplies an empty `environments` array so it cannot inherit a sticky
-task execution environment. Contract, plan, and review turns supply an absolute
-role worktree, one runtime workspace root, a read-only sandbox, network
+task execution environment. Irrespective of the task's initial or subsequently
+reported cwd, contract, plan, and review turns supply the explicitly bound
+absolute role worktree, one runtime workspace root, a read-only sandbox, network
 disabled, and approval policy `never`. The authorized primary integration turn
 supplies only the primary worktree and source Git common directory as writable
 roots, disables network and temporary-directory writes, and uses approval

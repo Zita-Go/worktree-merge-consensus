@@ -14,8 +14,9 @@ the evidence below.
 - Exact `codex --version` output satisfying `>=0.144.1`.
 - One disposable local Git repository with two committed branches checked out
   in two distinct worktrees.
-- Two existing Codex tasks, each attached to one of those worktrees under the
-  same local Codex account.
+- Two existing Codex tasks under the same local Codex account. Their reported
+  cwd may be identical or outside Git because source worktrees are bound
+  explicitly.
 - No remote is required and no push is permitted.
 
 ## Procedure
@@ -23,7 +24,9 @@ the evidence below.
 1. Record `codex --version`, `git --version`, OS, architecture, and the
    `codex-consensus` release SHA.
 2. Record both task IDs, worktree paths, source refs, and source SHAs. Use only
-   disposable code and redact account identifiers.
+   disposable code and redact account identifiers. If doctor reports
+   `LEGACY_SKILL_CONFLICT`, manually back up/remove the old standalone Skill,
+   install matching binary/plugin release versions, and restart Codex first.
 3. Give the two branches a small overlapping change whose correct integration
    requires preserving a reviewer-only behavior and resolving one conflict.
 4. Confirm both source worktrees are clean and the intended integration branch
@@ -32,16 +35,23 @@ the evidence below.
 
    ```bash
    codex-consensus doctor --json
+   codex-consensus worktrees list \
+     --repository /gpfs/users/i-zhangguoqiang/workspace/gh_testtest \
+     --json
    codex-consensus run \
      --primary-thread PRIMARY_TASK_ID \
+     --primary-worktree /gpfs/users/i-zhangguoqiang/workspace/gh_testtest \
      --reviewer-thread REVIEWER_TASK_ID \
+     --reviewer-worktree /gpfs/users/i-zhangguoqiang/workspace/gh_testtest/.worktrees/feature-expansion \
      --integration-branch consensus/real-smoke \
      --test "cargo test --workspace" \
      --json
    codex-consensus status RUN_ID --json
    ```
 
-6. Observe at least one plan correction from the reviewer, exact plan approval,
+6. Confirm both task summaries may report the same repository-root cwd while
+   every turn executes at its separately frozen worktree. Observe at least one
+   plan correction from the reviewer, exact plan approval,
    primary-only source Git writes, and exact result-SHA approval. Confirm review
    turns report read-only/offline policy and the integration turn reports
    bounded source-workspace-write/offline policy. Confirm a separate

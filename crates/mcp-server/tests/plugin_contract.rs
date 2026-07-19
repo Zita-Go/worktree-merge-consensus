@@ -45,7 +45,12 @@ fn skill_is_a_launcher_for_the_daemon_not_a_review_relay() {
     for required in [
         "consensus_doctor",
         "consensus_list_threads",
+        "consensus_list_worktrees",
         "consensus_start",
+        "primary_worktree",
+        "reviewer_worktree",
+        "repository_path",
+        "task cwd",
         "run_id",
         "same host",
         "existing Codex tasks",

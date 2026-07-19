@@ -67,6 +67,19 @@ process-tested. An adapter change must revalidate their semantics and the
 `commandExecution` item fields (`id`, `command`, `cwd`, `status`, `exitCode`,
 and optional `source`) before changing the runtime contract.
 
+The task's cwd returned by `thread/list` or `thread/read` is display metadata,
+not source identity. New runs independently supply two task IDs and two
+registered worktree paths through CLI or MCP. The daemon still verifies the
+returned task IDs, but every turn uses the frozen explicit worktree even when
+both tasks report the same cwd or a non-Git directory.
+
+The v0.1 plugin contract exposes seven MCP tools, including
+`consensus_list_worktrees`; `consensus_start` requires both task IDs and both
+worktree paths. Plugin and binary versions must come from the same release.
+After installing or updating the plugin, restart Codex or open a new task. A
+conflicting manually installed `$CODEX_HOME/skills/worktree-merge-consensus`
+is reported as `LEGACY_SKILL_CONFLICT` and is never deleted automatically.
+
 ## Persisted-state compatibility
 
 The v0.1 run-state schema is explicitly versioned. This prerelease does not
