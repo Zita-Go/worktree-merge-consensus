@@ -91,9 +91,11 @@ instead of editing SQLite by hand.
 ## Operating-system policy
 
 Release artifacts are built natively on GitHub-hosted Linux x86_64 and ARM64
-runners for the GNU targets. The daemon depends on Unix socket permissions, so
-Windows is unsupported. macOS is used for development tests but is not a v0.1
-release target or compatibility promise.
+runners for the musl targets and are rejected by the release workflow if they
+contain a dynamic-library dependency or program interpreter. They therefore do
+not impose a host GLIBC version floor. The daemon depends on Unix socket
+permissions, so Windows is unsupported. macOS is used for development tests but
+is not a v0.1 release target or compatibility promise.
 
 All participants must satisfy the `same-host` constraint. Cross-host App Server
 connections, Git transfer, SSH relays, and shared-network SQLite files are not

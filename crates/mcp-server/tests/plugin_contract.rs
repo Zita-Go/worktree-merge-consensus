@@ -14,7 +14,7 @@ fn plugin_manifest_and_mcp_registration_match_the_binary() {
     )
     .unwrap();
     assert_eq!(manifest["name"], "worktree-merge-consensus");
-    assert_eq!(manifest["version"], "0.1.0");
+    assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(manifest["license"], "Apache-2.0");
     assert_eq!(manifest["skills"], "./skills/");
     assert_eq!(manifest["mcpServers"], "./.mcp.json");

@@ -69,3 +69,47 @@ jobs:
 
       - name: Check dependency licenses
         run: cargo deny check licenses
+
+  portable-linux:
+    name: Portable ${{ matrix.target }} binary
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      CC_x86_64_unknown_linux_musl: musl-gcc
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CC_aarch64_unknown_linux_musl: musl-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install musl build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+
+      - name: Install Rust target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add "${{ matrix.target }}"
+
+      - name: Build locked static binary
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: cargo build --locked --release --target "${{ matrix.target }}" -p codex-consensus
+
+      - name: Verify static linkage and executable smoke tests
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/codex-consensus"
+          bash tests/static-link.sh "$binary"
+          "$binary" --version
+          "$binary" --help >/dev/null

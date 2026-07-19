@@ -69,15 +69,19 @@ for the exact boundaries.
 
 ## Install the standalone binary
 
-Download the archive for `x86_64-unknown-linux-gnu` or
-`aarch64-unknown-linux-gnu` from this repository's GitHub Release. Download
-`SHA256SUMS` as well, then verify every downloaded asset before extracting it:
+Download the static musl archive for `x86_64-unknown-linux-musl` or
+`aarch64-unknown-linux-musl` from this repository's GitHub Release. These
+binaries do not depend on the host's GLIBC version. Download `SHA256SUMS` as
+well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
-install -m 0755 codex-consensus-v0.1.0-x86_64-unknown-linux-gnu/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.1-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.1-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
+
+The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
+later on supported Linux hosts.
 
 Release assets also include a CycloneDX JSON SBOM and the Codex plugin bundle.
 Until the real-Codex checklist is recorded, v0.1 releases are marked

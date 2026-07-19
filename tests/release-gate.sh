@@ -21,12 +21,27 @@ printf '%s\n' \
   'esac' >"$fake_binary"
 chmod 0755 "$fake_binary"
 
-if FAKE_VERSION=10.1.0 CODEX_CONSENSUS_BIN="$fake_binary" \
-  bash tests/release.sh v0.1.0 >/dev/null 2>&1; then
+current_version="$({
+  awk '
+    /^\[workspace\.package\]$/ { in_section = 1; next }
+    /^\[/ { in_section = 0 }
+    in_section && /^version[[:space:]]*=/ {
+      value = $0
+      sub(/^[^=]*=[[:space:]]*"/, "", value)
+      sub(/"[[:space:]]*$/, "", value)
+      print value
+      exit
+    }
+  ' Cargo.toml
+})"
+[[ -n "$current_version" ]] || fail 'workspace package version is missing'
+
+if FAKE_VERSION="1${current_version}" CODEX_CONSENSUS_BIN="$fake_binary" \
+  bash tests/release.sh "v${current_version}" >/dev/null 2>&1; then
   fail 'a substring-compatible but unequal binary version was accepted'
 fi
 
-FAKE_VERSION=0.1.0 CODEX_CONSENSUS_BIN="$fake_binary" \
-  bash tests/release.sh v0.1.0 >/dev/null
+FAKE_VERSION="$current_version" CODEX_CONSENSUS_BIN="$fake_binary" \
+  bash tests/release.sh "v${current_version}" >/dev/null
 
 printf 'release gate self-test passed\n'

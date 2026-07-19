@@ -22,6 +22,7 @@ required_files=(
   .github/workflows/release.yml
   tests/release.sh
   tests/release-gate.sh
+  tests/static-link.sh
 )
 
 for path in "${required_files[@]}"; do
@@ -35,7 +36,7 @@ for readme in README.md README.zh-CN.md; do
       fail "$readme does not document codex-consensus $command"
   done
 
-  for marker in same-host '>=0.144.1' no-push SHA256SUMS; do
+  for marker in same-host '>=0.144.1' no-push SHA256SUMS unknown-linux-musl; do
     grep -Fq "$marker" "$readme" || fail "$readme is missing the $marker contract"
   done
 
@@ -84,9 +85,28 @@ grep -Fq 'bash tests/docs.sh' .github/workflows/ci.yml || fail 'CI omits docs ch
 grep -Fq 'cargo audit' .github/workflows/ci.yml || fail 'CI omits cargo audit'
 grep -Fq 'cargo deny check licenses' .github/workflows/ci.yml || fail 'CI omits license checks'
 
-for marker in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu SHA256SUMS cyclonedx-json plugin; do
+for marker in x86_64-unknown-linux-musl aarch64-unknown-linux-musl musl-tools '+crt-static'; do
+  grep -Fq "$marker" .github/workflows/ci.yml ||
+    fail "CI is missing the portable Linux build contract: $marker"
+done
+grep -Fq 'bash tests/static-link.sh' .github/workflows/ci.yml ||
+  fail 'CI omits the static-linkage gate'
+
+for marker in x86_64-unknown-linux-musl aarch64-unknown-linux-musl SHA256SUMS cyclonedx-json plugin; do
   grep -Fq "$marker" .github/workflows/release.yml ||
     fail "release workflow is missing $marker"
+done
+
+for marker in musl-tools '+crt-static'; do
+  grep -Fq "$marker" .github/workflows/release.yml ||
+    fail "release workflow is missing the static-linkage gate: $marker"
+done
+grep -Fq 'bash tests/static-link.sh' .github/workflows/release.yml ||
+  fail 'release workflow omits the static-linkage gate'
+
+for marker in '(NEEDED)' 'Requesting program interpreter'; do
+  grep -Fq "$marker" tests/static-link.sh ||
+    fail "static-linkage gate is missing the rejection marker: $marker"
 done
 
 grep -Fq 'qualify:' .github/workflows/release.yml || fail 'release omits qualification job'

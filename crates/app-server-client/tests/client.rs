@@ -23,7 +23,7 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
                 "clientInfo": {
                     "name": "worktree-merge-consensus",
                     "title": "Worktree Merge Consensus",
-                    "version": "0.1.0"
+                    "version": env!("CARGO_PKG_VERSION")
                 },
                 "capabilities": null
             })
