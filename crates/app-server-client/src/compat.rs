@@ -10,8 +10,7 @@ pub const REQUIRED_METHODS: &[&str] = &[
     "turn/start",
 ];
 
-const METHOD_FIXTURE: &str =
-    include_str!("../../../schemas/app-server/supported-methods.json");
+const METHOD_FIXTURE: &str = include_str!("../../../schemas/app-server/supported-methods.json");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompatibilityReport {
