@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use app_server_client::ThreadSummary;
-use consensus_core::git::{RegisteredWorktree, WorktreeSnapshot};
+use consensus_core::git::{GitInspector, RegisteredWorktree, WorktreeSnapshot};
 use dialoguer::{Confirm, FuzzySelect, Input, theme::ColorfulTheme};
 use thiserror::Error;
 
@@ -30,7 +30,7 @@ pub enum SelectionError {
     NoTasks,
     #[error("no different Codex task is available for review")]
     NoReviewer,
-    #[error("fewer than two available registered worktrees can be selected")]
+    #[error("fewer than two registered worktree entries can be selected")]
     NoWorktrees,
     #[error("task selection was cancelled")]
     Cancelled,
@@ -47,6 +47,7 @@ pub trait TaskSelector {
     fn select_reviewer_worktree(&mut self, labels: &[String]) -> Result<usize, SelectionError>;
     fn input_repository(&mut self) -> Result<PathBuf, SelectionError>;
     fn confirm(&mut self, summary: &str) -> Result<bool, SelectionError>;
+    fn report_worktree_validation_error(&mut self, _error: &consensus_core::git::GitSafetyError) {}
 }
 
 #[derive(Default)]
@@ -102,6 +103,14 @@ impl TaskSelector for TerminalTaskSelector {
             .interact()
             .map_err(|error| SelectionError::Terminal(error.to_string()))
     }
+
+    fn report_worktree_validation_error(&mut self, error: &consensus_core::git::GitSafetyError) {
+        eprintln!(
+            "Cannot use that worktree pair ({}): {}. Choose again.",
+            error.code(),
+            error.detail()
+        );
+    }
 }
 
 pub fn select_tasks(
@@ -143,10 +152,7 @@ pub fn select_worktrees(
     entries: &[RegisteredWorktree],
     selector: &mut impl TaskSelector,
 ) -> Result<SelectedWorktrees, SelectionError> {
-    let candidates = entries
-        .iter()
-        .filter(|entry| !entry.bare && entry.issue.is_none())
-        .collect::<Vec<_>>();
+    let candidates = entries.iter().collect::<Vec<_>>();
     if candidates.len() < 2 {
         return Err(SelectionError::NoWorktrees);
     }
@@ -177,18 +183,46 @@ pub fn select_worktrees(
     })
 }
 
+pub fn select_valid_worktrees(
+    entries: &[RegisteredWorktree],
+    inspector: &GitInspector,
+    selector: &mut impl TaskSelector,
+) -> Result<(WorktreeSnapshot, WorktreeSnapshot), SelectionError> {
+    loop {
+        let selected = select_worktrees(entries, selector)?;
+        match inspector.inspect_registered_pair(&selected.primary, &selected.reviewer) {
+            Ok(pair) => return Ok(pair),
+            Err(error)
+                if matches!(
+                    error.code(),
+                    "UNREGISTERED_WORKTREE"
+                        | "DUPLICATE_WORKTREE"
+                        | "REPOSITORY_MISMATCH"
+                        | "DIRTY_WORKTREE"
+                        | "WORKTREE_UNAVAILABLE"
+                ) =>
+            {
+                selector.report_worktree_validation_error(&error);
+            }
+            Err(error) => return Err(SelectionError::Git(error)),
+        }
+    }
+}
+
 pub fn confirm_binding(
     binding: &SelectedBinding,
     selector: &mut impl TaskSelector,
 ) -> Result<(), SelectionError> {
     let summary = format!(
-        "Use primary task {} with {} at {} and reviewer task {} with {} at {} in repository {}?",
-        short_id(&binding.tasks.primary.id),
+        "Confirm exact binding?\nPRIMARY task: {}\n  worktree: {}\n  source ref: {}\n  HEAD SHA: {}\nREVIEWER task: {}\n  worktree: {}\n  source ref: {}\n  HEAD SHA: {}\nGit common directory: {}",
+        binding.tasks.primary.id,
         binding.primary_snapshot.worktree.display(),
-        short_sha(&binding.primary_snapshot.head_sha),
-        short_id(&binding.tasks.reviewer.id),
+        snapshot_source_label(&binding.primary_snapshot),
+        binding.primary_snapshot.head_sha,
+        binding.tasks.reviewer.id,
         binding.reviewer_snapshot.worktree.display(),
-        short_sha(&binding.reviewer_snapshot.head_sha),
+        snapshot_source_label(&binding.reviewer_snapshot),
+        binding.reviewer_snapshot.head_sha,
         binding.primary_snapshot.common_dir.display(),
     );
     if selector.confirm(&summary)? {
@@ -196,6 +230,14 @@ pub fn confirm_binding(
     } else {
         Err(SelectionError::Cancelled)
     }
+}
+
+fn snapshot_source_label(snapshot: &WorktreeSnapshot) -> &str {
+    snapshot
+        .source_ref
+        .as_ref()
+        .map(|source| source.name.as_str())
+        .unwrap_or("detached")
 }
 
 pub fn task_label(thread: &ThreadSummary) -> String {
@@ -251,12 +293,13 @@ fn short_sha(sha: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::VecDeque,
         fs,
         path::{Path, PathBuf},
         process::Command,
     };
 
-    use consensus_core::git::GitInspector;
+    use consensus_core::git::{GitInspector, RegisteredWorktree, WorktreeIssue};
     use serde_json::json;
 
     use super::*;
@@ -310,6 +353,105 @@ mod tests {
         assert_ne!(selected.primary, selected.reviewer);
     }
 
+    #[test]
+    fn worktree_selection_displays_unavailable_registered_entries() {
+        let fixture = WorktreeFixture::new();
+        let mut entries = GitInspector::default()
+            .list_registered_worktrees(&fixture.repository)
+            .unwrap();
+        let missing = fixture._root.path().join("missing-worktree");
+        entries.push(RegisteredWorktree {
+            worktree: missing.clone(),
+            common_dir: entries[0].common_dir.clone(),
+            head_sha: None,
+            source_ref: None,
+            clean: None,
+            bare: false,
+            issue: Some(WorktreeIssue {
+                code: "WORKTREE_UNAVAILABLE".into(),
+                detail: "fixture is unavailable".into(),
+            }),
+        });
+        let mut selector =
+            PathSequenceSelector::new([fixture.repository.clone()], [fixture.reviewer.clone()]);
+
+        select_worktrees(&entries, &mut selector).unwrap();
+
+        assert!(selector.primary_labels[0].iter().any(|label| {
+            label.contains(&missing.display().to_string()) && label.contains("WORKTREE_UNAVAILABLE")
+        }));
+    }
+
+    #[test]
+    fn invalid_interactive_pair_returns_to_worktree_selection() {
+        let fixture = WorktreeFixture::new();
+        fs::write(fixture.primary.join("uncommitted.txt"), "dirty\n").unwrap();
+        let entries = GitInspector::default()
+            .list_registered_worktrees(&fixture.repository)
+            .unwrap();
+        let mut selector = PathSequenceSelector::new(
+            [fixture.primary.clone(), fixture.repository.clone()],
+            [fixture.reviewer.clone(), fixture.reviewer.clone()],
+        );
+
+        let (primary, reviewer) =
+            select_valid_worktrees(&entries, &GitInspector::default(), &mut selector).unwrap();
+
+        assert_eq!(primary.worktree, fixture.repository.canonicalize().unwrap());
+        assert_eq!(reviewer.worktree, fixture.reviewer.canonicalize().unwrap());
+        assert_eq!(selector.primary_labels.len(), 2);
+    }
+
+    #[test]
+    fn binding_confirmation_shows_the_complete_exact_mapping() {
+        let fixture = WorktreeFixture::new();
+        let (primary_snapshot, reviewer_snapshot) = GitInspector::default()
+            .inspect_registered_pair(&fixture.primary, &fixture.reviewer)
+            .unwrap();
+        let primary_id = "primary-thread-111111111111111111111111";
+        let reviewer_id = "reviewer-thread-2222222222222222222222";
+        let binding = SelectedBinding {
+            tasks: SelectedTasks {
+                primary: thread(primary_id, &fixture.repository),
+                reviewer: thread(reviewer_id, &fixture.repository),
+            },
+            primary_snapshot,
+            reviewer_snapshot,
+        };
+        let mut selector = ConfirmationSelector::default();
+
+        confirm_binding(&binding, &mut selector).unwrap();
+
+        let summary = selector.summary.unwrap();
+        for required in [
+            primary_id,
+            reviewer_id,
+            binding.primary_snapshot.worktree.to_str().unwrap(),
+            binding.reviewer_snapshot.worktree.to_str().unwrap(),
+            binding
+                .primary_snapshot
+                .source_ref
+                .as_ref()
+                .unwrap()
+                .name
+                .as_str(),
+            binding
+                .reviewer_snapshot
+                .source_ref
+                .as_ref()
+                .unwrap()
+                .name
+                .as_str(),
+            binding.primary_snapshot.head_sha.as_str(),
+            binding.reviewer_snapshot.head_sha.as_str(),
+        ] {
+            assert!(
+                summary.contains(required),
+                "missing {required:?} in {summary}"
+            );
+        }
+    }
+
     struct FixedSelector {
         primary_task: usize,
         reviewer_task: usize,
@@ -346,9 +488,113 @@ mod tests {
         }
     }
 
+    struct PathSequenceSelector {
+        primary_choices: VecDeque<PathBuf>,
+        reviewer_choices: VecDeque<PathBuf>,
+        primary_labels: Vec<Vec<String>>,
+    }
+
+    impl PathSequenceSelector {
+        fn new(
+            primary_choices: impl IntoIterator<Item = PathBuf>,
+            reviewer_choices: impl IntoIterator<Item = PathBuf>,
+        ) -> Self {
+            Self {
+                primary_choices: primary_choices.into_iter().collect(),
+                reviewer_choices: reviewer_choices.into_iter().collect(),
+                primary_labels: Vec::new(),
+            }
+        }
+
+        fn choose(labels: &[String], path: &Path) -> Result<usize, SelectionError> {
+            let path = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+            labels
+                .iter()
+                .position(|label| label.starts_with(&path.display().to_string()))
+                .ok_or_else(|| {
+                    SelectionError::Terminal(format!(
+                        "expected {} in labels {labels:?}",
+                        path.display()
+                    ))
+                })
+        }
+    }
+
+    impl TaskSelector for PathSequenceSelector {
+        fn select_primary(&mut self, _labels: &[String]) -> Result<usize, SelectionError> {
+            unreachable!("task selection is not used")
+        }
+
+        fn select_reviewer(&mut self, _labels: &[String]) -> Result<usize, SelectionError> {
+            unreachable!("task selection is not used")
+        }
+
+        fn select_primary_worktree(&mut self, labels: &[String]) -> Result<usize, SelectionError> {
+            self.primary_labels.push(labels.to_vec());
+            let path = self
+                .primary_choices
+                .pop_front()
+                .expect("missing scripted primary choice");
+            Self::choose(labels, &path)
+        }
+
+        fn select_reviewer_worktree(&mut self, labels: &[String]) -> Result<usize, SelectionError> {
+            let path = self
+                .reviewer_choices
+                .pop_front()
+                .expect("missing scripted reviewer choice");
+            Self::choose(labels, &path)
+        }
+
+        fn input_repository(&mut self) -> Result<PathBuf, SelectionError> {
+            unreachable!("repository prompting is not used")
+        }
+
+        fn confirm(&mut self, _summary: &str) -> Result<bool, SelectionError> {
+            unreachable!("binding confirmation is not used")
+        }
+    }
+
+    #[derive(Default)]
+    struct ConfirmationSelector {
+        summary: Option<String>,
+    }
+
+    impl TaskSelector for ConfirmationSelector {
+        fn select_primary(&mut self, _labels: &[String]) -> Result<usize, SelectionError> {
+            unreachable!("selection is not used")
+        }
+
+        fn select_reviewer(&mut self, _labels: &[String]) -> Result<usize, SelectionError> {
+            unreachable!("selection is not used")
+        }
+
+        fn select_primary_worktree(&mut self, _labels: &[String]) -> Result<usize, SelectionError> {
+            unreachable!("selection is not used")
+        }
+
+        fn select_reviewer_worktree(
+            &mut self,
+            _labels: &[String],
+        ) -> Result<usize, SelectionError> {
+            unreachable!("selection is not used")
+        }
+
+        fn input_repository(&mut self) -> Result<PathBuf, SelectionError> {
+            unreachable!("selection is not used")
+        }
+
+        fn confirm(&mut self, summary: &str) -> Result<bool, SelectionError> {
+            self.summary = Some(summary.to_owned());
+            Ok(true)
+        }
+    }
+
     struct WorktreeFixture {
         _root: tempfile::TempDir,
         repository: PathBuf,
+        primary: PathBuf,
+        reviewer: PathBuf,
     }
 
     impl WorktreeFixture {
@@ -380,6 +626,8 @@ mod tests {
             Self {
                 _root: root,
                 repository,
+                primary,
+                reviewer,
             }
         }
     }

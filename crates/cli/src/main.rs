@@ -31,7 +31,7 @@ use installation::{DoctorSurface, inspect_effective_legacy_skill};
 use output::{emit_error, emit_serializable, emit_value, human_json};
 use select::{
     SelectedBinding, SelectedTasks, TaskSelector, TerminalTaskSelector, confirm_binding,
-    select_tasks, select_worktrees, task_label, worktree_label,
+    select_tasks, select_valid_worktrees, task_label, worktree_label,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -282,11 +282,8 @@ async fn start_run_value(state_dir: &Path, arguments: &RunArgs) -> Result<Value,
             .map_err(git_error)?
     } else {
         let entries = interactive_worktrees(arguments, &inspector, &mut selector)?;
-        let selected = select_worktrees(&entries, &mut selector)
-            .map_err(|error| CliError::new("WORKTREE_SELECTION_FAILED", error.to_string()))?;
-        inspector
-            .inspect_registered_pair(&selected.primary, &selected.reviewer)
-            .map_err(git_error)?
+        select_valid_worktrees(&entries, &inspector, &mut selector)
+            .map_err(|error| CliError::new("WORKTREE_SELECTION_FAILED", error.to_string()))?
     };
     let selected = SelectedBinding {
         tasks,
@@ -533,10 +530,10 @@ fn interactive_worktrees(
             .list_registered_worktrees(repository)
             .map_err(git_error);
     }
-    if let Ok(current) = std::env::current_dir()
-        && let Ok(entries) = inspector.list_registered_worktrees(&current)
-    {
-        return Ok(entries);
+    if let Ok(current) = std::env::current_dir() {
+        if let Ok(entries) = inspector.list_registered_worktrees(&current) {
+            return Ok(entries);
+        }
     }
     let repository = selector
         .input_repository()

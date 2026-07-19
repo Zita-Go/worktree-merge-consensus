@@ -1,6 +1,8 @@
 use std::{
     collections::{HashMap, VecDeque},
-    path::PathBuf,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -15,6 +17,7 @@ use app_server_client::{
 use async_trait::async_trait;
 use consensus_core::{
     canonical_json_hash,
+    git::GitInspector,
     state::{NextAction, RunFacts, RunState, RunStatus},
 };
 use consensus_daemon::{
@@ -48,9 +51,75 @@ fn checked_in_transcript_fixtures_are_valid_json() {
 #[test]
 fn unavailable_frozen_worktree_has_stable_public_reason_code() {
     let facts = fixture_run().facts;
+    let safety = GitRepositorySafety::default();
+
+    let error = safety.verify_frozen(&facts).unwrap_err();
+    let branch_error = safety
+        .verify_branch_absent(&facts, "consensus/test-run")
+        .unwrap_err();
+
+    assert_eq!(error.code(), "WORKTREE_UNAVAILABLE");
+    assert_eq!(branch_error.code(), "WORKTREE_UNAVAILABLE");
+}
+
+#[test]
+fn replaced_frozen_worktree_is_reported_as_source_drift() {
+    let root = tempfile::tempdir().unwrap();
+    let primary_path = root.path().join("primary");
+    let reviewer_path = root.path().join("reviewer");
+    fs::create_dir(&primary_path).unwrap();
+    run_git(&primary_path, &["init", "--initial-branch=primary"]);
+    run_git(&primary_path, &["config", "user.name", "Consensus Test"]);
+    run_git(
+        &primary_path,
+        &["config", "user.email", "consensus@example.invalid"],
+    );
+    fs::write(primary_path.join("base.txt"), "base\n").unwrap();
+    run_git(&primary_path, &["add", "base.txt"]);
+    run_git(&primary_path, &["commit", "-m", "base"]);
+    run_git(&primary_path, &["branch", "reviewer"]);
+    run_git(
+        &primary_path,
+        &[
+            "worktree",
+            "add",
+            reviewer_path.to_str().unwrap(),
+            "reviewer",
+        ],
+    );
+    let inspector = GitInspector::default();
+    let primary = inspector.inspect_worktree(&primary_path).unwrap();
+    let reviewer = inspector.inspect_worktree(&reviewer_path).unwrap();
+    let facts = RunFacts {
+        run_id: Uuid::new_v4(),
+        primary_thread_id: "primary-thread".into(),
+        reviewer_thread_id: "reviewer-thread".into(),
+        primary_worktree: primary.worktree.clone(),
+        reviewer_worktree: reviewer.worktree.clone(),
+        git_common_dir: primary.common_dir.clone(),
+        primary_sha: primary.head_sha.clone(),
+        reviewer_sha: reviewer.head_sha.clone(),
+        primary_ref: primary.source_ref.map(|source| source.name),
+        reviewer_ref: reviewer.source_ref.map(|source| source.name),
+    };
+    fs::rename(&reviewer_path, root.path().join("reviewer-moved")).unwrap();
+    fs::create_dir(&reviewer_path).unwrap();
 
     let error = GitRepositorySafety::default()
         .verify_frozen(&facts)
+        .unwrap_err();
+
+    assert_eq!(error.code(), "SOURCE_DRIFT");
+}
+
+#[test]
+fn unavailable_primary_before_verification_clone_keeps_public_reason_code() {
+    let facts = fixture_run().facts;
+    let destination_root = tempfile::tempdir().unwrap();
+    let destination = destination_root.path().join("verification");
+
+    let error = GitRepositorySafety::default()
+        .prepare_verification_workspace(&facts, INTEGRATION_SHA, &destination)
         .unwrap_err();
 
     assert_eq!(error.code(), "WORKTREE_UNAVAILABLE");
@@ -1814,4 +1883,18 @@ fn message(
         "reason_code": null,
         "payload": payload
     })
+}
+
+fn run_git(cwd: &Path, arguments: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {arguments:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

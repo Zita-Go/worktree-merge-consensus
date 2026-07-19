@@ -134,7 +134,7 @@ impl GitRepositorySafety {
         path: &Path,
         role: &str,
     ) -> Result<WorktreeSnapshot, SafetyError> {
-        fs::canonicalize(path).map_err(|error| {
+        let canonical = fs::canonicalize(path).map_err(|error| {
             SafetyError::new(
                 "WORKTREE_UNAVAILABLE",
                 format!(
@@ -143,6 +143,27 @@ impl GitRepositorySafety {
                 ),
             )
         })?;
+        match fs::symlink_metadata(canonical.join(".git")) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(SafetyError::new(
+                    "SOURCE_DRIFT",
+                    format!(
+                        "{role} frozen path {} no longer identifies a Git worktree",
+                        path.display()
+                    ),
+                ));
+            }
+            Err(error) => {
+                return Err(SafetyError::new(
+                    "WORKTREE_UNAVAILABLE",
+                    format!(
+                        "cannot inspect {role} frozen worktree {}: {error}",
+                        path.display()
+                    ),
+                ));
+            }
+        }
         self.inspector.inspect_worktree(path).map_err(Into::into)
     }
 }
@@ -156,6 +177,7 @@ impl RepositorySafety for GitRepositorySafety {
     }
 
     fn verify_branch_absent(&self, facts: &RunFacts, branch: &str) -> Result<(), SafetyError> {
+        self.inspect_frozen_worktree(&facts.primary_worktree, "primary")?;
         self.inspector
             .verify_integration_branch_absent(&facts.primary_worktree, branch)
             .map_err(Into::into)
@@ -201,6 +223,7 @@ impl RepositorySafety for GitRepositorySafety {
         sha: &str,
         changed_files: &[PathBuf],
     ) -> Result<(), SafetyError> {
+        self.inspect_frozen_worktree(&facts.primary_worktree, "primary")?;
         let reviewer = self.inspect_frozen_worktree(&facts.reviewer_worktree, "reviewer")?;
         verify_reviewer_frozen(facts, &reviewer)?;
         let integration = self
@@ -216,6 +239,7 @@ impl RepositorySafety for GitRepositorySafety {
         integration_sha: &str,
         destination: &std::path::Path,
     ) -> Result<PathBuf, SafetyError> {
+        self.inspect_frozen_worktree(&facts.primary_worktree, "primary")?;
         self.inspector
             .materialize_verification_clone(
                 &facts.primary_worktree,
