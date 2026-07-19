@@ -16,6 +16,8 @@ struct Config {
     scenario: String,
     primary_thread: String,
     reviewer_thread: String,
+    primary_thread_cwd: PathBuf,
+    reviewer_thread_cwd: PathBuf,
     primary_worktree: PathBuf,
     reviewer_worktree: PathBuf,
     git_common_dir: PathBuf,
@@ -144,9 +146,9 @@ fn handle_request(config: &Config, method: &str, params: &Value) -> Result<Value
 
 fn thread_summary(config: &Config, thread_id: &str) -> Value {
     let cwd = if thread_id == config.primary_thread {
-        &config.primary_worktree
+        &config.primary_thread_cwd
     } else {
-        &config.reviewer_worktree
+        &config.reviewer_thread_cwd
     };
     json!({
         "id": thread_id,

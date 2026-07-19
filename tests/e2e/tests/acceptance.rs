@@ -24,6 +24,9 @@ const TERMINAL_STATUSES: [&str; 5] = [
 #[test]
 fn conflict_free() {
     let fixture = AcceptanceFixture::new("conflict_free", false);
+    assert!(!fixture.task_cwd.join(".git").exists());
+    assert_ne!(fixture.task_cwd, fixture.repository.primary);
+    assert_ne!(fixture.task_cwd, fixture.repository.reviewer);
     let (run_id, _daemon) = fixture.start();
     let accepted = fixture.wait_for_terminal(&run_id);
 
@@ -368,6 +371,7 @@ struct AcceptanceFixture {
     state_dir: PathBuf,
     fake_config: PathBuf,
     fake_state: PathBuf,
+    task_cwd: PathBuf,
     branch: String,
 }
 
@@ -378,6 +382,8 @@ impl AcceptanceFixture {
         let state_dir = temp.path().join("state");
         let fake_config = temp.path().join("fake-config.json");
         let fake_state = temp.path().join("fake-state");
+        let task_cwd = temp.path().join("task-home");
+        fs::create_dir(&task_cwd).unwrap();
         let branch = format!("consensus/e2e-{}", scenario.replace('_', "-"));
         fs::write(
             &fake_config,
@@ -385,6 +391,8 @@ impl AcceptanceFixture {
                 "scenario": scenario,
                 "primary_thread": PRIMARY_THREAD,
                 "reviewer_thread": REVIEWER_THREAD,
+                "primary_thread_cwd": task_cwd,
+                "reviewer_thread_cwd": task_cwd,
                 "primary_worktree": repository.primary,
                 "reviewer_worktree": repository.reviewer,
                 "git_common_dir": repository.git_common_dir,
@@ -400,6 +408,7 @@ impl AcceptanceFixture {
             state_dir,
             fake_config,
             fake_state,
+            task_cwd,
             branch,
         }
     }
@@ -425,6 +434,10 @@ impl AcceptanceFixture {
             PRIMARY_THREAD,
             "--reviewer-thread",
             REVIEWER_THREAD,
+            "--primary-worktree",
+            self.repository.primary.to_str().unwrap(),
+            "--reviewer-worktree",
+            self.repository.reviewer.to_str().unwrap(),
             "--integration-branch",
             &self.branch,
             "--test",
@@ -443,6 +456,10 @@ impl AcceptanceFixture {
             PRIMARY_THREAD,
             "--reviewer-thread",
             REVIEWER_THREAD,
+            "--primary-worktree",
+            self.repository.primary.to_str().unwrap(),
+            "--reviewer-worktree",
+            self.repository.reviewer.to_str().unwrap(),
             "--integration-branch",
             &self.branch,
             "--json",
