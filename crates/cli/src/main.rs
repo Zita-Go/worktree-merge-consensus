@@ -384,6 +384,10 @@ impl ToolBackend for CliMcpBackend {
             "consensus_list_threads" => list_threads_value()
                 .await
                 .map(|threads| json!({"threads": threads})),
+            "consensus_list_worktrees" => {
+                let arguments: McpWorktreeListArguments = decode_mcp_arguments(arguments)?;
+                list_worktrees_value(Path::new(&arguments.repository_path))
+            }
             "consensus_start" => {
                 let arguments: McpStartArguments = decode_mcp_arguments(arguments)?;
                 start_run_value(
@@ -391,8 +395,8 @@ impl ToolBackend for CliMcpBackend {
                     &RunArgs {
                         primary_thread: Some(arguments.primary_thread),
                         reviewer_thread: Some(arguments.reviewer_thread),
-                        primary_worktree: None,
-                        reviewer_worktree: None,
+                        primary_worktree: Some(PathBuf::from(arguments.primary_worktree)),
+                        reviewer_worktree: Some(PathBuf::from(arguments.reviewer_worktree)),
                         repository: None,
                         integration_branch: arguments.integration_branch,
                         test_commands: arguments.test_commands,
@@ -446,9 +450,16 @@ impl ToolBackend for CliMcpBackend {
 struct McpStartArguments {
     primary_thread: String,
     reviewer_thread: String,
+    primary_worktree: String,
+    reviewer_worktree: String,
     integration_branch: Option<String>,
     #[serde(default)]
     test_commands: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct McpWorktreeListArguments {
+    repository_path: String,
 }
 
 #[derive(Deserialize)]

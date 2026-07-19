@@ -44,7 +44,7 @@ async fn exchange(input: &str, backend: Arc<dyn ToolBackend>) -> Vec<Value> {
 }
 
 #[tokio::test]
-async fn initializes_and_lists_exactly_the_six_public_tools() {
+async fn initializes_and_lists_exactly_the_seven_public_tools() {
     let input = concat!(
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
         "\n",
@@ -77,6 +77,7 @@ async fn initializes_and_lists_exactly_the_six_public_tools() {
         [
             "consensus_doctor",
             "consensus_list_threads",
+            "consensus_list_worktrees",
             "consensus_start",
             "consensus_status",
             "consensus_resume",
@@ -89,18 +90,27 @@ async fn initializes_and_lists_exactly_the_six_public_tools() {
     }
     assert_eq!(
         tools[2]["inputSchema"]["required"],
-        json!(["primary_thread", "reviewer_thread"])
+        json!(["repository_path"])
     );
-    assert_eq!(tools[3]["inputSchema"]["required"], json!([]));
-    assert_eq!(tools[4]["inputSchema"]["required"], json!(["run_id"]));
+    assert_eq!(
+        tools[3]["inputSchema"]["required"],
+        json!([
+            "primary_thread",
+            "reviewer_thread",
+            "primary_worktree",
+            "reviewer_worktree"
+        ])
+    );
+    assert_eq!(tools[4]["inputSchema"]["required"], json!([]));
     assert_eq!(tools[5]["inputSchema"]["required"], json!(["run_id"]));
+    assert_eq!(tools[6]["inputSchema"]["required"], json!(["run_id"]));
 }
 
 #[tokio::test]
 async fn tool_calls_return_text_and_structured_content() {
     let backend = Arc::new(FakeBackend::default());
     let input = concat!(
-        r#"{"jsonrpc":"2.0","id":"start","method":"tools/call","params":{"name":"consensus_start","arguments":{"primary_thread":"p","reviewer_thread":"r","test_commands":["cargo test"]}}}"#,
+        r#"{"jsonrpc":"2.0","id":"start","method":"tools/call","params":{"name":"consensus_start","arguments":{"primary_thread":"p","reviewer_thread":"r","primary_worktree":"/repo/p","reviewer_worktree":"/repo/r","test_commands":["cargo test"]}}}"#,
         "\n",
     );
 
@@ -125,6 +135,8 @@ async fn tool_calls_return_text_and_structured_content() {
             json!({
                 "primary_thread": "p",
                 "reviewer_thread": "r",
+                "primary_worktree": "/repo/p",
+                "reviewer_worktree": "/repo/r",
                 "test_commands": ["cargo test"]
             })
         )]
@@ -138,8 +150,11 @@ async fn unsupported_methods_and_invalid_tool_arguments_use_json_rpc_errors() {
         "\n",
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"consensus_resume","arguments":{}}}"#,
         "\n",
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"consensus_list_worktrees","arguments":{}}}"#,
+        "\n",
     );
     let responses = exchange(input, Arc::new(FakeBackend::default())).await;
     assert_eq!(responses[0]["error"]["code"], -32601);
     assert_eq!(responses[1]["error"]["code"], -32602);
+    assert_eq!(responses[2]["error"]["code"], -32602);
 }

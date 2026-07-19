@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-pub const MCP_TOOL_NAMES: [&str; 6] = [
+pub const MCP_TOOL_NAMES: [&str; 7] = [
     "consensus_doctor",
     "consensus_list_threads",
+    "consensus_list_worktrees",
     "consensus_start",
     "consensus_status",
     "consensus_resume",
@@ -24,6 +25,22 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             MCP_TOOL_NAMES[2],
+            "List registered Git worktrees for one repository without modifying them.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repository_path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Absolute path to any worktree in the source repository."
+                    }
+                },
+                "required": ["repository_path"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            MCP_TOOL_NAMES[3],
             "Start reviewed integration between two existing tasks and return immediately.",
             json!({
                 "type": "object",
@@ -38,6 +55,16 @@ pub fn tool_definitions() -> Vec<Value> {
                         "minLength": 1,
                         "description": "Existing task that protects its implementation details."
                     },
+                    "primary_worktree": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Absolute registered worktree containing the primary implementation."
+                    },
+                    "reviewer_worktree": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Absolute registered worktree containing the reviewer implementation."
+                    },
                     "integration_branch": {
                         "type": "string",
                         "minLength": 1,
@@ -49,12 +76,17 @@ pub fn tool_definitions() -> Vec<Value> {
                         "description": "Additional verification commands for the primary task."
                     }
                 },
-                "required": ["primary_thread", "reviewer_thread"],
+                "required": [
+                    "primary_thread",
+                    "reviewer_thread",
+                    "primary_worktree",
+                    "reviewer_worktree"
+                ],
                 "additionalProperties": false
             }),
         ),
         tool(
-            MCP_TOOL_NAMES[3],
+            MCP_TOOL_NAMES[4],
             "Show one consensus run, or list all runs when run_id is omitted.",
             json!({
                 "type": "object",
@@ -66,12 +98,12 @@ pub fn tool_definitions() -> Vec<Value> {
             }),
         ),
         tool(
-            MCP_TOOL_NAMES[4],
+            MCP_TOOL_NAMES[5],
             "Resume a paused consensus run after its blocking condition is resolved.",
             run_id_schema(),
         ),
         tool(
-            MCP_TOOL_NAMES[5],
+            MCP_TOOL_NAMES[6],
             "Cancel a consensus run without reverting or deleting Git state.",
             run_id_schema(),
         ),
@@ -82,6 +114,11 @@ pub(crate) fn validate_arguments(name: &str, arguments: Value) -> Result<Value, 
     match name {
         "consensus_doctor" | "consensus_list_threads" => {
             let parsed: EmptyArguments = parse(arguments)?;
+            serde_json::to_value(parsed).map_err(|error| error.to_string())
+        }
+        "consensus_list_worktrees" => {
+            let parsed: WorktreeListArguments = parse(arguments)?;
+            parsed.validate()?;
             serde_json::to_value(parsed).map_err(|error| error.to_string())
         }
         "consensus_start" => {
@@ -124,9 +161,23 @@ struct EmptyArguments {}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct WorktreeListArguments {
+    repository_path: String,
+}
+
+impl WorktreeListArguments {
+    fn validate(&self) -> Result<(), String> {
+        nonempty("repository_path", &self.repository_path)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StartArguments {
     primary_thread: String,
     reviewer_thread: String,
+    primary_worktree: String,
+    reviewer_worktree: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     integration_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -139,6 +190,11 @@ impl StartArguments {
         nonempty("reviewer_thread", &self.reviewer_thread)?;
         if self.primary_thread == self.reviewer_thread {
             return Err("primary_thread and reviewer_thread must differ".into());
+        }
+        nonempty("primary_worktree", &self.primary_worktree)?;
+        nonempty("reviewer_worktree", &self.reviewer_worktree)?;
+        if self.primary_worktree == self.reviewer_worktree {
+            return Err("primary_worktree and reviewer_worktree must differ".into());
         }
         if let Some(branch) = &self.integration_branch {
             nonempty("integration_branch", branch)?;

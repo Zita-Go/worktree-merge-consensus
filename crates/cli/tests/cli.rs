@@ -140,5 +140,5 @@ fn hidden_mcp_server_mode_serves_the_protocol_over_stdio() {
         .collect::<Vec<_>>();
     assert_eq!(responses.len(), 2);
     assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
-    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 7);
 }
