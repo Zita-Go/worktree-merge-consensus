@@ -1,5 +1,6 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
+use std::fs;
 
 #[test]
 fn help_lists_public_commands_but_not_internal_modes() {
@@ -79,6 +80,28 @@ fn worktree_discovery_help_requires_repository_anchor() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--repository"));
+}
+
+#[test]
+fn doctor_rejects_legacy_standalone_skill_without_deleting_it() {
+    let codex_home = tempfile::tempdir().unwrap();
+    let skill = codex_home
+        .path()
+        .join("skills/worktree-merge-consensus/SKILL.md");
+    fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    fs::write(&skill, "legacy workflow\n").unwrap();
+
+    let output = Command::cargo_bin("codex-consensus")
+        .unwrap()
+        .env("CODEX_HOME", codex_home.path())
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "LEGACY_SKILL_CONFLICT");
+    assert_eq!(fs::read_to_string(skill).unwrap(), "legacy workflow\n");
 }
 
 #[test]

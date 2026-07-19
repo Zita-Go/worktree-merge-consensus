@@ -1,4 +1,5 @@
 mod args;
+mod installation;
 mod output;
 mod select;
 
@@ -26,6 +27,7 @@ use consensus_daemon::{
     wire::{DaemonRequest, DaemonResponse},
 };
 use consensus_mcp_server::{BackendError, ToolBackend, serve_stdio};
+use installation::{DoctorSurface, inspect_effective_legacy_skill};
 use output::{emit_error, emit_serializable, emit_value, human_json};
 use select::{
     SelectedBinding, SelectedTasks, TaskSelector, TerminalTaskSelector, confirm_binding,
@@ -135,7 +137,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 }
 
 async fn doctor(state_dir: &Path, json_output: bool) -> Result<(), CliError> {
-    let value = doctor_value(state_dir).await?;
+    let value = doctor_value(state_dir, DoctorSurface::DirectCli).await?;
     emit_value(&value, json_output, || {
         format!(
             "Ready: Git, compatible Codex App Server, private state at {}, and consensus daemon",
@@ -145,7 +147,9 @@ async fn doctor(state_dir: &Path, json_output: bool) -> Result<(), CliError> {
     Ok(())
 }
 
-async fn doctor_value(state_dir: &Path) -> Result<Value, CliError> {
+async fn doctor_value(state_dir: &Path, surface: DoctorSurface) -> Result<Value, CliError> {
+    let legacy_skill = inspect_effective_legacy_skill(surface)
+        .map_err(|error| CliError::new(error.code(), error.to_string()))?;
     let git = std::process::Command::new("git")
         .arg("--version")
         .output()
@@ -175,6 +179,8 @@ async fn doctor_value(state_dir: &Path) -> Result<Value, CliError> {
         "daemon": "reachable",
         "state_dir": state_dir,
         "sampled_threads": page.data.len(),
+        "plugin_surface": surface == DoctorSurface::PluginMcp,
+        "legacy_skill": legacy_skill,
     });
     Ok(value)
 }
@@ -380,7 +386,7 @@ struct CliMcpBackend {
 impl ToolBackend for CliMcpBackend {
     async fn call(&self, tool: &str, arguments: Value) -> Result<Value, BackendError> {
         let result = match tool {
-            "consensus_doctor" => doctor_value(&self.state_dir).await,
+            "consensus_doctor" => doctor_value(&self.state_dir, DoctorSurface::PluginMcp).await,
             "consensus_list_threads" => list_threads_value()
                 .await
                 .map(|threads| json!({"threads": threads})),
