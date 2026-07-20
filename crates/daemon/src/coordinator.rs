@@ -514,6 +514,14 @@ where
         Ok(state)
     }
 
+    pub async fn check_app_server(&self) -> Result<(), CoordinatorError> {
+        self.app
+            .list_threads(None, 1)
+            .await
+            .map_err(|error| communication_error("thread/list", None, error))?;
+        Ok(())
+    }
+
     async fn drive_model_action(
         &self,
         state: &mut RunState,

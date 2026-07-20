@@ -91,6 +91,7 @@ async fn controller_backed_start_returns_immediately_and_dispatches_background_d
     let controller = Arc::new(FakeRunController {
         store: store.clone(),
         drives: AtomicUsize::new(0),
+        health_checks: AtomicUsize::new(0),
     });
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let mut server = tokio::spawn(run_server_with_controller(
@@ -100,6 +101,9 @@ async fn controller_backed_start_returns_immediately_and_dispatches_background_d
         shutdown_rx,
     ));
     let client = wait_for_daemon(&config.socket_path, &mut server).await;
+    let health = client.request(DaemonRequest::Health).await.unwrap();
+    assert!(health.ok);
+    assert_eq!(controller.health_checks.load(Ordering::SeqCst), 1);
     let run = fixture_run(RUN_ID, "/repo/.git");
 
     let response = client
@@ -134,6 +138,7 @@ async fn daemon_restart_redispatches_only_recoverable_runs() {
     let controller = Arc::new(FakeRunController {
         store: store.clone(),
         drives: AtomicUsize::new(0),
+        health_checks: AtomicUsize::new(0),
     });
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let mut server = tokio::spawn(run_server_with_controller(
@@ -159,10 +164,16 @@ async fn daemon_restart_redispatches_only_recoverable_runs() {
 struct FakeRunController {
     store: SqliteRunStore,
     drives: AtomicUsize,
+    health_checks: AtomicUsize,
 }
 
 #[async_trait]
 impl RunController for FakeRunController {
+    async fn check_app_server(&self) -> Result<(), CoordinatorError> {
+        self.health_checks.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
     async fn start_run(
         &self,
         state: RunState,

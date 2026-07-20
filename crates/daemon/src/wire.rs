@@ -14,6 +14,7 @@ const MAX_WIRE_LINE_BYTES: usize = 1024 * 1024;
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum DaemonRequest {
     Ping,
+    Health,
     Status {
         run_id: Option<String>,
     },

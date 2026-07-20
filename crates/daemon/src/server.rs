@@ -18,6 +18,9 @@ use crate::{
 
 #[async_trait]
 pub trait RunController: Send + Sync {
+    async fn check_app_server(&self) -> Result<(), CoordinatorError> {
+        Ok(())
+    }
     async fn start_run(
         &self,
         state: RunState,
@@ -34,6 +37,10 @@ where
     A: AppServer + 'static,
     R: RepositorySafety + 'static,
 {
+    async fn check_app_server(&self) -> Result<(), CoordinatorError> {
+        Coordinator::check_app_server(self).await
+    }
+
     async fn start_run(
         &self,
         state: RunState,
@@ -233,6 +240,15 @@ async fn handle_request(
 ) -> DaemonResponse {
     match request {
         DaemonRequest::Ping => DaemonResponse::success(ping_result()),
+        DaemonRequest::Health => match controller {
+            Some(controller) => match controller.check_app_server().await {
+                Ok(()) => DaemonResponse::success(json!({"app_server": "reachable"})),
+                Err(error) => coordinator_failure(error),
+            },
+            None => {
+                DaemonResponse::failure("DAEMON_UNAVAILABLE", "daemon has no App Server controller")
+            }
+        },
         DaemonRequest::Status { run_id } => match run_id {
             Some(run_id) => match store.load_run(&run_id) {
                 Ok(Some(state)) => serialize_success(&state),

@@ -58,11 +58,15 @@ the evidence below.
    verification turn uses only the persisted `verification_worktree`, runs each
    frozen command exactly once, and records successful `commandExecution`
    evidence with turn ID, item ID, command, cwd, and exit code.
-7. Restart the coordinator daemon during a second disposable integration turn
-   and confirm the persisted run resumes without a duplicate integration
-   action. Repeat during a verification command that creates a disposable test
-   artifact; confirm the same verification turn is recovered without rerunning
-   the command and without relaxing exact-SHA/no-remote isolation.
+7. While the coordinator daemon remains alive, restart the managed App Server
+   and confirm `doctor` repairs the daemon-owned proxy, reaps the old proxy
+   process, and permits an idempotent task read without manual coordinator
+   restart. Then restart the coordinator daemon during a second disposable
+   integration turn and confirm the persisted run resumes without a duplicate
+   integration action. Repeat during a verification command that creates a
+   disposable test artifact; confirm the same verification turn is recovered
+   without rerunning the command and without relaxing exact-SHA/no-remote
+   isolation.
 8. Verify `accepted_result` records the authoritative tests,
    `source_refs_unchanged: true`, and local-only/no-push/no-PR fields. Verify the
    test cwd is a cleanly materialized clone of the exact integration SHA with a
@@ -91,6 +95,7 @@ Replace `NOT_RECORDED` only with reproducible, redacted evidence.
 | Source refs unchanged | `NOT_RECORDED` |
 | Required tests | `NOT_RECORDED` |
 | Verification clone / command-item evidence | `NOT_RECORDED` |
+| App Server proxy reconnection | `NOT_RECORDED` |
 | Restart recovery | `NOT_RECORDED` |
 | Cancellation preservation | `NOT_RECORDED` |
 

@@ -11,7 +11,10 @@ use std::{
     sync::Arc,
 };
 
-use app_server_client::{AppServer, CodexAppServer, ConnectOptions, ThreadDetail, ThreadSummary};
+use app_server_client::{
+    AppServer, CodexAppServer, ConnectOptions, ReconnectingCodexAppServer, ThreadDetail,
+    ThreadSummary,
+};
 use args::{Cli, Command, DaemonCommand, RunArgs, ThreadsCommand, WorktreesCommand};
 use async_trait::async_trait;
 use clap::Parser;
@@ -172,11 +175,17 @@ async fn doctor_value(state_dir: &Path, surface: DoctorSurface) -> Result<Value,
         .ping()
         .await
         .map_err(|error| CliError::new("DAEMON_UNREACHABLE", error.to_string()))?;
+    let daemon_health = client
+        .request(DaemonRequest::Health)
+        .await
+        .map_err(|error| CliError::new("DAEMON_UNREACHABLE", error.to_string()))?;
+    response_result(daemon_health)?;
     let value = json!({
         "ok": true,
         "git": String::from_utf8_lossy(&git.stdout).trim(),
         "codex_app_server": "compatible",
         "daemon": "reachable",
+        "daemon_app_server": "reachable",
         "state_dir": state_dir,
         "sampled_threads": page.data.len(),
         "plugin_surface": surface == DoctorSurface::PluginMcp,
@@ -347,7 +356,7 @@ async fn serve_daemon(state_dir: PathBuf, codex_binary: PathBuf) -> Result<(), C
         codex_binary
     };
     let app = Arc::new(
-        CodexAppServer::connect(ConnectOptions {
+        ReconnectingCodexAppServer::connect(ConnectOptions {
             codex_binary,
             ..ConnectOptions::default()
         })

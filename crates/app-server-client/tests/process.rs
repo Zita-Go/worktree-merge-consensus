@@ -2,7 +2,10 @@
 
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 
-use app_server_client::{CodexAppServer, client::ConnectOptions};
+use app_server_client::{
+    AppServer, CodexAppServer, ReconnectingCodexAppServer, TurnExecutionPolicy,
+    client::ConnectOptions,
+};
 
 #[tokio::test]
 async fn compatible_binary_starts_daemon_then_proxy_and_initializes() {
@@ -156,6 +159,75 @@ async fn unsupported_websocket_frame_reports_the_protocol_cause() {
     );
 }
 
+#[tokio::test]
+async fn reconnecting_client_replaces_a_proxy_closed_by_an_app_server_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("calls.log");
+    let binary = fake_codex_that_resets_once(temp.path(), &log, "0.144.5");
+
+    let client = ReconnectingCodexAppServer::connect(ConnectOptions {
+        codex_binary: binary,
+        control_socket: None,
+        start_daemon: true,
+    })
+    .await
+    .unwrap();
+
+    let page = client.list_threads(None, 1).await.unwrap();
+
+    assert!(page.data.is_empty());
+    let calls = fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| *line == "app-server proxy")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn reconnecting_client_does_not_repeat_an_uncertain_turn_start() {
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("calls.log");
+    let binary = fake_codex_with_user_agent_and_mode(
+        temp.path(),
+        &log,
+        "0.144.5",
+        "codex-cli/0.144.5",
+        "drop-turn",
+    );
+    let client = ReconnectingCodexAppServer::connect(ConnectOptions {
+        codex_binary: binary,
+        control_socket: None,
+        start_daemon: true,
+    })
+    .await
+    .unwrap();
+
+    let error = client
+        .start_turn(
+            "thread-1",
+            "test",
+            &TurnExecutionPolicy::ReadOnly {
+                cwd: temp.path().to_owned(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("WebSocket"));
+    let calls = fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| *line == "app-server proxy")
+            .count(),
+        1,
+        "an uncertain non-idempotent request must not create a replacement proxy and resend"
+    );
+}
+
 fn fake_codex(directory: &Path, log: &Path, version: &str) -> std::path::PathBuf {
     fake_codex_with_server_version(directory, log, version, version)
 }
@@ -215,6 +287,53 @@ exit 2
         version,
         user_agent = user_agent,
         mode = mode,
+    );
+    fs::write(&binary, script).unwrap();
+    let mut permissions = fs::metadata(&binary).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&binary, permissions).unwrap();
+    binary
+}
+
+fn fake_codex_that_resets_once(directory: &Path, log: &Path, version: &str) -> std::path::PathBuf {
+    let binary = directory.join("codex");
+    let proxy = directory.join("fake_proxy.py");
+    let counter = directory.join("proxy-count");
+    fs::write(&proxy, FAKE_WEBSOCKET_PROXY).unwrap();
+    let script = format!(
+        r#"#!/bin/sh
+LOG='{}'
+PROXY='{}'
+COUNTER='{}'
+printf '%s\n' "$*" >> "$LOG"
+if [ "$1" = "--version" ]; then
+  printf 'codex-cli {}\n'
+  exit 0
+fi
+if [ "$1 $2 $3" = "app-server daemon start" ]; then
+  exit 0
+fi
+if [ "$1 $2" = "app-server proxy" ]; then
+  count=0
+  if [ -f "$COUNTER" ]; then
+    count=$(cat "$COUNTER")
+  fi
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$COUNTER"
+  if [ "$count" -eq 1 ]; then
+    mode='recover-first'
+  else
+    mode='recover-second'
+  fi
+  exec /usr/bin/env python3 "$PROXY" 'codex-cli/{}' "$mode"
+fi
+exit 2
+"#,
+        log.display(),
+        proxy.display(),
+        counter.display(),
+        version,
+        version,
     );
     fs::write(&binary, script).unwrap();
     let mut permissions = fs::metadata(&binary).unwrap().permissions();
@@ -300,7 +419,24 @@ while True:
     if opcode != 1:
         continue
     request = json.loads(payload.decode('utf-8'))
-    if request.get('method') != 'initialize' or 'id' not in request:
+    method = request.get('method')
+    if method == 'initialized':
+        if mode == 'recover-first':
+            sys.exit(0)
+        continue
+
+    if method == 'thread/list' and 'id' in request:
+        response = {
+            'id': request['id'],
+            'result': {'data': [], 'nextCursor': None},
+        }
+        send_frame(1, json.dumps(response, separators=(',', ':')).encode('utf-8'))
+        continue
+
+    if method == 'turn/start' and mode == 'drop-turn':
+        sys.exit(0)
+
+    if method != 'initialize' or 'id' not in request:
         continue
     if mode == 'silent':
         continue

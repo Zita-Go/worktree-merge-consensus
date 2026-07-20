@@ -132,6 +132,10 @@ impl JsonRpcTransport {
         self.inner.events_rx.lock().await.recv().await
     }
 
+    pub async fn is_closed(&self) -> bool {
+        self.inner.requests.lock().await.closed.is_some()
+    }
+
     pub(crate) async fn close_with_error(&self, error: RpcError) {
         fail_pending(&self.inner, error.clone()).await;
         let _ = self.inner.events_tx.send(AppEvent {

@@ -91,6 +91,11 @@ pub struct CodexAppServer {
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
 }
 
+pub struct ReconnectingCodexAppServer {
+    options: ConnectOptions,
+    inner: Mutex<CodexAppServer>,
+}
+
 impl CodexAppServer {
     pub fn from_transport(transport: JsonRpcTransport) -> Self {
         Self {
@@ -188,7 +193,7 @@ impl CodexAppServer {
         let client = Self {
             transport: websocket_json_transport(websocket),
             process: Some(Arc::new(ProcessGuard {
-                child: StdMutex::new(child),
+                child: StdMutex::new(Some(child)),
             })),
             stderr_tail,
         };
@@ -210,6 +215,12 @@ impl CodexAppServer {
 
     pub async fn redacted_stderr_tail(&self) -> Vec<String> {
         self.stderr_tail.lock().await.iter().cloned().collect()
+    }
+
+    async fn shutdown_proxy(&self) {
+        if let Some(process) = &self.process {
+            process.shutdown().await;
+        }
     }
 
     async fn rpc_request(&self, method: &str, params: Value) -> Result<Value, AppServerError> {
@@ -365,14 +376,152 @@ impl fmt::Debug for CodexAppServer {
 }
 
 struct ProcessGuard {
-    child: StdMutex<Child>,
+    child: StdMutex<Option<Child>>,
+}
+
+impl ProcessGuard {
+    async fn shutdown(&self) {
+        let child = self.child.lock().ok().and_then(|mut child| child.take());
+        if let Some(mut child) = child {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+    }
 }
 
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
         if let Ok(mut child) = self.child.lock() {
-            let _ = child.start_kill();
+            if let Some(mut child) = child.take() {
+                let _ = child.start_kill();
+            }
         }
+    }
+}
+
+impl ReconnectingCodexAppServer {
+    pub async fn connect(options: ConnectOptions) -> Result<Self, AppServerError> {
+        let client = CodexAppServer::connect(options.clone()).await?;
+        Ok(Self {
+            options,
+            inner: Mutex::new(client),
+        })
+    }
+
+    async fn reconnect_locked(
+        &self,
+        client: &mut CodexAppServer,
+        operation: &str,
+        original_error: &AppServerError,
+    ) -> Result<(), AppServerError> {
+        let replacement = CodexAppServer::connect(self.options.clone())
+            .await
+            .map_err(|reconnect_error| {
+                AppServerError::Process(format!(
+                    "{operation} failed because the managed App Server connection closed ({original_error}); reconnecting failed: {reconnect_error}"
+                ))
+            })?;
+        client.shutdown_proxy().await;
+        *client = replacement;
+        Ok(())
+    }
+}
+
+fn reconnectable(error: &AppServerError) -> bool {
+    matches!(
+        error,
+        AppServerError::Rpc(RpcError::Io(_) | RpcError::Protocol(_) | RpcError::Closed)
+    )
+}
+
+impl fmt::Debug for ReconnectingCodexAppServer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReconnectingCodexAppServer")
+            .field("codex_binary", &self.options.codex_binary)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl AppServer for ReconnectingCodexAppServer {
+    async fn initialize(&self) -> Result<InitializeInfo, AppServerError> {
+        let mut client = self.inner.lock().await;
+        match client.initialize().await {
+            Ok(info) => Ok(info),
+            Err(error) if reconnectable(&error) => {
+                self.reconnect_locked(&mut client, "initialize", &error)
+                    .await?;
+                client.initialize().await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn list_threads(
+        &self,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<ThreadPage, AppServerError> {
+        let mut client = self.inner.lock().await;
+        match client.list_threads(cursor.clone(), limit).await {
+            Ok(page) => Ok(page),
+            Err(error) if reconnectable(&error) => {
+                self.reconnect_locked(&mut client, "thread/list", &error)
+                    .await?;
+                client.list_threads(cursor, limit).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn read_thread(&self, thread_id: &str) -> Result<ThreadDetail, AppServerError> {
+        let mut client = self.inner.lock().await;
+        match client.read_thread(thread_id).await {
+            Ok(detail) => Ok(detail),
+            Err(error) if reconnectable(&error) => {
+                self.reconnect_locked(&mut client, "thread/read", &error)
+                    .await?;
+                client.read_thread(thread_id).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn resume_thread(&self, thread_id: &str) -> Result<ThreadDetail, AppServerError> {
+        let mut client = self.inner.lock().await;
+        match client.resume_thread(thread_id).await {
+            Ok(detail) => Ok(detail),
+            Err(error) if reconnectable(&error) => {
+                self.reconnect_locked(&mut client, "thread/resume", &error)
+                    .await?;
+                client.resume_thread(thread_id).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn start_turn(
+        &self,
+        thread_id: &str,
+        prompt: &str,
+        policy: &TurnExecutionPolicy,
+    ) -> Result<TurnHandle, AppServerError> {
+        let mut client = self.inner.lock().await;
+        if client.transport().is_closed().await {
+            let error = AppServerError::Rpc(RpcError::Closed);
+            self.reconnect_locked(&mut client, "turn/start preflight", &error)
+                .await?;
+        }
+        client.start_turn(thread_id, prompt, policy).await
+    }
+
+    async fn respond_to_request(&self, id: Value, result: Value) -> Result<(), AppServerError> {
+        self.inner.lock().await.respond_to_request(id, result).await
+    }
+
+    async fn next_event(&self) -> Option<AppEvent> {
+        self.inner.lock().await.next_event().await
     }
 }
 

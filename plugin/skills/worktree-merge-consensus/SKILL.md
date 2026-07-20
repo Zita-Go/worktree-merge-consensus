@@ -40,6 +40,11 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
 ## Follow-up controls
 
 - Call `consensus_status` when the user asks for progress or the accepted result.
+- If `consensus_start` returns `COMMUNICATION_FAILURE` before a `run_id` exists,
+  call `consensus_doctor` once; v0.1.7 and later probe and repair the
+  daemon-owned App Server proxy. Verify that no run was created, then retry the
+  exact confirmed mapping once. If a run ID exists, inspect that run instead of
+  creating a replacement.
 - Call `consensus_resume` only after the user resolves the reported pause reason.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
