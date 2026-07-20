@@ -4,9 +4,9 @@
       "title": "Worktree Merge Consensus",
       "description": "Coordinate reviewed integration across two existing Codex tasks.",
       "cwd": ".",
-      "command": "codex-consensus",
+      "command": "/bin/sh",
       "args": [
-        "mcp-server"
+        "./scripts/start-mcp.sh"
       ]
     }
   }

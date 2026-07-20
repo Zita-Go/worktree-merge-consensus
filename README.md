@@ -76,8 +76,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.1-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.1-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.2-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.2-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -112,6 +112,11 @@ installation or update, then restart Codex or open a new task. In a Codex task,
 invoke `$worktree-merge-consensus`; the Skill uses seven MCP tools, including
 `consensus_list_worktrees`, only to launch and control the persistent
 coordinator. It does not relay review turns through a third agent.
+
+Names such as `consensus_doctor` are MCP tool names, not shell executables.
+Codex starts the plugin server as `codex-consensus mcp-server`; the equivalent
+terminal diagnostic is `codex-consensus doctor`. Do not run
+`command -v consensus_doctor`.
 
 If `codex-consensus doctor` reports `LEGACY_SKILL_CONFLICT`, an older manually
 installed `$CODEX_HOME/skills/worktree-merge-consensus` is shadowing the plugin
@@ -224,6 +229,14 @@ persistent log file by default, so CLI output, Codex task history, and
 
 ## Troubleshooting
 
+- Missing `consensus_*` tools: first run `codex-consensus doctor` in the same
+  host environment. A successful result verifies the binary and coordinator,
+  but not plugin tool registration. Run `codex mcp list --json` and check that
+  `worktreeMergeConsensus` is present and enabled. Reinstall a matching plugin
+  version and open a new task when it is absent. Never look for a
+  `consensus_doctor` executable. The bundled launcher checks
+  `CODEX_CONSENSUS_BIN`, `PATH`, the directory containing `codex`,
+  `/usr/local/bin`, and `~/.local/bin` in that order.
 - `INCOMPATIBLE_CODEX`: confirm `codex --version`, then compare it with
   [the compatibility policy](docs/compatibility.md). Versions below `0.144.1`,
   malformed output, and App Server identity/method/shape mismatches fail closed.

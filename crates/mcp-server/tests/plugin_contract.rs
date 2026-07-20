@@ -1,4 +1,7 @@
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, process::Command};
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use serde_json::{Value, json};
 
@@ -29,12 +32,31 @@ fn plugin_manifest_and_mcp_registration_match_the_binary() {
                     "title": "Worktree Merge Consensus",
                     "description": "Coordinate reviewed integration across two existing Codex tasks.",
                     "cwd": ".",
-                    "command": "codex-consensus",
-                    "args": ["mcp-server"]
+                    "command": "/bin/sh",
+                    "args": ["./scripts/start-mcp.sh"]
                 }
             }
         })
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn plugin_mcp_launcher_uses_the_explicit_binary_override() {
+    let root = repository_root();
+    let temp = tempfile::tempdir().unwrap();
+    let fake_binary = temp.path().join("codex-consensus");
+    fs::write(&fake_binary, "#!/bin/sh\nprintf '%s\\n' \"$1\"\n").unwrap();
+    fs::set_permissions(&fake_binary, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = Command::new("/bin/sh")
+        .arg(root.join("plugin/scripts/start-mcp.sh"))
+        .env("CODEX_CONSENSUS_BIN", &fake_binary)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "mcp-server\n");
 }
 
 #[test]
@@ -44,6 +66,17 @@ fn skill_is_a_launcher_for_the_daemon_not_a_review_relay() {
         fs::read_to_string(root.join("plugin/skills/worktree-merge-consensus/SKILL.md")).unwrap();
     for required in [
         "consensus_doctor",
+        "MCP tool, not a shell command",
+        "codex-consensus doctor",
+        "codex-consensus mcp-server",
+        "Never run `consensus_doctor` as an executable",
+        "codex-consensus threads list",
+        "codex-consensus worktrees list",
+        "codex-consensus run",
+        "codex-consensus status",
+        "codex-consensus resume",
+        "codex-consensus cancel",
+        "codex mcp list --json",
         "consensus_list_threads",
         "consensus_list_worktrees",
         "consensus_start",

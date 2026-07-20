@@ -9,6 +9,22 @@ description: Use when two existing Codex tasks on the same host have committed c
 
 Launch the persistent local coordinator for two-task worktree integration. Keep this skill limited to choosing the tasks and starting the run; the daemon owns the consensus workflow.
 
+## Tool surface
+
+`consensus_doctor` is an MCP tool, not a shell command. The same applies to every `consensus_*` name below. Call these names through the Codex tool interface. Never run `consensus_doctor` as an executable.
+
+Codex starts the bundled MCP server with `codex-consensus mcp-server`. Do not start that foreground process manually during a normal plugin run. The CLI equivalents are:
+
+- `consensus_doctor` → `codex-consensus doctor`
+- `consensus_list_threads` → `codex-consensus threads list`
+- `consensus_list_worktrees` → `codex-consensus worktrees list --repository <absolute-path>`
+- `consensus_start` → `codex-consensus run` with both task IDs and both worktree paths
+- `consensus_status` → `codex-consensus status <run-id>`
+- `consensus_resume` → `codex-consensus resume <run-id>`
+- `consensus_cancel` → `codex-consensus cancel <run-id>`
+
+Use those CLI commands only for diagnostics or when the user explicitly requests the CLI surface. If no `consensus_*` MCP tools are exposed, run `codex mcp list --json`, `command -v codex-consensus`, and `codex-consensus doctor` when shell access is available. Report whether `worktreeMergeConsensus` is absent, disabled, or unable to start, then stop. A successful CLI doctor does not prove that the plugin MCP tools were loaded. Do not search for a `consensus_doctor` binary or substitute ordinary task/thread tools.
+
 ## Launch
 
 1. Call `consensus_doctor`. Stop and report its exact error if the binary, plugin surface, Codex App Server, Git, private state, or daemon is unavailable or incompatible. For `LEGACY_SKILL_CONFLICT`, do not delete anything; give the returned migration guidance.
