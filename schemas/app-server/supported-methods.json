@@ -23,7 +23,6 @@
     "turn/start": [
       "threadId",
       "input",
-      "outputSchema",
       "cwd",
       "runtimeWorkspaceRoots",
       "approvalPolicy",
@@ -37,6 +36,11 @@
   },
   "turnLifecycle": {
     "requiredBeforeEveryTurnStart": ["thread/resume"]
+  },
+  "responseValidation": {
+    "transportOutputSchema": false,
+    "localProtocolSchema": "../protocol-v1.json",
+    "failClosed": true
   },
   "initializeResponseShape": [
     "codexHome",

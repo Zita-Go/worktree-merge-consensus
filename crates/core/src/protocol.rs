@@ -95,11 +95,6 @@ pub fn validate_message(value: Value) -> Result<ProtocolMessage, ProtocolError> 
     Ok(message)
 }
 
-pub fn output_schema() -> Value {
-    serde_json::from_str(PROTOCOL_SCHEMA_JSON)
-        .expect("the checked-in protocol schema must be valid JSON")
-}
-
 impl ProtocolMessage {
     fn validate_invariants(&self) -> Result<(), ProtocolError> {
         if self.envelope.protocol != PROTOCOL_V1 {

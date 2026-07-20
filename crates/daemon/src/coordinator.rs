@@ -14,7 +14,7 @@ use consensus_core::{
         verify_same_repository,
     },
     prompts::{PromptError, build_turn_prompt},
-    protocol::{MessageType, ProtocolMessage, output_schema, validate_message},
+    protocol::{MessageType, ProtocolMessage, validate_message},
     state::{
         NextAction, Phase, Role, RunDiagnostic, RunFacts, RunState, RunStatus, StateError,
         TestEvidence,
@@ -602,7 +602,6 @@ where
                 .start_turn(
                     &thread_id,
                     &prompt,
-                    output_schema(),
                     &turn_execution_policy(state, action, role),
                 )
                 .await

@@ -36,8 +36,15 @@ and requires these JSON-RPC methods:
 - `turn/start`
 
 It consumes `thread/status/changed`, `turn/started`, and `turn/completed`
-notifications. Task reads include turns, and every coordinator turn supplies
-the checked-in protocol JSON Schema as `outputSchema`.
+notifications. Task reads include turns. Coordinator prompts require exactly
+one JSON object, then the daemon validates the final assistant text locally
+against the checked-in protocol JSON Schema and state-machine invariants.
+
+The adapter intentionally omits App Server `outputSchema`. Codex 0.144.6 can
+accept the repository's full Draft 2020-12 schema at `turn/start` yet complete
+the turn with only a user message and no assistant output. Local validation is
+therefore authoritative and fails closed without relying on the provider's
+smaller structured-output schema subset.
 
 The App Server is experimental. A Codex release may change shapes or semantics
 without preserving this adapter. A method call or response-shape mismatch is a

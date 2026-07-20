@@ -83,6 +83,14 @@ fn pinned_fixture_distinguishes_integration_and_verification_write_roots() {
         serde_json::json!(["thread/resume"])
     );
     assert_eq!(
+        fixture["responseValidation"],
+        serde_json::json!({
+            "transportOutputSchema": false,
+            "localProtocolSchema": "../protocol-v1.json",
+            "failClosed": true
+        })
+    );
+    assert_eq!(
         profiles["primaryIntegrationWorkspaceWrite"]["writableRootRoles"],
         serde_json::json!(["primaryWorktree", "sourceGitCommonDirectory"])
     );

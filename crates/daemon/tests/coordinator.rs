@@ -1355,7 +1355,6 @@ impl AppServer for FakeAppServer {
         &self,
         thread_id: &str,
         prompt: &str,
-        output_schema: Value,
         policy: &TurnExecutionPolicy,
     ) -> Result<TurnHandle, AppServerError> {
         let mut resume_tickets = self.resume_tickets.lock().unwrap();
@@ -1369,10 +1368,6 @@ impl AppServer for FakeAppServer {
         if let Some(detail) = &self.start_error {
             return Err(AppServerError::InvalidResponse(detail.clone()));
         }
-        assert_eq!(
-            output_schema["title"],
-            "Worktree Merge Consensus Protocol v1"
-        );
         let action = prompt_action(prompt);
         self.requests
             .lock()

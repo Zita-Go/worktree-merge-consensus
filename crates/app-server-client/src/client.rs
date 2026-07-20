@@ -78,7 +78,6 @@ pub trait AppServer: Send + Sync {
         &self,
         thread_id: &str,
         prompt: &str,
-        output_schema: Value,
         policy: &TurnExecutionPolicy,
     ) -> Result<TurnHandle, AppServerError>;
     async fn respond_to_request(&self, id: Value, result: Value) -> Result<(), AppServerError>;
@@ -460,7 +459,6 @@ impl AppServer for CodexAppServer {
         &self,
         thread_id: &str,
         prompt: &str,
-        output_schema: Value,
         policy: &TurnExecutionPolicy,
     ) -> Result<TurnHandle, AppServerError> {
         let (cwd, runtime_workspace_roots, approval_policy, sandbox_policy) =
@@ -475,7 +473,6 @@ impl AppServer for CodexAppServer {
                         "text": prompt,
                         "text_elements": [],
                     }],
-                    "outputSchema": output_schema,
                     "cwd": cwd,
                     "runtimeWorkspaceRoots": runtime_workspace_roots,
                     "approvalPolicy": approval_policy,

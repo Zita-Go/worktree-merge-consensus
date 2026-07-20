@@ -101,7 +101,7 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
             turn["params"]["input"],
             json!([{"type": "text", "text": "review this", "text_elements": []}])
         );
-        assert_eq!(turn["params"]["outputSchema"]["type"], "object");
+        assert!(turn["params"].get("outputSchema").is_none());
         assert_eq!(turn["params"]["approvalPolicy"], "never");
         assert_eq!(turn["params"]["approvalsReviewer"], "user");
         assert_eq!(turn["params"]["environments"], json!([]));
@@ -188,7 +188,6 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
         .start_turn(
             "t-1",
             "review this",
-            json!({"type": "object"}),
             &TurnExecutionPolicy::ReadOnly {
                 cwd: PathBuf::from("/repo/reviewer"),
             },
@@ -200,7 +199,6 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
         .start_turn(
             "t-1",
             "integrate this",
-            json!({"type": "object"}),
             &TurnExecutionPolicy::PrimaryIntegration {
                 cwd: PathBuf::from("/repo/primary"),
                 git_common_dir: PathBuf::from("/repo/.git"),
@@ -213,7 +211,6 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
         .start_turn(
             "t-1",
             "verify this",
-            json!({"type": "object"}),
             &TurnExecutionPolicy::PrimaryVerification {
                 cwd: PathBuf::from("/state/verification/run"),
             },
@@ -279,7 +276,6 @@ async fn missing_required_method_is_reported_as_incompatible_codex() {
         .start_turn(
             "t-1",
             "review",
-            json!({"type": "object"}),
             &TurnExecutionPolicy::ReadOnly {
                 cwd: PathBuf::from("/repo/reviewer"),
             },
