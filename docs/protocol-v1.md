@@ -104,7 +104,10 @@ Valid only in `CONTRACT`. Integration identity must be `null`. The payload
 captures observable behavior, constraints, files/interfaces, tests, and details
 that the later plan and result must preserve. Contract payloads are hashed and
 the canonical versions are reused in subsequent prompts. `contract.tests` is a
-nonempty array of exact commands.
+nonempty array of exact commands. The coordinator binds the responding task's
+role before starting the turn, so `payload.role` is only a redundant audit echo:
+if present it must be `PRIMARY` or `REVIEWER` as bound, while omission does not
+invalidate an otherwise complete contract.
 
 ### `PLAN_READY`
 

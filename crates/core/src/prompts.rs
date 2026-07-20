@@ -230,10 +230,10 @@ fn expected_message_type(action: NextAction) -> &'static str {
 fn action_instruction(action: NextAction) -> &'static str {
     match action {
         NextAction::RequestPrimaryContract => {
-            "Inspect your existing task context and frozen commit. Return a complete implementation contract covering goals, user-visible behavior, rationale, invariants, interfaces, edge cases, rejected alternatives, relevant files, and tests. contract.tests must be a nonempty array of exact commands. Do not modify Git or files in this turn."
+            "Inspect your existing task context and frozen commit. Return payload.role as \"PRIMARY\" and payload.contract as a complete implementation contract covering goals, user-visible behavior, rationale, invariants, interfaces, edge cases, rejected alternatives, relevant files, and tests. payload.contract.tests must be a nonempty array of exact commands. Do not modify Git or files in this turn."
         }
         NextAction::RequestReviewerContract => {
-            "Inspect your existing task context and frozen commit. Return a complete implementation contract covering every behavior the integration must preserve, including rationale, invariants, interfaces, edge cases, relevant files, and tests. contract.tests must be a nonempty array of exact commands. Do not modify Git or files."
+            "Inspect your existing task context and frozen commit. Return payload.role as \"REVIEWER\" and payload.contract as a complete implementation contract covering every behavior the integration must preserve, including rationale, invariants, interfaces, edge cases, relevant files, and tests. payload.contract.tests must be a nonempty array of exact commands. Do not modify Git or files."
         }
         NextAction::RequestPrimaryPlan => {
             "Produce a complete integration plan for both contracts. Include both contracts verbatim in payload, a versioned plan, conflict decisions with rationale, one coverage_matrix row for every contract item, and a nonempty test_commands array containing every exact command required by either contract plus plan-level verification. Do not create or modify an integration branch."

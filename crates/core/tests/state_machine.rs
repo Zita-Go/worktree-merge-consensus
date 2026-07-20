@@ -216,6 +216,51 @@ fn incompatible_adapter_has_a_distinct_terminal_status() {
 }
 
 #[test]
+fn contract_role_is_derived_from_the_bound_pending_task_when_omitted() {
+    let mut state = RunState::new(facts());
+
+    assert_eq!(
+        state
+            .apply_message(contract_ready_without_role(json!({
+                "goal": "primary",
+                "tests": ["cargo test -p primary"]
+            })))
+            .unwrap(),
+        NextAction::RequestReviewerContract
+    );
+    assert_eq!(
+        state
+            .apply_message(contract_ready_without_role(json!({
+                "goal": "reviewer",
+                "tests": ["cargo test -p reviewer"]
+            })))
+            .unwrap(),
+        NextAction::RequestPrimaryPlan
+    );
+    assert_eq!(state.primary_contract.as_ref().unwrap()["goal"], "primary");
+    assert_eq!(
+        state.reviewer_contract.as_ref().unwrap()["goal"],
+        "reviewer"
+    );
+}
+
+#[test]
+fn explicit_contract_role_must_match_the_bound_pending_task() {
+    let mut state = RunState::new(facts());
+
+    let error = state
+        .apply_message(contract_ready(
+            Role::Reviewer,
+            json!({"goal": "wrong task", "tests": ["cargo test"]}),
+        ))
+        .unwrap_err();
+
+    assert_eq!(error.code(), "UNEXPECTED_ROLE");
+    assert_eq!(state.next_action, NextAction::RequestPrimaryContract);
+    assert!(state.primary_contract.is_none());
+}
+
+#[test]
 fn user_contract_and_plan_tests_are_frozen_before_integration() {
     let mut state = RunState::new(facts());
     state
@@ -323,6 +368,19 @@ fn contract_ready(role: Role, payload: Value) -> ProtocolMessage {
         "integration_sha": null,
         "reason_code": null,
         "payload": {"role": role, "contract": payload}
+    }))
+}
+
+fn contract_ready_without_role(payload: Value) -> ProtocolMessage {
+    message(json!({
+        "message_type": "CONTRACT_READY",
+        "phase": "CONTRACT",
+        "round": 1,
+        "plan_revision": null,
+        "integration_branch": null,
+        "integration_sha": null,
+        "reason_code": null,
+        "payload": {"contract": payload}
     }))
 }
 

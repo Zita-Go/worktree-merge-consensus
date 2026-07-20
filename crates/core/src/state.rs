@@ -504,13 +504,30 @@ impl RunState {
     fn apply_contract(&mut self, message: ProtocolMessage) -> Result<NextAction, StateError> {
         self.require_phase(Phase::Contract)?;
         self.require_round(&message, 1)?;
-        let role = message
-            .payload
-            .get("role")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                state_error("INVALID_RESPONSE", "CONTRACT_READY payload requires a role")
+        let expected_role = match self.next_action {
+            NextAction::RequestPrimaryContract => "PRIMARY",
+            NextAction::RequestReviewerContract => "REVIEWER",
+            _ => {
+                return Err(state_error(
+                    "UNEXPECTED_MESSAGE",
+                    "a contract was not the pending action",
+                ));
+            }
+        };
+        if let Some(role) = message.payload.get("role") {
+            let role = role.as_str().ok_or_else(|| {
+                state_error(
+                    "INVALID_RESPONSE",
+                    "CONTRACT_READY payload.role must be a string when present",
+                )
             })?;
+            if role != expected_role {
+                return Err(state_error(
+                    "UNEXPECTED_ROLE",
+                    "contract role does not match the bound task for the pending action",
+                ));
+            }
+        }
         let contract = message.payload.get("contract").ok_or_else(|| {
             state_error(
                 "INVALID_RESPONSE",
@@ -520,13 +537,13 @@ impl RunState {
         let tests = string_array_field(contract, "tests")?;
 
         match self.next_action {
-            NextAction::RequestPrimaryContract if role == "PRIMARY" => {
+            NextAction::RequestPrimaryContract => {
                 self.primary_contract_hash = Some(canonical_json_hash(contract));
                 self.primary_contract = Some(contract.clone());
                 self.freeze_test_commands(tests);
                 self.next_action = NextAction::RequestReviewerContract;
             }
-            NextAction::RequestReviewerContract if role == "REVIEWER" => {
+            NextAction::RequestReviewerContract => {
                 self.reviewer_contract_hash = Some(canonical_json_hash(contract));
                 self.reviewer_contract = Some(contract.clone());
                 self.freeze_test_commands(tests);
@@ -535,12 +552,7 @@ impl RunState {
                 self.plan_revision = Some(1);
                 self.next_action = NextAction::RequestPrimaryPlan;
             }
-            _ => {
-                return Err(state_error(
-                    "UNEXPECTED_ROLE",
-                    "contract role does not match the pending action",
-                ));
-            }
+            _ => unreachable!("pending contract action was validated above"),
         }
         Ok(self.next_action)
     }

@@ -59,6 +59,7 @@ fn prompt_declares_role_binding_and_binding_mismatch_protocol() {
         "/repo/primary",
         "refs/heads/primary",
         PRIMARY_SHA,
+        "payload.role as \"PRIMARY\"",
         "SOURCE_BINDING_MISMATCH",
         "Do not search for or switch to another source directory",
     ] {
@@ -76,7 +77,12 @@ fn prompt_declares_role_binding_and_binding_mismatch_protocol() {
         &json!({"task_context": "derive the reviewer contract from this task"}),
     )
     .unwrap();
-    for required in ["/repo/reviewer", "refs/heads/reviewer", REVIEWER_SHA] {
+    for required in [
+        "/repo/reviewer",
+        "refs/heads/reviewer",
+        REVIEWER_SHA,
+        "payload.role as \"REVIEWER\"",
+    ] {
         assert!(reviewer.contains(required), "missing {required:?}");
     }
 }
