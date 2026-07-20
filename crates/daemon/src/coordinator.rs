@@ -490,6 +490,7 @@ where
 
     pub async fn prepare_resume(&self, run_id: &str) -> Result<RunState, CoordinatorError> {
         let mut state = self.required_run(run_id)?;
+        let retry_terminal_turn = state.reason_code.as_deref() == Some("COMMUNICATION_FAILURE");
         if state.next_action == NextAction::RequestPrimaryIntegration {
             let target = state.target_integration_branch.as_deref().ok_or_else(|| {
                 CoordinatorError::operational(
@@ -501,6 +502,9 @@ where
                 .verify_integration_in_progress(&state.facts, target)?;
         } else {
             self.revalidate_current_repository(&state).await?;
+        }
+        if retry_terminal_turn {
+            self.prepare_terminal_turn_retry(&state).await?;
         }
         state.resume()?;
         self.store.save_state(&state)?;
@@ -519,6 +523,75 @@ where
             .list_threads(None, 1)
             .await
             .map_err(|error| communication_error("thread/list", None, error))?;
+        Ok(())
+    }
+
+    async fn prepare_terminal_turn_retry(&self, state: &RunState) -> Result<(), CoordinatorError> {
+        let run_id = state.facts.run_id.to_string();
+        let Some(pending) = self.store.pending_send(&run_id)? else {
+            return Ok(());
+        };
+        let (Some(thread_id), Some(turn_id)) =
+            (pending.thread_id.as_deref(), pending.turn_id.as_deref())
+        else {
+            if pending.thread_id.is_none() && pending.turn_id.is_none() {
+                return Ok(());
+            }
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "pending turn has only one of thread_id and turn_id",
+            ));
+        };
+        let role = action_role(state.next_action).ok_or_else(|| {
+            CoordinatorError::operational(
+                "INVALID_STATE",
+                "paused communication action has no task role",
+            )
+        })?;
+        let expected_thread_id = role_thread_id(state, role);
+        if pending.role != role_name(role) || thread_id != expected_thread_id {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "pending turn identity does not match the deterministic current action",
+            ));
+        }
+
+        let detail = self.read_thread_with_retry(thread_id).await?;
+        self.verify_thread_identity(state, role, &detail)?;
+        let turn = find_turn(&detail, turn_id).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "persisted pending turn is absent from canonical task history",
+            )
+        })?;
+        let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "persisted pending turn has no canonical status",
+            )
+        })?;
+        if !turn_contains_request_hash(turn, &pending.message_hash) {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "persisted pending turn lacks its deterministic request marker",
+            ));
+        }
+        if !matches!(status, "failed" | "interrupted") {
+            return Ok(());
+        }
+        if let Some(blocker) = terminal_turn_retry_blocker(turn) {
+            return Err(CoordinatorError::operational(
+                "TERMINAL_TURN_RETRY_UNSAFE",
+                format!("terminal turn {turn_id} cannot be retried automatically: {blocker}"),
+            ));
+        }
+        self.store.reset_terminal_turn_for_retry(
+            &run_id,
+            &pending.message_hash,
+            thread_id,
+            turn_id,
+            status,
+        )?;
         Ok(())
     }
 
@@ -590,10 +663,10 @@ where
         })?;
 
         let current_detail = self.read_thread_with_retry(&thread_id).await?;
-        let recovered_turn = pending
-            .turn_id
-            .clone()
-            .or_else(|| find_turn_by_request_hash(&current_detail, &request_hash));
+        let archived_turn_ids = self.store.archived_turn_ids(&run_id, &request_hash)?;
+        let recovered_turn = pending.turn_id.clone().or_else(|| {
+            find_turn_by_request_hash(&current_detail, &request_hash, &archived_turn_ids)
+        });
         let turn_id = if let Some(turn_id) = recovered_turn {
             self.store
                 .record_turn_started(&run_id, &request_hash, &thread_id, &turn_id)?;
@@ -1418,27 +1491,56 @@ fn changed_files(payload: &Value) -> Result<Vec<PathBuf>, CoordinatorError> {
         .collect()
 }
 
-fn find_turn_by_request_hash(detail: &ThreadDetail, request_hash: &str) -> Option<String> {
-    let marker = format!("\"request_hash\":\"{request_hash}\"");
+fn find_turn_by_request_hash(
+    detail: &ThreadDetail,
+    request_hash: &str,
+    archived_turn_ids: &[String],
+) -> Option<String> {
     detail.turns.iter().rev().find_map(|turn| {
-        let matched = turn
-            .get("items")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|item| item.get("type").and_then(Value::as_str) == Some("userMessage"))
-            .flat_map(|item| {
-                item.get("content")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-            })
-            .filter_map(|input| input.get("text").and_then(Value::as_str))
-            .any(|text| text.contains(&marker));
-        matched
-            .then(|| turn.get("id").and_then(Value::as_str).map(str::to_owned))
-            .flatten()
+        let turn_id = turn.get("id").and_then(Value::as_str)?;
+        if archived_turn_ids.iter().any(|archived| archived == turn_id) {
+            return None;
+        }
+        let matched = turn_contains_request_hash(turn, request_hash);
+        matched.then(|| turn_id.to_owned())
     })
+}
+
+fn turn_contains_request_hash(turn: &Value, request_hash: &str) -> bool {
+    let marker = format!("\"request_hash\":\"{request_hash}\"");
+    turn.get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("userMessage"))
+        .flat_map(|item| {
+            item.get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|input| input.get("text").and_then(Value::as_str))
+        .any(|text| text.contains(&marker))
+}
+
+fn terminal_turn_retry_blocker(turn: &Value) -> Option<String> {
+    let Some(items) = turn.get("items").and_then(Value::as_array) else {
+        return Some("canonical items are unavailable".into());
+    };
+    if items.is_empty() {
+        return Some("canonical items are empty".into());
+    }
+    for item in items {
+        let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+            return Some("canonical item has no type".into());
+        };
+        if !matches!(item_type, "userMessage" | "agentMessage" | "reasoning") {
+            return Some(format!(
+                "canonical item type {item_type} may have side effects"
+            ));
+        }
+    }
+    None
 }
 
 fn find_turn<'a>(detail: &'a ThreadDetail, turn_id: &str) -> Option<&'a Value> {

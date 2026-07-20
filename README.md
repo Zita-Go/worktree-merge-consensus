@@ -76,8 +76,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.8-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.8-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.9-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.9-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -204,8 +204,11 @@ which recovers runnable work idempotently. If the managed App Server restarts
 while the coordinator daemon remains alive, the daemon replaces its closed
 proxy before retrying idempotent reads; `doctor` probes this daemon-owned
 connection as well as a fresh direct connection. A non-idempotent `turn/start`
-is never blindly retried after uncertain delivery. Do not use `resume` for
-`BLOCKED` or `CANCELLED` runs. A pending verification turn may leave test
+is never blindly retried after uncertain delivery. On an explicit resume from
+`COMMUNICATION_FAILURE`, an exact `failed` or `interrupted` turn is replaced
+only when canonical history shows no command, file-change, or unknown
+side-effect item; the old attempt remains audited in SQLite. Do not use
+`resume` for `BLOCKED` or `CANCELLED` runs. A pending verification turn may leave test
 artifacts in its clone; recovery permits that clone to be dirty only while
 still requiring the persisted path, exact detached SHA, independent Git common
 directory, and no remote.

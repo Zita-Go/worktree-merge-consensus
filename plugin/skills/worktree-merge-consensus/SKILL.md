@@ -46,6 +46,11 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   exact confirmed mapping once. If a run ID exists, inspect that run instead of
   creating a replacement.
 - Call `consensus_resume` only after the user resolves the reported pause reason.
+  For `COMMUNICATION_FAILURE`, explicit user authorization permits the
+  coordinator to inspect the exact pending turn. It replaces a terminal
+  `failed` or `interrupted` attempt only when canonical history proves that the
+  attempt has no side-effectful items; otherwise it remains paused and fails
+  closed.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
 Read [references/protocol.md](references/protocol.md) when explaining lifecycle states, acceptance evidence, or recovery behavior.

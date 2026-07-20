@@ -55,6 +55,85 @@ fn started_turn_identity_survives_reopen_for_crash_recovery() {
 }
 
 #[test]
+fn terminal_turn_retry_is_archived_and_reset_atomically() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+    store
+        .record_pending_send(RUN_ID, "REVIEWER", "CONTRACT", 1, "request-hash")
+        .unwrap();
+    store
+        .record_turn_started(RUN_ID, "request-hash", "reviewer-thread", "turn-7")
+        .unwrap();
+
+    store
+        .reset_terminal_turn_for_retry(
+            RUN_ID,
+            "request-hash",
+            "reviewer-thread",
+            "turn-7",
+            "interrupted",
+        )
+        .unwrap();
+    drop(store);
+
+    let reopened = SqliteRunStore::open(path).unwrap();
+    let pending = reopened.pending_send(RUN_ID).unwrap().unwrap();
+    assert_eq!(pending.message_hash, "request-hash");
+    assert!(pending.thread_id.is_none());
+    assert!(pending.turn_id.is_none());
+    assert_eq!(reopened.turn_attempt_count(RUN_ID).unwrap(), 1);
+    assert_eq!(
+        reopened.archived_turn_ids(RUN_ID, "request-hash").unwrap(),
+        vec!["turn-7"]
+    );
+}
+
+#[test]
+fn terminal_turn_retry_rejects_wrong_identity_or_status_without_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+    store
+        .record_pending_send(RUN_ID, "REVIEWER", "CONTRACT", 1, "request-hash")
+        .unwrap();
+    store
+        .record_turn_started(RUN_ID, "request-hash", "reviewer-thread", "turn-7")
+        .unwrap();
+
+    let wrong_status = store
+        .reset_terminal_turn_for_retry(
+            RUN_ID,
+            "request-hash",
+            "reviewer-thread",
+            "turn-7",
+            "completed",
+        )
+        .unwrap_err();
+    let wrong_turn = store
+        .reset_terminal_turn_for_retry(
+            RUN_ID,
+            "request-hash",
+            "reviewer-thread",
+            "turn-8",
+            "interrupted",
+        )
+        .unwrap_err();
+
+    assert_eq!(wrong_status.code(), "TERMINAL_TURN_NOT_RETRYABLE");
+    assert_eq!(wrong_turn.code(), "TERMINAL_TURN_NOT_RETRYABLE");
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    assert_eq!(pending.thread_id.as_deref(), Some("reviewer-thread"));
+    assert_eq!(pending.turn_id.as_deref(), Some("turn-7"));
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+}
+
+#[test]
 fn run_state_round_trips_as_structured_state() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();

@@ -220,6 +220,12 @@ verification turn starts, recovery may reuse its test-dirty clone only while a
 matching send remains pending; exact detached HEAD, independent Git common
 directory, and no-remote invariants are still mandatory.
 
+An explicit resume after `COMMUNICATION_FAILURE` reads the exact persisted turn
+from canonical task history. A `failed` or `interrupted` attempt is archived and
+the same deterministic request may receive one new turn only when every
+canonical item is side-effect-free. Command execution, file changes, missing
+history, and unknown item types fail closed instead of being duplicated.
+
 ## Git postconditions
 
 An accepted run guarantees only a new local branch and exact commit SHA:

@@ -638,6 +638,48 @@ async fn completed_turn_is_recovered_without_duplicate_send_when_turn_id_was_not
 }
 
 #[tokio::test]
+async fn unrecorded_interrupted_turn_is_recovered_and_paused_without_duplicate_send() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(FakeAppServer::new(conflict_free_replies()));
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    let state = coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let request_hash = first_request_hash(&state);
+    store
+        .record_pending_send(RUN_ID, "PRIMARY", "CONTRACT", 1, &request_hash)
+        .unwrap();
+    app.inject_interrupted_turn(
+        "primary",
+        "recovered-interrupted",
+        &format!("recovered marker {{\"request_hash\":\"{request_hash}\"}}"),
+    );
+
+    let paused = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+    assert_eq!(paused.reason_code.as_deref(), Some("COMMUNICATION_FAILURE"));
+    assert_eq!(app.request_count(), 0);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+    assert_eq!(
+        store
+            .pending_send(RUN_ID)
+            .unwrap()
+            .unwrap()
+            .turn_id
+            .as_deref(),
+        Some("recovered-interrupted")
+    );
+}
+
+#[tokio::test]
 async fn pending_record_created_before_send_results_in_exactly_one_task_turn() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -679,7 +721,7 @@ async fn user_input_request_pauses_and_resume_reuses_the_same_turn() {
     ));
     let coordinator = Coordinator::new(
         Arc::clone(&app),
-        store,
+        store.clone(),
         Arc::new(RecordingSafety::default()),
         fast_options(),
     );
@@ -699,6 +741,81 @@ async fn user_input_request_pauses_and_resume_reuses_the_same_turn() {
 
     assert_eq!(result.status, RunStatus::Accepted);
     assert_eq!(app.request_count(), 7);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+}
+
+#[tokio::test]
+async fn explicit_resume_replaces_a_side_effect_free_interrupted_turn_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let mut replies = conflict_free_replies();
+    replies.insert(2, replies[1].clone());
+    let app = Arc::new(FakeAppServer::deferred(replies, 2, DeferMode::Interrupted));
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let paused = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+    assert_eq!(paused.reason_code.as_deref(), Some("COMMUNICATION_FAILURE"));
+    assert_eq!(app.request_count(), 2);
+
+    let result = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Accepted);
+    assert_eq!(app.request_count(), 8);
+    assert_eq!(
+        app.request_order()
+            .iter()
+            .filter(|request| request.as_str() == "reviewer:REQUEST_REVIEWER_CONTRACT")
+            .count(),
+        2
+    );
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    assert!(store.pending_send(RUN_ID).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn explicit_resume_rejects_an_interrupted_turn_with_execution_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(FakeAppServer::deferred(
+        conflict_free_replies(),
+        5,
+        DeferMode::InterruptedCommand,
+    ));
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let paused = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+    assert_eq!(paused.next_action, NextAction::RequestPrimaryIntegration);
+    assert_eq!(app.request_count(), 5);
+
+    let error = coordinator.resume(RUN_ID).await.unwrap_err();
+
+    assert_eq!(error.code(), "TERMINAL_TURN_RETRY_UNSAFE");
+    assert_eq!(app.request_count(), 5);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+    assert_eq!(
+        store.load_run(RUN_ID).unwrap().unwrap().status,
+        RunStatus::PausedUserAction
+    );
 }
 
 #[tokio::test]
@@ -1167,6 +1284,8 @@ enum DeferMode {
     ForbiddenCommand,
     FileGrantRoot,
     Hold,
+    Interrupted,
+    InterruptedCommand,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1258,6 +1377,23 @@ impl FakeAppServer {
             .get_mut(thread_id)
             .unwrap()
             .push(completed_turn(turn_id, prompt, &reply));
+    }
+
+    fn inject_interrupted_turn(&self, thread_id: &str, turn_id: &str, prompt: &str) {
+        self.threads
+            .lock()
+            .unwrap()
+            .get_mut(thread_id)
+            .unwrap()
+            .push(json!({
+                "id": turn_id,
+                "status": "interrupted",
+                "items": [{
+                    "id": format!("user-{turn_id}"),
+                    "type": "userMessage",
+                    "content": [{"type": "text", "text": prompt, "text_elements": []}]
+                }]
+            }));
     }
 
     fn complete_deferred_turns(&self) {
@@ -1396,23 +1532,43 @@ impl AppServer for FakeAppServer {
             .deferred
             .filter(|(number, _)| *number == request_number)
             .map(|(_, mode)| mode);
-        let mut turn = if deferred_mode.is_some() {
-            self.deferred_replies
-                .lock()
-                .unwrap()
-                .insert(turn_id.clone(), reply);
-            json!({
+        let mut turn = match deferred_mode {
+            Some(DeferMode::Interrupted | DeferMode::InterruptedCommand) => json!({
                 "id": turn_id,
-                "status": "inProgress",
+                "status": "interrupted",
                 "items": [{
                     "id": format!("user-{turn_id}"),
                     "type": "userMessage",
                     "content": [{"type": "text", "text": prompt, "text_elements": []}]
                 }]
-            })
-        } else {
-            completed_turn(&turn_id, prompt, &reply)
+            }),
+            Some(_) => {
+                self.deferred_replies
+                    .lock()
+                    .unwrap()
+                    .insert(turn_id.clone(), reply);
+                json!({
+                    "id": turn_id,
+                    "status": "inProgress",
+                    "items": [{
+                        "id": format!("user-{turn_id}"),
+                        "type": "userMessage",
+                        "content": [{"type": "text", "text": prompt, "text_elements": []}]
+                    }]
+                })
+            }
+            None => completed_turn(&turn_id, prompt, &reply),
         };
+        if deferred_mode == Some(DeferMode::InterruptedCommand) {
+            turn["items"].as_array_mut().unwrap().push(json!({
+                "id": format!("command-{turn_id}"),
+                "type": "commandExecution",
+                "command": "git status --short",
+                "cwd": "/repo/primary",
+                "status": "completed",
+                "exitCode": 0
+            }));
+        }
         if action == "REQUEST_PRIMARY_VERIFICATION" {
             append_verification_command_items(&mut turn, prompt, self.verification_behavior);
         }

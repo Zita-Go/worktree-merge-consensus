@@ -48,6 +48,8 @@ pub enum StoreError {
     RunNotFound(String),
     #[error("PENDING_SEND_NOT_FOUND: {0}")]
     PendingSendNotFound(String),
+    #[error("TERMINAL_TURN_NOT_RETRYABLE: {0}")]
+    TerminalTurnNotRetryable(String),
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
     #[error("state serialization error: {0}")]
@@ -66,6 +68,7 @@ impl StoreError {
             Self::ActiveRunExists(_) => "ACTIVE_RUN_EXISTS",
             Self::RunNotFound(_) => "RUN_NOT_FOUND",
             Self::PendingSendNotFound(_) => "PENDING_SEND_NOT_FOUND",
+            Self::TerminalTurnNotRetryable(_) => "TERMINAL_TURN_NOT_RETRYABLE",
             Self::Database(_) => "DATABASE_ERROR",
             Self::Serialization(_) => "SERIALIZATION_ERROR",
             Self::IncompatibleState(_) => "INCOMPATIBLE_STATE",
@@ -278,6 +281,68 @@ impl SqliteRunStore {
         }
     }
 
+    pub fn reset_terminal_turn_for_retry(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+        thread_id: &str,
+        turn_id: &str,
+        terminal_status: &str,
+    ) -> Result<(), StoreError> {
+        if !matches!(terminal_status, "failed" | "interrupted") {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "turn {turn_id} has non-terminal retry status {terminal_status}"
+            )));
+        }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let turn_record_id = transaction
+            .query_row(
+                "SELECT id FROM turns
+                 WHERE run_id = ?1 AND message_hash = ?2
+                   AND delivery_state = 'SENT'
+                   AND thread_id = ?3 AND turn_id = ?4",
+                params![run_id, message_hash, thread_id, turn_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::TerminalTurnNotRetryable(format!(
+                    "turn {turn_id} is not the persisted pending attempt for run {run_id}"
+                ))
+            })?;
+        transaction.execute(
+            "INSERT INTO turn_attempts (
+                turn_record_id, run_id, message_hash, thread_id, turn_id,
+                terminal_status, recorded_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                turn_record_id,
+                run_id,
+                message_hash,
+                thread_id,
+                turn_id,
+                terminal_status,
+                now_unix(),
+            ],
+        )?;
+        let changed = transaction.execute(
+            "UPDATE turns
+             SET delivery_state = 'PENDING', thread_id = NULL, turn_id = NULL
+             WHERE id = ?1 AND delivery_state = 'SENT'
+               AND thread_id = ?2 AND turn_id = ?3",
+            params![turn_record_id, thread_id, turn_id],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "turn {turn_id} changed while preparing its retry"
+            )));
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn accept_response_and_advance(
         &self,
         run_id: &str,
@@ -364,6 +429,31 @@ impl SqliteRunStore {
         Ok(count)
     }
 
+    pub fn turn_attempt_count(&self, run_id: &str) -> Result<u64, StoreError> {
+        let connection = self.lock()?;
+        let count = connection.query_row(
+            "SELECT COUNT(*) FROM turn_attempts WHERE run_id = ?1",
+            [run_id],
+            |row| row.get::<_, u64>(0),
+        )?;
+        Ok(count)
+    }
+
+    pub fn archived_turn_ids(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT turn_id FROM turn_attempts
+             WHERE run_id = ?1 AND message_hash = ?2
+             ORDER BY id ASC",
+        )?;
+        let rows = statement.query_map(params![run_id, message_hash], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn release_lock(&self, run_id: &str) -> Result<(), StoreError> {
         self.lock()?
             .execute("DELETE FROM locks WHERE run_id = ?1", [run_id])?;
@@ -419,6 +509,19 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
          );
          CREATE INDEX IF NOT EXISTS turns_pending
             ON turns(run_id, delivery_state, id DESC);
+         CREATE TABLE IF NOT EXISTS turn_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            turn_record_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+            run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+            message_hash TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            terminal_status TEXT NOT NULL,
+            recorded_at INTEGER NOT NULL,
+            UNIQUE(turn_record_id, turn_id)
+         );
+         CREATE INDEX IF NOT EXISTS turn_attempts_run
+            ON turn_attempts(run_id, id DESC);
          CREATE TABLE IF NOT EXISTS transitions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
