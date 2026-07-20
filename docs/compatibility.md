@@ -95,6 +95,14 @@ After installing or updating the plugin, restart Codex or open a new task. A
 conflicting manually installed `$CODEX_HOME/skills/worktree-merge-consensus`
 is reported as `LEGACY_SKILL_CONFLICT` and is never deleted automatically.
 
+`doctor` validates the App Server protocol connection but deliberately does not
+spend a model turn. If a run reports `completed turn has no final assistant
+JSON`, verify `codex login status` and outbound ChatGPT connectivity from the
+persistent App Server process. Proxy variables must be present when that daemon
+starts; after correcting them, restart both the App Server daemon and
+`codex-consensus` daemon, then start a new run because the user-only turn is
+retained for idempotent recovery.
+
 ## Persisted-state compatibility
 
 The v0.1 run-state schema is explicitly versioned. This prerelease does not
