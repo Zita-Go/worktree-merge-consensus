@@ -853,6 +853,45 @@ async fn active_turn_timeout_pauses_as_communication_failure() {
 
     assert_eq!(result.status, RunStatus::PausedUserAction);
     assert_eq!(result.reason_code.as_deref(), Some("COMMUNICATION_FAILURE"));
+    let diagnostic = result.last_error.as_ref().unwrap();
+    assert_eq!(diagnostic.code, "COMMUNICATION_FAILURE");
+    assert_eq!(diagnostic.action, NextAction::RequestPrimaryContract);
+    assert_eq!(diagnostic.thread_id.as_deref(), Some("primary"));
+    assert!(diagnostic.detail.contains("bounded wait"));
+}
+
+#[tokio::test]
+async fn turn_start_failure_persists_redacted_rpc_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(FakeAppServer::failing_start(
+        "task must be resumed before turn/start",
+    ));
+    let coordinator = Coordinator::new(
+        app,
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let result = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::PausedUserAction);
+    let diagnostic = result.last_error.as_ref().unwrap();
+    assert_eq!(diagnostic.code, "COMMUNICATION_FAILURE");
+    assert_eq!(diagnostic.operation.as_deref(), Some("turn/start"));
+    assert_eq!(diagnostic.action, NextAction::RequestPrimaryContract);
+    assert_eq!(diagnostic.role, Some(consensus_core::state::Role::Primary));
+    assert_eq!(diagnostic.thread_id.as_deref(), Some("primary"));
+    assert!(diagnostic.detail.contains("must be resumed"));
+    assert_eq!(
+        store.load_run(RUN_ID).unwrap().unwrap().last_error,
+        result.last_error
+    );
 }
 
 #[tokio::test]
@@ -1111,6 +1150,7 @@ struct FakeAppServer {
     deferred_replies: Mutex<HashMap<String, Value>>,
     events: Mutex<VecDeque<AppEvent>>,
     verification_behavior: VerificationBehavior,
+    start_error: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1149,7 +1189,14 @@ impl FakeAppServer {
             deferred_replies: Mutex::new(HashMap::new()),
             events: Mutex::new(VecDeque::new()),
             verification_behavior: VerificationBehavior::Pass,
+            start_error: None,
         }
+    }
+
+    fn failing_start(detail: impl Into<String>) -> Self {
+        let mut server = Self::new(conflict_free_replies());
+        server.start_error = Some(detail.into());
+        server
     }
 
     fn with_verification_behavior(mut self, behavior: VerificationBehavior) -> Self {
@@ -1287,6 +1334,9 @@ impl AppServer for FakeAppServer {
         output_schema: Value,
         policy: &TurnExecutionPolicy,
     ) -> Result<TurnHandle, AppServerError> {
+        if let Some(detail) = &self.start_error {
+            return Err(AppServerError::InvalidResponse(detail.clone()));
+        }
         assert_eq!(
             output_schema["title"],
             "Worktree Merge Consensus Protocol v1"

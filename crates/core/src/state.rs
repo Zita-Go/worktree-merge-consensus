@@ -107,6 +107,16 @@ pub struct AcceptedResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunDiagnostic {
+    pub code: String,
+    pub detail: String,
+    pub operation: Option<String>,
+    pub action: NextAction,
+    pub role: Option<Role>,
+    pub thread_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunState {
     pub schema_version: u32,
     pub facts: RunFacts,
@@ -117,6 +127,8 @@ pub struct RunState {
     pub integration_branch: Option<String>,
     pub integration_sha: Option<String>,
     pub reason_code: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<RunDiagnostic>,
     pub next_action: NextAction,
     pub target_integration_branch: Option<String>,
     pub required_test_commands: Vec<String>,
@@ -170,6 +182,7 @@ impl RunState {
             integration_branch: None,
             integration_sha: None,
             reason_code: None,
+            last_error: None,
             next_action: NextAction::RequestPrimaryContract,
             target_integration_branch: None,
             required_test_commands: Vec::new(),
@@ -310,6 +323,10 @@ impl RunState {
         Ok(())
     }
 
+    pub fn record_error(&mut self, diagnostic: RunDiagnostic) {
+        self.last_error = Some(diagnostic);
+    }
+
     pub fn wait_for_thread(&mut self) -> Result<(), StateError> {
         self.require_running()?;
         self.status = RunStatus::WaitingThread;
@@ -336,6 +353,7 @@ impl RunState {
         }
         self.status = RunStatus::Running;
         self.reason_code = None;
+        self.last_error = None;
         Ok(self.next_action)
     }
 

@@ -332,7 +332,21 @@ fn coordinator_failure(error: CoordinatorError) -> DaemonResponse {
 
 fn dispatch_drive(controller: std::sync::Arc<dyn RunController>, run_id: String) {
     tokio::spawn(async move {
-        let _ = controller.drive_run(&run_id).await;
+        match controller.drive_run(&run_id).await {
+            Ok(state) => {
+                if let Some(error) = state.last_error {
+                    eprintln!(
+                        "consensus run {run_id} stopped after {} during {}: {}",
+                        error.code,
+                        error.operation.as_deref().unwrap_or("unknown operation"),
+                        error.detail
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!("consensus run {run_id} background drive failed: {error}");
+            }
+        }
     });
 }
 

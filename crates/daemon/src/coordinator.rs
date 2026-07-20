@@ -15,7 +15,10 @@ use consensus_core::{
     },
     prompts::{PromptError, build_turn_prompt},
     protocol::{MessageType, ProtocolMessage, output_schema, validate_message},
-    state::{NextAction, Phase, Role, RunFacts, RunState, RunStatus, StateError, TestEvidence},
+    state::{
+        NextAction, Phase, Role, RunDiagnostic, RunFacts, RunState, RunStatus, StateError,
+        TestEvidence,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -267,7 +270,12 @@ pub enum CoordinatorError {
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error("{code}: {detail}")]
-    Operational { code: String, detail: String },
+    Operational {
+        code: String,
+        detail: String,
+        operation: Option<String>,
+        thread_id: Option<String>,
+    },
 }
 
 impl CoordinatorError {
@@ -282,6 +290,43 @@ impl CoordinatorError {
         Self::Operational {
             code: code.into(),
             detail: detail.into(),
+            operation: None,
+            thread_id: None,
+        }
+    }
+
+    fn app_server(
+        code: impl Into<String>,
+        detail: impl Into<String>,
+        operation: impl Into<String>,
+        thread_id: Option<&str>,
+    ) -> Self {
+        Self::Operational {
+            code: code.into(),
+            detail: detail.into(),
+            operation: Some(operation.into()),
+            thread_id: thread_id.map(str::to_owned),
+        }
+    }
+
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Store(error) => error.to_string(),
+            Self::Operational { detail, .. } => detail.clone(),
+        }
+    }
+
+    pub fn operation(&self) -> Option<&str> {
+        match self {
+            Self::Store(_) => None,
+            Self::Operational { operation, .. } => operation.as_deref(),
+        }
+    }
+
+    pub fn thread_id(&self) -> Option<&str> {
+        match self {
+            Self::Store(_) => None,
+            Self::Operational { thread_id, .. } => thread_id.as_deref(),
         }
     }
 }
@@ -414,6 +459,7 @@ where
                     return Ok(persisted);
                 }
                 state = persisted;
+                state.record_error(run_diagnostic(&state, action, &error));
                 if error.code() == "COMMUNICATION_FAILURE" {
                     state.pause("COMMUNICATION_FAILURE")?;
                     self.store.save_state(&state)?;
@@ -555,7 +601,7 @@ where
                     &turn_execution_policy(state, action, role),
                 )
                 .await
-                .map_err(communication_error)?;
+                .map_err(|error| communication_error("turn/start", Some(&thread_id), error))?;
             self.store
                 .record_turn_started(&run_id, &request_hash, &thread_id, &turn.id)?;
             turn.id
@@ -910,7 +956,7 @@ where
                 self.app
                     .respond_to_request(id, response)
                     .await
-                    .map_err(communication_error)?;
+                    .map_err(|error| communication_error("server/request-response", None, error))?;
                 if decision == ApprovalDecision::Cancel {
                     return Err(CoordinatorError::operational(
                         "FORBIDDEN_OPERATION",
@@ -932,7 +978,7 @@ where
                         json!({"decision": if integration_write { "accept" } else { "cancel" }}),
                     )
                     .await
-                    .map_err(communication_error)?;
+                    .map_err(|error| communication_error("server/request-response", None, error))?;
                 if !integration_write {
                     return Err(CoordinatorError::operational(
                         "FORBIDDEN_OPERATION",
@@ -945,7 +991,7 @@ where
                 self.app
                     .respond_to_request(id, json!({"permissions": {}, "scope": "turn"}))
                     .await
-                    .map_err(communication_error)?;
+                    .map_err(|error| communication_error("server/request-response", None, error))?;
                 Err(CoordinatorError::operational(
                     "FORBIDDEN_OPERATION",
                     "additional filesystem or network permissions are forbidden",
@@ -982,9 +1028,13 @@ where
                 tokio::time::sleep(self.options.poll_interval).await;
             }
         }
-        Err(communication_error(last_error.unwrap_or_else(|| {
-            AppServerError::InvalidResponse("thread read failed without an error".into())
-        })))
+        Err(communication_error(
+            "thread/read",
+            Some(thread_id),
+            last_error.unwrap_or_else(|| {
+                AppServerError::InvalidResponse("thread read failed without an error".into())
+            }),
+        ))
     }
 
     fn verify_thread_identity(
@@ -1474,13 +1524,57 @@ fn phase_name(phase: Phase) -> &'static str {
     }
 }
 
-fn communication_error(error: AppServerError) -> CoordinatorError {
+fn communication_error(
+    operation: &str,
+    thread_id: Option<&str>,
+    error: AppServerError,
+) -> CoordinatorError {
     match error {
         AppServerError::IncompatibleCodex(detail) => {
-            CoordinatorError::operational("INCOMPATIBLE_CODEX", detail)
+            CoordinatorError::app_server("INCOMPATIBLE_CODEX", detail, operation, thread_id)
         }
-        error => CoordinatorError::operational("COMMUNICATION_FAILURE", error.to_string()),
+        error => CoordinatorError::app_server(
+            "COMMUNICATION_FAILURE",
+            error.to_string(),
+            operation,
+            thread_id,
+        ),
     }
+}
+
+fn run_diagnostic(state: &RunState, action: NextAction, error: &CoordinatorError) -> RunDiagnostic {
+    let role = action_role(action);
+    let inferred_thread_id = role.map(|role| role_thread_id(state, role).to_owned());
+    RunDiagnostic {
+        code: error.code().to_owned(),
+        detail: redact_diagnostic(&error.detail()),
+        operation: error.operation().map(str::to_owned),
+        action,
+        role,
+        thread_id: error.thread_id().map(str::to_owned).or(inferred_thread_id),
+    }
+}
+
+fn redact_diagnostic(value: &str) -> String {
+    let lowercase = value.to_ascii_lowercase();
+    if [
+        "authorization:",
+        "api_key=",
+        "api-key=",
+        "secret=",
+        "token=",
+        "bearer ",
+    ]
+    .iter()
+    .any(|marker| lowercase.contains(marker))
+    {
+        return "[redacted sensitive coordinator diagnostic]".to_owned();
+    }
+    let mut redacted = value.to_owned();
+    if let Some(home) = std::env::var_os("HOME").and_then(|home| home.into_string().ok()) {
+        redacted = redacted.replace(&home, "~");
+    }
+    redacted.chars().take(2_000).collect()
 }
 
 fn verify_reviewer_frozen(
