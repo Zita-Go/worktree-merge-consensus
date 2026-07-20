@@ -35,6 +35,9 @@
   "initializeCapabilities": {
     "experimentalApi": true
   },
+  "turnLifecycle": {
+    "requiredBeforeEveryTurnStart": ["thread/resume"]
+  },
   "initializeResponseShape": [
     "codexHome",
     "platformFamily",

@@ -175,6 +175,12 @@ async fn task_cwd_is_metadata_and_bound_worktrees_drive_turns() {
             "reviewer:REQUEST_REVIEWER_RESULT_VERDICT",
         ]
     );
+    assert_eq!(
+        app.resume_order(),
+        vec![
+            "primary", "reviewer", "primary", "reviewer", "primary", "primary", "reviewer",
+        ]
+    );
     let safety_events = safety.events();
     let integration_request = app
         .request_order()
@@ -1142,6 +1148,8 @@ struct FakeAppServer {
     replies: Mutex<VecDeque<Value>>,
     threads: Mutex<HashMap<String, Vec<Value>>>,
     requests: Mutex<Vec<String>>,
+    resumes: Mutex<Vec<String>>,
+    resume_tickets: Mutex<HashMap<String, usize>>,
     reply_types: Mutex<Vec<String>>,
     prompts: Mutex<Vec<String>>,
     policies: Mutex<Vec<TurnExecutionPolicy>>,
@@ -1181,6 +1189,11 @@ impl FakeAppServer {
                 ("reviewer".into(), Vec::new()),
             ])),
             requests: Mutex::new(Vec::new()),
+            resumes: Mutex::new(Vec::new()),
+            resume_tickets: Mutex::new(HashMap::from([
+                ("primary".into(), 0),
+                ("reviewer".into(), 0),
+            ])),
             reply_types: Mutex::new(Vec::new()),
             prompts: Mutex::new(Vec::new()),
             policies: Mutex::new(Vec::new()),
@@ -1212,6 +1225,10 @@ impl FakeAppServer {
 
     fn request_order(&self) -> Vec<String> {
         self.requests.lock().unwrap().clone()
+    }
+
+    fn resume_order(&self) -> Vec<String> {
+        self.resumes.lock().unwrap().clone()
     }
 
     fn reply_types(&self) -> Vec<String> {
@@ -1324,6 +1341,13 @@ impl AppServer for FakeAppServer {
     }
 
     async fn resume_thread(&self, thread_id: &str) -> Result<ThreadDetail, AppServerError> {
+        self.resumes.lock().unwrap().push(thread_id.to_owned());
+        *self
+            .resume_tickets
+            .lock()
+            .unwrap()
+            .get_mut(thread_id)
+            .unwrap() += 1;
         Ok(self.detail(thread_id))
     }
 
@@ -1334,6 +1358,14 @@ impl AppServer for FakeAppServer {
         output_schema: Value,
         policy: &TurnExecutionPolicy,
     ) -> Result<TurnHandle, AppServerError> {
+        let mut resume_tickets = self.resume_tickets.lock().unwrap();
+        let resume_ticket = resume_tickets.get_mut(thread_id).unwrap();
+        assert!(
+            *resume_ticket > 0,
+            "task {thread_id} must be resumed before turn/start"
+        );
+        *resume_ticket -= 1;
+        drop(resume_tickets);
         if let Some(detail) = &self.start_error {
             return Err(AppServerError::InvalidResponse(detail.clone()));
         }

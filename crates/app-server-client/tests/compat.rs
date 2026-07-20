@@ -79,6 +79,10 @@ fn pinned_fixture_distinguishes_integration_and_verification_write_roots() {
     assert!(fixture.get("maximumVersionExclusive").is_none());
     assert_eq!(fixture["initializeCapabilities"]["experimentalApi"], true);
     assert_eq!(
+        fixture["turnLifecycle"]["requiredBeforeEveryTurnStart"],
+        serde_json::json!(["thread/resume"])
+    );
+    assert_eq!(
         profiles["primaryIntegrationWorkspaceWrite"]["writableRootRoles"],
         serde_json::json!(["primaryWorktree", "sourceGitCommonDirectory"])
     );

@@ -144,11 +144,19 @@ fn handle_request(config: &Config, method: &str, params: &Value) -> Result<Value
             "nextCursor": null,
             "backwardsCursor": null
         })),
-        "thread/read" | "thread/resume" => {
+        "thread/read" => {
             let thread_id = params
                 .get("threadId")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "threadId is missing".to_owned())?;
+            Ok(json!({"thread": thread_detail(config, thread_id)?}))
+        }
+        "thread/resume" => {
+            let thread_id = params
+                .get("threadId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "threadId is missing".to_owned())?;
+            mark_thread_resumed(config, thread_id)?;
             Ok(json!({"thread": thread_detail(config, thread_id)?}))
         }
         "turn/start" => start_turn(config, params),
@@ -194,6 +202,7 @@ fn start_turn(config: &Config, params: &Value) -> Result<Value, String> {
         .get("threadId")
         .and_then(Value::as_str)
         .ok_or_else(|| "turn/start threadId is missing".to_owned())?;
+    consume_thread_resume(config, thread_id)?;
     let prompt = params
         .get("input")
         .and_then(Value::as_array)
@@ -265,6 +274,26 @@ fn start_turn(config: &Config, params: &Value) -> Result<Value, String> {
             "items": []
         }
     }))
+}
+
+fn resume_marker(config: &Config, thread_id: &str) -> PathBuf {
+    config.state_directory.join(format!("resumed-{thread_id}"))
+}
+
+fn mark_thread_resumed(config: &Config, thread_id: &str) -> Result<(), String> {
+    fs::write(resume_marker(config, thread_id), b"ready\n")
+        .map_err(|error| format!("mark resumed task {thread_id}: {error}"))?;
+    append_event(config, &format!("resume {thread_id}"))
+}
+
+fn consume_thread_resume(config: &Config, thread_id: &str) -> Result<(), String> {
+    let marker = resume_marker(config, thread_id);
+    if !marker.exists() {
+        return Err(format!(
+            "task {thread_id} must be resumed before turn/start"
+        ));
+    }
+    fs::remove_file(marker).map_err(|error| format!("consume resumed task {thread_id}: {error}"))
 }
 
 fn declared_tests(metadata: &Value) -> Vec<String> {

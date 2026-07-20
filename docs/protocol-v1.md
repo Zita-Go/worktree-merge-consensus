@@ -47,6 +47,11 @@ repository, or a pre-existing target branch fails closed. A source worktree may
 start detached because it is frozen by SHA; an accepted integration result must
 be attached to its authorized new local branch.
 
+Before each protocol turn, the daemon waits for the target task to become idle,
+resumes it by its frozen task ID, and only then sends `turn/start`. Reading task
+history is not a substitute for resuming a task that App Server reports as
+`notLoaded`.
+
 Preflight reason codes include `UNREGISTERED_WORKTREE`,
 `DUPLICATE_WORKTREE`, `REPOSITORY_MISMATCH`, `DIRTY_WORKTREE`, and
 `WORKTREE_UNAVAILABLE`. Once frozen, a task may reject an incorrect

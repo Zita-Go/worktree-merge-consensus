@@ -528,6 +528,11 @@ where
         let thread_id = role_thread_id(state, role).to_owned();
         let detail = self.wait_until_idle(state, role, &thread_id).await?;
         self.verify_thread_identity(state, role, &detail)?;
+        let resumed = self.resume_thread_with_retry(&thread_id).await?;
+        self.verify_thread_identity(state, role, &resumed)?;
+        if resumed.summary.is_active() {
+            self.wait_until_idle(state, role, &thread_id).await?;
+        }
 
         self.load_history(state).await?;
         self.revalidate_before_action(state, action)?;
@@ -1033,6 +1038,30 @@ where
             Some(thread_id),
             last_error.unwrap_or_else(|| {
                 AppServerError::InvalidResponse("thread read failed without an error".into())
+            }),
+        ))
+    }
+
+    async fn resume_thread_with_retry(
+        &self,
+        thread_id: &str,
+    ) -> Result<ThreadDetail, CoordinatorError> {
+        let attempts = self.options.communication_attempts.max(1);
+        let mut last_error = None;
+        for attempt in 0..attempts {
+            match self.app.resume_thread(thread_id).await {
+                Ok(detail) => return Ok(detail),
+                Err(error) => last_error = Some(error),
+            }
+            if attempt + 1 < attempts {
+                tokio::time::sleep(self.options.poll_interval).await;
+            }
+        }
+        Err(communication_error(
+            "thread/resume",
+            Some(thread_id),
+            last_error.unwrap_or_else(|| {
+                AppServerError::InvalidResponse("thread resume failed without an error".into())
             }),
         ))
     }
