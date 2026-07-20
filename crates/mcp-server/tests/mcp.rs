@@ -107,6 +107,37 @@ async fn initializes_and_lists_exactly_the_seven_public_tools() {
 }
 
 #[tokio::test]
+async fn accepts_codex_paginated_list_and_request_metadata_params() {
+    let input = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"cursor":null,"_meta":{"progressToken":"startup"}}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"cursor":"next-page"}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":3,"method":"ping","params":null}"#,
+        "\n",
+    );
+
+    let responses = exchange(input, Arc::new(FakeBackend::default())).await;
+    assert_eq!(responses.len(), 3);
+    assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(responses[2]["result"], json!({}));
+}
+
+#[tokio::test]
+async fn tool_calls_accept_standard_request_metadata() {
+    let backend = Arc::new(FakeBackend::default());
+    let input = concat!(
+        r#"{"jsonrpc":"2.0","id":"start","method":"tools/call","params":{"name":"consensus_status","arguments":{},"_meta":{"progressToken":7}}}"#,
+        "\n",
+    );
+
+    let responses = exchange(input, backend.clone()).await;
+    assert_eq!(responses[0]["result"]["isError"], false);
+    assert_eq!(backend.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn tool_calls_return_text_and_structured_content() {
     let backend = Arc::new(FakeBackend::default());
     let input = concat!(

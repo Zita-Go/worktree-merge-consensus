@@ -134,11 +134,11 @@ async fn handle_request(request: Value, backend: &dyn ToolBackend) -> Option<Val
             ),
             Err(message) => error_response(response_id, -32602, message),
         }),
-        "ping" => id.map(|_| match validate_empty_params(object.get("params")) {
+        "ping" => id.map(|_| match validate_ping_params(object.get("params")) {
             Ok(()) => success_response(response_id, json!({})),
             Err(message) => error_response(response_id, -32602, message),
         }),
-        "tools/list" => id.map(|_| match validate_empty_params(object.get("params")) {
+        "tools/list" => id.map(|_| match validate_list_params(object.get("params")) {
             Ok(()) => success_response(response_id, json!({"tools": tool_definitions()})),
             Err(message) => error_response(response_id, -32602, message),
         }),
@@ -167,11 +167,30 @@ fn validate_initialize_params(params: Option<&Value>) -> Result<(), String> {
     }
 }
 
-fn validate_empty_params(params: Option<&Value>) -> Result<(), String> {
+fn validate_ping_params(params: Option<&Value>) -> Result<(), String> {
     match params {
-        None => Ok(()),
-        Some(Value::Object(object)) if object.is_empty() => Ok(()),
-        _ => Err("params must be an empty object".into()),
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::Object(object)) => {
+            reject_unknown_fields(object, &["_meta"])?;
+            validate_request_meta(object)
+        }
+        _ => Err("ping params must be an object when present".into()),
+    }
+}
+
+fn validate_list_params(params: Option<&Value>) -> Result<(), String> {
+    match params {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::Object(object)) => {
+            reject_unknown_fields(object, &["cursor", "_meta"])?;
+            if let Some(cursor) = object.get("cursor") {
+                if !cursor.is_null() && !cursor.is_string() {
+                    return Err("cursor must be a string when present".into());
+                }
+            }
+            validate_request_meta(object)
+        }
+        _ => Err("tools/list params must be an object when present".into()),
     }
 }
 
@@ -179,7 +198,8 @@ fn parse_tool_call(params: Option<&Value>) -> Result<(String, Value), String> {
     let object = params
         .and_then(Value::as_object)
         .ok_or_else(|| "tools/call params must be an object".to_owned())?;
-    reject_unknown_fields(object, &["name", "arguments"])?;
+    reject_unknown_fields(object, &["name", "arguments", "_meta"])?;
+    validate_request_meta(object)?;
     let name = object
         .get("name")
         .and_then(Value::as_str)
@@ -191,6 +211,15 @@ fn parse_tool_call(params: Option<&Value>) -> Result<(String, Value), String> {
         .unwrap_or_else(|| json!({}));
     let arguments = tools::validate_arguments(name, arguments)?;
     Ok((name.to_owned(), arguments))
+}
+
+fn validate_request_meta(object: &Map<String, Value>) -> Result<(), String> {
+    if let Some(meta) = object.get("_meta") {
+        if !meta.is_null() && !meta.is_object() {
+            return Err("_meta must be an object when present".into());
+        }
+    }
+    Ok(())
 }
 
 fn reject_unknown_fields(object: &Map<String, Value>, allowed: &[&str]) -> Result<(), String> {
