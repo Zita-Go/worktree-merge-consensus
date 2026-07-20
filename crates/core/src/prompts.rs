@@ -90,6 +90,7 @@ Safety policy:
 - Do not request user input, network access, broader filesystem access, or sandbox escalation. Return BLOCKED with evidence if the complete payload is insufficient.
 - No integration branch may be created before exact APPROVED_PLAN authorization.
 - Approval is valid only for the exact run, source SHAs, plan revision, round, branch, and integration SHA in the envelope.
+- Every response envelope, including BLOCKED, must copy phase, round, plan_revision, integration_branch, and integration_sha exactly from the authoritative turn metadata. The coordinator performs any transition to BLOCKED only after accepting the response.
 
 Authoritative turn metadata:
 ```json
