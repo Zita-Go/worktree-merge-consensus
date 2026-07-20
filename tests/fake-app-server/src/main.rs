@@ -121,12 +121,24 @@ impl Write for StdioStream {
 
 fn handle_request(config: &Config, method: &str, params: &Value) -> Result<Value, String> {
     match method {
-        "initialize" => Ok(json!({
-            "codexHome": config.state_directory.join("codex-home"),
-            "platformFamily": "unix",
-            "platformOs": "linux",
-            "userAgent": "codex-cli/0.144.5"
-        })),
+        "initialize" => {
+            if params
+                .pointer("/capabilities/experimentalApi")
+                .and_then(Value::as_bool)
+                != Some(true)
+            {
+                return Err(
+                    "initialize must opt into experimentalApi before using turn/start.environments"
+                        .to_owned(),
+                );
+            }
+            Ok(json!({
+                "codexHome": config.state_directory.join("codex-home"),
+                "platformFamily": "unix",
+                "platformOs": "linux",
+                "userAgent": "codex-cli/0.144.5"
+            }))
+        }
         "thread/list" => Ok(json!({
             "data": [thread_summary(config, &config.primary_thread), thread_summary(config, &config.reviewer_thread)],
             "nextCursor": null,

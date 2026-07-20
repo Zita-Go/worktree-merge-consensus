@@ -55,6 +55,10 @@ method is invoked through a typed adapter, and JSON-RPC
 fixture is an adapter contract, not a claim that the server echoed the client's
 own method list.
 
+The client declares `capabilities.experimentalApi: true` during `initialize`.
+App Server requires that opt-in before accepting the pinned empty
+`turn/start.environments` array used to prevent sticky environment inheritance.
+
 Every `turn/start` also carries the pinned role-specific cwd, runtime workspace
 roots, approval policy, an empty `environments` array that disables inherited
 sticky environments, and one of three sandbox profiles: offline read-only

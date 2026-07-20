@@ -25,7 +25,9 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
                     "title": "Worktree Merge Consensus",
                     "version": env!("CARGO_PKG_VERSION")
                 },
-                "capabilities": null
+                "capabilities": {
+                    "experimentalApi": true
+                }
             })
         );
         respond(

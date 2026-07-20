@@ -182,8 +182,9 @@ terminates with `FORBIDDEN_OPERATION`. Explicit task input may pause as
 
 ## App Server execution policy
 
-Every turn supplies an empty `environments` array so it cannot inherit a sticky
-task execution environment. Irrespective of the task's initial or subsequently
+The App Server connection declares `capabilities.experimentalApi: true` during
+`initialize`. Every turn then supplies an empty `environments` array so it
+cannot inherit a sticky task execution environment. Irrespective of the task's initial or subsequently
 reported cwd, contract, plan, and review turns supply the explicitly bound
 absolute role worktree, one runtime workspace root, a read-only sandbox, network
 disabled, and approval policy `never`. The authorized primary integration turn

@@ -389,7 +389,9 @@ impl AppServer for CodexAppServer {
                         "title": "Worktree Merge Consensus",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "capabilities": null,
+                    "capabilities": {
+                        "experimentalApi": true,
+                    },
                 }),
             )
             .await?;

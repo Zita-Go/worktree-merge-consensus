@@ -16,7 +16,7 @@
     "turn/completed"
   ],
   "requestShape": {
-    "initialize": ["clientInfo"],
+    "initialize": ["clientInfo", "capabilities"],
     "thread/list": [],
     "thread/read": ["threadId", "includeTurns"],
     "thread/resume": ["threadId"],
@@ -31,6 +31,9 @@
       "environments",
       "sandboxPolicy"
     ]
+  },
+  "initializeCapabilities": {
+    "experimentalApi": true
   },
   "initializeResponseShape": [
     "codexHome",
