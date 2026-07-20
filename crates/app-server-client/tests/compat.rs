@@ -22,6 +22,28 @@ fn desktop_app_server_user_agent_exposes_exact_codex_version() {
 }
 
 #[test]
+fn cli_app_server_user_agent_exposes_exact_codex_version() {
+    let version = parse_managed_user_agent(
+        "worktree-merge-consensus/0.144.6 (Debian 12.0.0; x86_64) unknown (worktree-merge-consensus; 0.1.8)",
+    );
+
+    assert_eq!(
+        version.map(|version| version.to_string()).as_deref(),
+        Some("0.144.6")
+    );
+}
+
+#[test]
+fn unrelated_cli_identity_is_rejected() {
+    assert!(
+        parse_managed_user_agent(
+            "unrelated-client/0.144.6 (Debian 12.0.0; x86_64) unknown (unrelated-client; 1.0.0)",
+        )
+        .is_none()
+    );
+}
+
+#[test]
 fn required_method_contract_is_explicit_and_pinned() {
     assert_eq!(
         REQUIRED_METHODS,

@@ -108,6 +108,11 @@ must be present when that daemon starts; after correcting them, restart both
 the App Server daemon and `codex-consensus` daemon, then start a new run because
 the user-only turn is retained for idempotent recovery.
 
+The managed identity check accepts the exact App Server identities emitted for
+`codex-cli`, Codex Desktop, and the fixed `worktree-merge-consensus` client
+name. In every case, the embedded Codex version must exactly match
+`codex --version`; unrelated client prefixes remain rejected.
+
 ## Persisted-state compatibility
 
 The v0.1 run-state schema is explicitly versioned. This prerelease does not

@@ -87,6 +87,26 @@ async fn desktop_managed_app_server_identity_is_accepted_end_to_end() {
 }
 
 #[tokio::test]
+async fn cli_managed_app_server_identity_is_accepted_end_to_end() {
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("calls.log");
+    let binary = fake_codex_with_user_agent(
+        temp.path(),
+        &log,
+        "0.144.6",
+        "worktree-merge-consensus/0.144.6 (Debian 12.0.0; x86_64) unknown (worktree-merge-consensus; 0.1.8)",
+    );
+
+    CodexAppServer::connect(ConnectOptions {
+        codex_binary: binary,
+        control_socket: None,
+        start_daemon: true,
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn cli_version_output_shape_is_rejected_as_a_managed_user_agent() {
     let temp = tempfile::tempdir().unwrap();
     let log = temp.path().join("calls.log");

@@ -112,8 +112,16 @@ pub fn parse_managed_user_agent(user_agent: &str) -> Option<Version> {
     if let Some(version) = user_agent.strip_prefix("codex-cli/") {
         return Version::parse(version.trim_start_matches('v')).ok();
     }
-    let desktop = user_agent.strip_prefix("Codex Desktop/")?;
-    let (version, metadata) = desktop.split_once(' ')?;
+    for prefix in ["Codex Desktop/", "worktree-merge-consensus/"] {
+        if let Some(identity) = user_agent.strip_prefix(prefix) {
+            return parse_versioned_managed_identity(identity);
+        }
+    }
+    None
+}
+
+fn parse_versioned_managed_identity(identity: &str) -> Option<Version> {
+    let (version, metadata) = identity.split_once(' ')?;
     if !metadata.starts_with('(') || !metadata.ends_with(')') || metadata.contains(['\r', '\n']) {
         return None;
     }
