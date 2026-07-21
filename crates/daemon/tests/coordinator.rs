@@ -777,6 +777,14 @@ async fn interrupted_forbidden_operation_with_terminal_read_only_queries_retries
         "primary",
         "turn-5",
         json!({
+            "id": "context-compaction-turn-5",
+            "type": "contextCompaction"
+        }),
+    );
+    app.append_turn_item(
+        "primary",
+        "turn-5",
+        json!({
             "id": "read-only-command-turn-5",
             "type": "commandExecution",
             "command": "/bin/bash -lc 'git rev-parse HEAD'",
@@ -1112,6 +1120,14 @@ async fn explicit_resume_replaces_a_side_effect_free_interrupted_turn_once() {
     assert_eq!(paused.status, RunStatus::PausedUserAction);
     assert_eq!(paused.reason_code.as_deref(), Some("COMMUNICATION_FAILURE"));
     assert_eq!(app.request_count(), 2);
+    app.append_turn_item(
+        "reviewer",
+        "turn-2",
+        json!({
+            "id": "context-compaction-turn-2",
+            "type": "contextCompaction"
+        }),
+    );
 
     let result = coordinator.resume(RUN_ID).await.unwrap();
 
@@ -1190,6 +1206,14 @@ async fn invalid_declared_git_test_can_resume_the_same_legacy_blocked_run() {
     assert_eq!(paused.reason_code.as_deref(), Some("INVALID_TEST_COMMAND"));
     assert_eq!(paused.next_action, NextAction::RequestReviewerContract);
     assert_eq!(app.request_count(), 2);
+    app.append_turn_item(
+        "reviewer",
+        "turn-2",
+        json!({
+            "id": "context-compaction-turn-2",
+            "type": "contextCompaction"
+        }),
+    );
     app.append_turn_item(
         "reviewer",
         "turn-2",

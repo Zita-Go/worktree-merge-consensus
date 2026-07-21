@@ -78,8 +78,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.20-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.20-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.21-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.21-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -250,7 +250,11 @@ marks coordinator-authored Primary and Reviewer turns as internal participants,
 so they do not recursively invoke the launcher skill. Recovery may discard only
 the exact legacy `sed -n 1,240p` read of this plugin's versioned `SKILL.md` after
 the command was denied; that read remains outside the live execution allowlist.
-`inProgress`, a write, wrong cwd, unknown item, or other side effect remains terminal.
+Version 0.1.21 also recognizes Codex App Server's exact internal
+`contextCompaction` marker as retry-safe only when it contains no fields beyond
+a nonempty `id` and the fixed `type`. This marker records context lifecycle, not
+a command, file change, or tool call. Extra fields, `inProgress`, a write, wrong
+cwd, unknown item, or other side effect remains terminal.
 Version 0.1.13 also
 places concrete, authoritative, direct-field
 payload templates for both approval message types next to the requested output;

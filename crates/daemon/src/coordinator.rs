@@ -1938,10 +1938,18 @@ fn terminal_turn_retry_blocker(turn: &Value) -> Option<String> {
         let Some(item_type) = item.get("type").and_then(Value::as_str) else {
             return Some("canonical item has no type".into());
         };
-        if !matches!(item_type, "userMessage" | "agentMessage" | "reasoning") {
-            return Some(format!(
-                "canonical item type {item_type} may have side effects"
-            ));
+        match item_type {
+            "userMessage" | "agentMessage" | "reasoning" => {}
+            "contextCompaction" => {
+                if let Some(blocker) = context_compaction_retry_blocker(item) {
+                    return Some(blocker);
+                }
+            }
+            _ => {
+                return Some(format!(
+                    "canonical item type {item_type} may have side effects"
+                ));
+            }
         }
     }
     None
@@ -1960,6 +1968,11 @@ fn interrupted_forbidden_operation_retry_blocker(state: &RunState, turn: &Value)
         };
         match item_type {
             "userMessage" | "agentMessage" | "reasoning" => {}
+            "contextCompaction" => {
+                if let Some(blocker) = context_compaction_retry_blocker(item) {
+                    return Some(blocker);
+                }
+            }
             "commandExecution" => {
                 let status = item.get("status").and_then(Value::as_str);
                 let exit_code = item.get("exitCode");
@@ -2016,6 +2029,11 @@ fn completed_read_only_turn_retry_blocker(turn: &Value) -> Option<String> {
         match item_type {
             "userMessage" | "reasoning" => {}
             "agentMessage" => has_agent_message = true,
+            "contextCompaction" => {
+                if let Some(blocker) = context_compaction_retry_blocker(item) {
+                    return Some(blocker);
+                }
+            }
             "commandExecution" => {
                 if item.get("status").and_then(Value::as_str) != Some("completed") {
                     return Some("command execution is not canonically completed".into());
@@ -2037,6 +2055,26 @@ fn completed_read_only_turn_retry_blocker(turn: &Value) -> Option<String> {
         }
     }
     (!has_agent_message).then(|| "canonical turn has no agent response".into())
+}
+
+fn context_compaction_retry_blocker(item: &Value) -> Option<String> {
+    let Some(object) = item.as_object() else {
+        return Some("context compaction item is not an object".into());
+    };
+    if object.len() != 2 || !object.contains_key("id") || !object.contains_key("type") {
+        return Some("context compaction item has fields outside its frozen schema".into());
+    }
+    if object.get("type").and_then(Value::as_str) != Some("contextCompaction") {
+        return Some("context compaction item has an unexpected type".into());
+    }
+    if !object
+        .get("id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.is_empty())
+    {
+        return Some("context compaction item has no nonempty id".into());
+    }
+    None
 }
 
 fn read_only_consensus_mcp_retry_blocker(item: &Value) -> Option<String> {
@@ -2582,5 +2620,25 @@ mod retry_safety_tests {
             read_only_consensus_mcp_retry_blocker(&foreign).as_deref(),
             Some("MCP tool call is not owned by the consensus plugin")
         );
+    }
+
+    #[test]
+    fn only_the_exact_context_compaction_marker_is_retry_safe() {
+        assert_eq!(
+            context_compaction_retry_blocker(&json!({
+                "id": "compact-1",
+                "type": "contextCompaction"
+            })),
+            None
+        );
+
+        for malformed in [
+            json!({"id": "", "type": "contextCompaction"}),
+            json!({"type": "contextCompaction"}),
+            json!({"id": "compact-1", "type": "contextCompaction", "status": "completed"}),
+            json!({"id": "compact-1", "type": "compaction"}),
+        ] {
+            assert!(context_compaction_retry_blocker(&malformed).is_some());
+        }
     }
 }

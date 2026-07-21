@@ -282,7 +282,10 @@ as internal participants for which the launcher skill is inapplicable. A
 same-run retry may discard the exact denied legacy `sed -n 1,240p` read of this
 plugin's semver-versioned `SKILL.md`, but that read is never admitted to the
 live integration execution allowlist. `inProgress`, writes, wrong cwd, nested
-shells, and unknown items remain terminal. Version 0.1.13 renders concrete direct-field payload templates for
+shells, and unknown items remain terminal. Version 0.1.21 recognizes the App
+Server's internal `contextCompaction` lifecycle marker during retry auditing
+only when its object has exactly a nonempty `id` and the fixed `type`; any
+additional field remains terminal. Version 0.1.13 renders concrete direct-field payload templates for
 `APPROVED_PLAN` and `APPROVED_RESULT`; the checked-in JSON Schema requires those
 approval identity fields at payload top level rather than accepting a nested
 identity object.

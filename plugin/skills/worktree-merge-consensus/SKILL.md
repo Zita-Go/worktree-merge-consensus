@@ -103,7 +103,10 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   prompts as internal participant turns for which this launcher is inapplicable.
   Recovery may discard the exact denied legacy `sed -n 1,240p` read of this
   plugin's semver-versioned `SKILL.md`; that read never enters the live command
-  allowlist. `inProgress`, writes, wrong cwd, and unknown items remain terminal.
+  allowlist. Version 0.1.21 treats App Server's internal `contextCompaction`
+  lifecycle marker as retry-safe only when it contains exactly a nonempty `id`
+  and the fixed `type`. Extra fields, `inProgress`, writes, wrong cwd, and
+  unknown items remain terminal.
   Network, added-permission, later-phase, mismatched, or side-effectful cases
   remain terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
