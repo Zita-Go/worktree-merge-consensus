@@ -160,6 +160,12 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   before retry. Participant waits use a 30-minute canonical-inactivity window;
   canonical status or turn-history changes renew it, while unchanged active
   state remains bounded.
+  Version 0.1.27 also handles that exact `inProgress + waitingOnApproval` turn
+  before a final assistant JSON exists, but only when its one request-bound
+  patch item is canonically `failed`, all other items are complete and
+  allowlisted, no successful patch is recorded, and the clean authorized merge
+  SHA remains identical across interruption. Unknown items, ambiguous writes,
+  target movement, or source drift remain terminal.
   Network, added-permission, later-phase, mismatched, or side-effectful cases
   remain terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.

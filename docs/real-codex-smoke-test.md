@@ -80,7 +80,10 @@ the evidence below.
    retrying the same Run on the existing merge. Repeat with App Server leaving
    the failed item and exact final blocker in an `inProgress` turn with
    `waitingOnApproval`; confirm resume interrupts and archives only that stale
-   turn. Keep one disposable participant turn active for longer than five
+   turn. Repeat once more with the failed item canonical but no final assistant
+   JSON; confirm the clean integration SHA is identical before and after the
+   single-turn interruption and the same Run retries on that existing merge.
+   Keep one disposable participant turn active for longer than five
    minutes while canonical turn items continue to change, and confirm the Run
    does not pause; unchanged state must still hit the bounded idle timeout.
 8. Verify `accepted_result` records the authoritative tests,

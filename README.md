@@ -88,6 +88,14 @@ interrupting and replacing only that stale turn. Participant waits now use a
 to canonical task status or turn history renew the window, while a task with
 no canonical progress still pauses with `COMMUNICATION_FAILURE`.
 
+Version 0.1.27 handles the still earlier residue in which the one exact patch
+call is canonically `failed`, but App Server has not persisted a final
+assistant JSON and leaves the turn `inProgress + waitingOnApproval`. Same-Run
+resume is permitted only when every other canonical item is complete and
+allowlisted, SQLite records no successful patch, and the authorized integration
+branch is clean at the same verified merge SHA before and after interruption.
+Unknown items, ambiguous writes, a changed target, or source drift fail closed.
+
 Read [the v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
 for the exact boundaries.
@@ -115,8 +123,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.26-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.26-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.27-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.27-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -342,6 +350,14 @@ retrying the same request. It also changes participant waiting from a fixed
 five-minute total timeout to a 30-minute inactivity timeout renewed by changes
 in canonical task status or turn history. Unchanged active state remains
 bounded and fails closed.
+Version 0.1.27 additionally permits the same stale turn to have no final
+assistant JSON only when its one request-bound patch item is already
+canonically `failed`. The daemon proves no successful patch was recorded,
+requires every command to be complete and allowlisted, snapshots the clean
+authorized merge SHA, interrupts only that turn, and requires the same SHA and
+clean repository state afterward before atomically retrying the request.
+Any assistant message that is present must still be the exact validated
+`PATCH_NOT_AUTHORIZED` blocker.
 Version 0.1.13 also
 places concrete, authoritative, direct-field
 payload templates for both approval message types next to the requested output;

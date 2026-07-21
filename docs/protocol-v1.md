@@ -329,6 +329,14 @@ left the Primary turn `inProgress` with `waitingOnApproval`. It first applies
 all 0.1.25 checks, then interrupts and atomically archives only that stale turn
 before retrying the same request. Every other `inProgress` failed-tool shape,
 missing final response, mismatch, possible write, or drift remains terminal.
+Version 0.1.27 adds one narrower missing-final exception: the exact
+request-bound patch call must already be canonically `failed`, no agent message
+may be present, every command must be completed successfully and pass the
+integration allowlist, and SQLite must contain no successful patch record. The
+daemon snapshots the clean authorized merge SHA, interrupts only that stale
+turn, and requires the same clean SHA afterward before atomically archiving and
+retrying it. Any unknown item, ambiguous execution, target movement, or source
+drift fails closed.
 Version 0.1.13 renders concrete direct-field payload templates for
 `APPROVED_PLAN` and `APPROVED_RESULT`; the checked-in JSON Schema requires those
 approval identity fields at payload top level rather than accepting a nested

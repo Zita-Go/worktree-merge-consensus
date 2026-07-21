@@ -90,6 +90,12 @@ residue that has the same exact failed tool item and final blocker but remains
 identity and repository proof before interrupting only that turn. Participant
 turns use a 30-minute canonical-inactivity timeout; changed canonical status or
 turn history renews the deadline, while unchanged active state remains bounded.
+Version 0.1.27 accepts the same residue without a final assistant JSON only
+when the one exact patch item is already canonically `failed`, every other item
+is complete and allowlisted, no successful patch is recorded, and the clean
+authorized merge SHA is identical before and after interruption. If any agent
+message exists, it must still validate as the exact 0.1.25 blocker. Unknown
+items, possible writes, target movement, and source drift remain terminal.
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
 fixed task ID. `thread/read` can return persisted history for a `notLoaded`
 task, but it does not load that task for model execution; starting a turn after

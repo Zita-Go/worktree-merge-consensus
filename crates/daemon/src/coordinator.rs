@@ -948,6 +948,9 @@ where
             || state.reason_code.as_deref() != Some("COMMUNICATION_FAILURE")
             || state.phase != Phase::Integrate
             || state.next_action != NextAction::RequestPrimaryIntegration
+            || state.integration_branch.is_some()
+            || state.integration_sha.is_some()
+            || state.current_integration_payload.is_some()
             || thread_id != state.facts.primary_thread_id
             || !turn
                 .get("items")
@@ -967,7 +970,7 @@ where
                 "an in-progress approval turn already has a successful controlled patch record",
             ));
         }
-        let retry_failed_patch_rejection = if let Some(blocker) =
+        let retry_failed_patch_sha = if let Some(blocker) =
             pending_controlled_patch_approval_blocker(
                 state,
                 detail,
@@ -989,11 +992,12 @@ where
                     blocker,
                 ));
             }
-            self.verify_patch_not_authorized_retry_turn(state, detail, turn, message_hash)
-                .await?;
-            true
+            Some(
+                self.verify_failed_controlled_patch_retry_turn(state, detail, turn, message_hash)
+                    .await?,
+            )
         } else {
-            false
+            None
         };
 
         let interrupt_error = self.app.interrupt_turn(thread_id, turn_id).await.err();
@@ -1019,14 +1023,21 @@ where
                 })?;
             match status {
                 "completed" => {
-                    if retry_failed_patch_rejection {
-                        self.verify_patch_not_authorized_retry_turn(
-                            state,
-                            &current,
-                            current_turn,
-                            message_hash,
-                        )
-                        .await?;
+                    if let Some(expected_sha) = retry_failed_patch_sha.as_deref() {
+                        let current_sha = self
+                            .verify_failed_controlled_patch_retry_turn(
+                                state,
+                                &current,
+                                current_turn,
+                                message_hash,
+                            )
+                            .await?;
+                        if current_sha != expected_sha {
+                            return Err(CoordinatorError::operational(
+                                "TERMINAL_TURN_RETRY_UNSAFE",
+                                "authorized integration HEAD changed while the failed controlled-patch turn was interrupted",
+                            ));
+                        }
                         self.store
                             .reset_completed_integration_tool_failure_turn_for_retry(
                                 &state.facts.run_id.to_string(),
@@ -1039,14 +1050,21 @@ where
                     return Ok(true);
                 }
                 "failed" | "interrupted" => {
-                    if retry_failed_patch_rejection {
-                        self.verify_patch_not_authorized_retry_turn(
-                            state,
-                            &current,
-                            current_turn,
-                            message_hash,
-                        )
-                        .await?;
+                    if let Some(expected_sha) = retry_failed_patch_sha.as_deref() {
+                        let current_sha = self
+                            .verify_failed_controlled_patch_retry_turn(
+                                state,
+                                &current,
+                                current_turn,
+                                message_hash,
+                            )
+                            .await?;
+                        if current_sha != expected_sha {
+                            return Err(CoordinatorError::operational(
+                                "TERMINAL_TURN_RETRY_UNSAFE",
+                                "authorized integration HEAD changed while the failed controlled-patch turn was interrupted",
+                            ));
+                        }
                     } else if let Some(blocker) = pending_controlled_patch_approval_blocker(
                         state,
                         &current,
@@ -1107,6 +1125,56 @@ where
             }
             tokio::time::sleep(self.options.poll_interval).await;
         }
+    }
+
+    async fn verify_failed_controlled_patch_retry_turn(
+        &self,
+        state: &RunState,
+        detail: &ThreadDetail,
+        turn: &Value,
+        message_hash: &str,
+    ) -> Result<String, CoordinatorError> {
+        let run_id = state.facts.run_id.to_string();
+        if self
+            .store
+            .successful_patch_recorded(&run_id, message_hash)?
+        {
+            return Err(CoordinatorError::operational(
+                "TERMINAL_TURN_RETRY_UNSAFE",
+                "controlled patch was recorded as successful before its failed retry",
+            ));
+        }
+        if let Some(blocker) = pending_controlled_patch_approval_blocker(
+            state,
+            detail,
+            turn,
+            message_hash,
+            &["failed"],
+        ) {
+            return Err(CoordinatorError::operational(
+                "TERMINAL_TURN_RETRY_UNSAFE",
+                format!("failed controlled-patch turn cannot be retried: {blocker}"),
+            ));
+        }
+
+        let has_agent_message = turn
+            .get("items")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|item| item.get("type").and_then(Value::as_str) == Some("agentMessage"));
+        if has_agent_message {
+            return self
+                .verify_patch_not_authorized_retry_turn(state, detail, turn, message_hash)
+                .await;
+        }
+
+        let target = state.target_integration_branch.as_deref().ok_or_else(|| {
+            CoordinatorError::operational("INVALID_STATE", "target integration branch is missing")
+        })?;
+        self.safety
+            .verify_integration_patch_ready(&state.facts, target)
+            .map_err(Into::into)
     }
 
     async fn inspect_completed_patch_not_authorized_retry(
@@ -1188,7 +1256,7 @@ where
         detail: &ThreadDetail,
         turn: &Value,
         message_hash: &str,
-    ) -> Result<(), CoordinatorError> {
+    ) -> Result<String, CoordinatorError> {
         let run_id = state.facts.run_id.to_string();
         if self
             .store
@@ -1228,7 +1296,7 @@ where
                 "reported clean integration HEAD does not match the authoritative target branch",
             ));
         }
-        Ok(())
+        Ok(authoritative_sha)
     }
 
     async fn inspect_completed_file_change_tool_unavailable_retry(
