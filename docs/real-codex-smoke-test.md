@@ -73,6 +73,11 @@ the evidence below.
    setting and resume the same Run. Confirm the daemon interrupts only the
    canonical `waitingOnApproval` turn, revalidates the clean target and frozen
    refs, and retries the same request without recreating the branch or merge.
+   Also exercise the hot-reload race in which App Server continues that old
+   approval before the paused Run is reactivated. Confirm the canonical patch
+   item completes as `failed` with `PATCH_NOT_AUTHORIZED`, no patch record or
+   Git write exists, and explicit resume archives only that exact turn before
+   retrying the same Run on the existing merge.
 8. Verify `accepted_result` records the authoritative tests,
    `source_refs_unchanged: true`, and local-only/no-push/no-PR fields. Verify the
    test cwd is a cleanly materialized clone of the exact integration SHA with a

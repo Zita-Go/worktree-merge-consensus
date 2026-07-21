@@ -144,6 +144,15 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   are unchanged. Unknown, multiple, or mismatched calls, other incomplete
   items, drift, or possible writes fail closed. If the turn completed during
   the interrupt race, its completed result is reused instead of duplicated.
+  Version 0.1.25 also handles the exact completed rejection produced when App
+  Server continues the old approval after configuration hot reload but before
+  the paused Run is reactivated. Explicit same-Run resume may archive and retry
+  only one canonically `failed`, request-bound `consensus_apply_patch` call with
+  an exact `BLOCKED / PATCH_NOT_AUTHORIZED` response, no successful patch
+  record, a clean authorized target at the reported merge SHA, both frozen
+  ancestors, and unchanged source refs. It reuses the existing merge; unknown
+  or additional tools, ambiguous writes, mismatched evidence, or drift remain
+  terminal.
   Network, added-permission, later-phase, mismatched, or side-effectful cases
   remain terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.

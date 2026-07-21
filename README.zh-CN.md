@@ -49,6 +49,12 @@ SQLite。该能力没有公开 CLI 等价命令，也不能选择仓库、创建
 其他 MCP 工具或任何全局审批策略。若该值缺失或被覆盖，`doctor`、新 Run 启动和受控补丁恢复
 都会失败关闭。
 
+0.1.25 还会恢复一个窄范围的热加载竞态：App Server 在 Run 仍暂停时继续旧审批，协调器因此以
+`PATCH_NOT_AUTHORIZED` 安全拒绝该绑定请求的补丁。显式恢复同一个 Run 时，只有规范历史中恰好
+存在一个匹配且失败的补丁调用、阻塞身份完全一致、没有成功补丁记录、授权目标仍在上报的 merge
+SHA 上保持干净并包含两个冻结祖先、且两个源引用未变，才会归档并替换该已完成主修 turn。恢复
+复用现有 merge，绝不会创建替代 Run。
+
 精确边界见 [v1 协议](docs/protocol-v1.md)、
 [兼容性策略](docs/compatibility.md)与[安全策略](SECURITY.md)。
 
@@ -71,8 +77,8 @@ SQLite。该能力没有公开 CLI 等价命令，也不能选择仓库、创建
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.24-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.24-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.25-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.25-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 v0.1.0 的 GNU 产物要求 GLIBC 2.39，现已停止推荐；受支持的 Linux 主机请使用
@@ -233,6 +239,12 @@ turn 显式选择同机 `local` 执行环境；空环境数组会禁用命令与
 所有已成功执行的白名单命令、尚无成功补丁记录、授权目标干净、两个源提交均为祖先，以及冻结
 引用未变。未知或多个工具调用、其他未完成 item、漂移或任何可能写入都会失败关闭；若 turn 在
 中断竞态期间已经完成，则直接复用，不会重复执行。
+0.1.25 处理与之对应的“已完成拒绝”竞态：配置热加载后，App Server 可能在 Run 仍暂停时立即
+继续旧审批，daemon 会用 `PATCH_NOT_AUTHORIZED` 拒绝该精确补丁调用。显式恢复时，只能归档并
+替换一个规范已完成的主修 turn；其中必须恰好有一个绑定请求且状态为失败的
+`consensus_apply_patch` 调用，并携带完全匹配的 blocker。daemon 还要求没有成功补丁记录、现有
+目标分支在上报 merge SHA 上干净、包含两个冻结提交祖先且源引用未变。未知或额外工具调用、成功
+或不明确的写入、证据不匹配和仓库漂移仍是终态；不会再次创建分支或 merge。
 0.1.13 还会在两类批准请求旁给出带权威值的扁平 payload
 模板，并由 JSON Schema 拒绝仅嵌套在其他对象中的批准身份。待完成的验证 turn 可能在克隆中留下测试产物；恢复时
 可允许该克隆变脏，但仍强制要求持久化路径、精确 detached SHA、独立 Git common directory

@@ -69,6 +69,16 @@ approvals, sandboxing, other MCP tools, or any global approval policy.
 `doctor`, new-run start, and controlled-patch recovery fail closed when the
 setting is absent or overridden.
 
+Version 0.1.25 also recovers the narrow hot-reload race in which App Server
+continues an old approval while the Run is still paused, so the coordinator
+safely rejects the request-bound patch with `PATCH_NOT_AUTHORIZED`. Explicit
+same-Run resume archives and replaces that completed Primary turn only when
+canonical history contains exactly one matching failed patch call, the blocker
+identity is exact, no successful patch was recorded, the authorized target is
+still clean at the reported merge SHA with both frozen ancestors, and both
+source refs remain unchanged. It reuses the existing merge and never creates a
+replacement Run.
+
 Read [the v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
 for the exact boundaries.
@@ -96,8 +106,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.24-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.24-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.25-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.25-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -305,6 +315,16 @@ history, absence of a recorded successful patch, clean authorized target,
 source ancestry, and unchanged frozen refs. Unknown or multiple tool calls,
 other incomplete items, drift, or any possible write fail closed. A turn that
 completed during the interrupt race is reused rather than duplicated.
+Version 0.1.25 handles the corresponding completed rejection race: App Server
+may continue the old approval immediately after configuration hot reload while
+the Run is still paused, causing the daemon to reject the exact patch call with
+`PATCH_NOT_AUTHORIZED`. Explicit resume may archive and replace only a
+canonically completed Primary turn containing one request-bound failed
+`consensus_apply_patch` call and an exact blocker. The daemon additionally
+requires no successful patch record, the clean existing target at the reported
+merge SHA, both frozen commits as ancestors, and unchanged source refs. Unknown
+or additional tool calls, a successful or ambiguous write, mismatched evidence,
+or repository drift remain terminal; branch creation and merge are not repeated.
 Version 0.1.13 also
 places concrete, authoritative, direct-field
 payload templates for both approval message types next to the requested output;

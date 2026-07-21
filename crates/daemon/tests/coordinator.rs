@@ -1548,6 +1548,60 @@ async fn pending_controlled_patch_approval_is_interrupted_and_retried_on_the_sam
 }
 
 #[tokio::test]
+async fn completed_patch_rejected_while_paused_retries_the_same_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let normal = conflict_free_replies();
+    let mut replies = normal[..5].to_vec();
+    replies.push(normal[4].clone());
+    replies.push(normal[5].clone());
+    let app = Arc::new(FakeAppServer::deferred(
+        replies,
+        5,
+        DeferMode::PatchApproval,
+    ));
+    let safety = Arc::new(InProgressRecoverySafety::default());
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::clone(&safety),
+        CoordinatorOptions {
+            wait_timeout: Duration::from_millis(15),
+            poll_interval: Duration::from_millis(1),
+            communication_attempts: 1,
+        },
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let paused = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+    assert_eq!(paused.reason_code.as_deref(), Some("COMMUNICATION_FAILURE"));
+    assert_eq!(paused.next_action, NextAction::RequestPrimaryIntegration);
+
+    safety
+        .integration_branch_active
+        .store(true, Ordering::SeqCst);
+    app.reject_deferred_patch_not_authorized();
+    let result = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Accepted);
+    assert!(app.interrupts().is_empty());
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    assert_eq!(app.request_count(), 8);
+    let integration_prompts = app
+        .prompts()
+        .into_iter()
+        .filter(|prompt| prompt_action(prompt) == "REQUEST_PRIMARY_INTEGRATION")
+        .collect::<Vec<_>>();
+    assert_eq!(integration_prompts.len(), 2);
+    assert!(integration_prompts[1].contains("consensus_apply_patch"));
+    assert!(integration_prompts[1].contains("do not recreate or re-merge"));
+}
+
+#[tokio::test]
 async fn controlled_patch_requires_the_exact_active_request_and_succeeds_only_once() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -2266,6 +2320,60 @@ impl FakeAppServer {
         }
     }
 
+    fn reject_deferred_patch_not_authorized(&self) {
+        let (turn_id, prompt) = {
+            let mut threads = self.threads.lock().unwrap();
+            let turn = threads
+                .values_mut()
+                .flat_map(|turns| turns.iter_mut())
+                .find(|turn| {
+                    turn.get("status").and_then(Value::as_str) == Some("inProgress")
+                        && turn
+                            .get("items")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .any(|item| {
+                                item.get("type").and_then(Value::as_str) == Some("mcpToolCall")
+                                    && item.get("tool").and_then(Value::as_str)
+                                        == Some("consensus_apply_patch")
+                            })
+                })
+                .expect("a deferred controlled patch turn");
+            let turn_id = turn["id"].as_str().unwrap().to_owned();
+            let prompt = turn["items"][0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let patch_item = turn["items"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|item| {
+                    item.get("type").and_then(Value::as_str) == Some("mcpToolCall")
+                        && item.get("tool").and_then(Value::as_str) == Some("consensus_apply_patch")
+                })
+                .unwrap();
+            patch_item["status"] = json!("failed");
+            (turn_id, prompt)
+        };
+
+        let metadata = prompt_json_block(&prompt, "Authoritative turn metadata:");
+        let payload = prompt_json_block(&prompt, "Complete current payload");
+        let delivery =
+            prompt_json_block(&prompt, "Coordinator delivery identity for crash recovery:");
+        let mut reply = patch_not_authorized_blocker();
+        reply["payload"]["request_hash"] = delivery["request_hash"].clone();
+        reply["payload"]["approved_plan_revision"] = metadata["plan_revision"].clone();
+        reply["payload"]["approved_primary_sha"] = metadata["primary_sha"].clone();
+        reply["payload"]["approved_reviewer_sha"] = metadata["reviewer_sha"].clone();
+        reply["payload"]["approved_plan_hash"] = payload["approval"]["approved_plan_hash"].clone();
+        reply["payload"]["resulting_integration_branch"] =
+            payload["target_integration_branch"].clone();
+        self.deferred_replies.lock().unwrap().insert(turn_id, reply);
+        self.complete_deferred_turns();
+    }
+
     fn detail(&self, thread_id: &str) -> ThreadDetail {
         let turns = self
             .threads
@@ -2893,6 +3001,30 @@ fn file_change_tool_unavailable_blocker() -> Value {
         }),
     );
     blocked["reason_code"] = json!("FILE_CHANGE_TOOL_UNAVAILABLE");
+    blocked
+}
+
+fn patch_not_authorized_blocker() -> Value {
+    let mut blocked = message(
+        "BLOCKED",
+        "INTEGRATE",
+        1,
+        Some(1),
+        None,
+        None,
+        json!({
+            "role": "PRIMARY",
+            "request_hash": "filled-from-prompt",
+            "approved_plan_revision": 1,
+            "approved_primary_sha": PRIMARY_SHA,
+            "approved_reviewer_sha": REVIEWER_SHA,
+            "approved_plan_hash": "filled-from-prompt",
+            "resulting_integration_branch": "consensus/test-run",
+            "resulting_integration_sha": INTEGRATION_SHA,
+            "blocking_condition": "PATCH_NOT_AUTHORIZED: controlled patch is limited to the active primary integration turn before a result is reported."
+        }),
+    );
+    blocked["reason_code"] = json!("PATCH_NOT_AUTHORIZED");
     blocked
 }
 

@@ -311,7 +311,16 @@ authorized target is clean with both frozen source ancestors, and both source
 refs remain frozen. Unknown or multiple tool calls, other incomplete items,
 mismatched arguments, drift, or possible writes fail closed. If the turn
 completes during the interrupt race, its completed result is reused rather than
-duplicated. Version 0.1.13 renders concrete direct-field payload templates for
+duplicated. Version 0.1.25 additionally recognizes the exact completed
+rejection race that can occur when App Server continues the old approval after
+configuration hot reload while the Run remains paused. Explicit same-Run
+resume may archive and retry only a Primary turn with exactly one request-bound
+`consensus_apply_patch` item in `failed` status and an exact
+`BLOCKED / PATCH_NOT_AUTHORIZED` response. No successful patch record may
+exist, the authorized target must be clean at the reported merge SHA with both
+frozen ancestors, and source refs must remain unchanged. The existing merge is
+reused; unknown or additional tools, possible writes, mismatched evidence, or
+drift fail closed. Version 0.1.13 renders concrete direct-field payload templates for
 `APPROVED_PLAN` and `APPROVED_RESULT`; the checked-in JSON Schema requires those
 approval identity fields at payload top level rather than accepting a nested
 identity object.

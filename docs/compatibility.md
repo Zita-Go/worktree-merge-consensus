@@ -80,6 +80,10 @@ tools, or a global approval setting. `doctor`, run start, and controlled-patch
 resume fail with `APPROVAL_CONFIGURATION_REQUIRED` when the effective value is
 absent or overridden. The coordinator uses `turn/interrupt` only for the exact
 v0.1.24 pending controlled-patch approval recovery described by the protocol.
+Version 0.1.25 does not broaden interruption behavior: it reads canonical
+completed history and retries only the exact failed request-bound
+`consensus_apply_patch` plus `PATCH_NOT_AUTHORIZED` shape described by the
+protocol, after repository and SQLite no-write checks.
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
 fixed task ID. `thread/read` can return persisted history for a `notLoaded`
 task, but it does not load that task for model execution; starting a turn after

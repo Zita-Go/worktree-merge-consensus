@@ -705,10 +705,16 @@ where
             self.revalidate_current_repository(&state).await?;
         }
         if retry_terminal_turn {
-            if let Some(retry) = self
-                .inspect_completed_file_change_tool_unavailable_retry(&state)
+            let completed_tool_failure_retry = if let Some(retry) = self
+                .inspect_completed_patch_not_authorized_retry(&state)
                 .await?
             {
+                Some(retry)
+            } else {
+                self.inspect_completed_file_change_tool_unavailable_retry(&state)
+                    .await?
+            };
+            if let Some(retry) = completed_tool_failure_retry {
                 self.store
                     .reset_completed_integration_tool_failure_turn_for_retry(
                         run_id,
@@ -1059,6 +1065,112 @@ where
         }
     }
 
+    async fn inspect_completed_patch_not_authorized_retry(
+        &self,
+        state: &RunState,
+    ) -> Result<Option<RetryableCompletedTurn>, CoordinatorError> {
+        if state.status != RunStatus::PausedUserAction
+            || state.reason_code.as_deref() != Some("COMMUNICATION_FAILURE")
+            || state.phase != Phase::Integrate
+            || state.next_action != NextAction::RequestPrimaryIntegration
+            || state.integration_branch.is_some()
+            || state.integration_sha.is_some()
+            || state.current_integration_payload.is_some()
+        {
+            return Ok(None);
+        }
+        let run_id = state.facts.run_id.to_string();
+        let Some(pending) = self.store.pending_send(&run_id)? else {
+            return Ok(None);
+        };
+        let (Some(thread_id), Some(turn_id)) =
+            (pending.thread_id.as_deref(), pending.turn_id.as_deref())
+        else {
+            return Ok(None);
+        };
+        if pending.role != "PRIMARY"
+            || pending.phase != "INTEGRATE"
+            || pending.round != state.round
+            || thread_id != state.facts.primary_thread_id
+        {
+            return Ok(None);
+        }
+
+        let detail = self.read_thread_with_retry(thread_id).await?;
+        self.verify_thread_identity(state, Role::Primary, &detail)?;
+        let turn = find_turn(&detail, turn_id).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "completed controlled-patch blocker is absent from canonical task history",
+            )
+        })?;
+        let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "completed controlled-patch blocker has no canonical status",
+            )
+        })?;
+        if status != "completed" {
+            return Ok(None);
+        }
+        if !turn_contains_request_hash(turn, &pending.message_hash) {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "completed controlled-patch blocker lacks its deterministic request marker",
+            ));
+        }
+
+        let raw_response = final_agent_json(turn)?;
+        let message = validate_message(raw_response).map_err(|error| {
+            CoordinatorError::operational("INVALID_RESPONSE", error.to_string())
+        })?;
+        if message.envelope.reason_code.as_deref() != Some("PATCH_NOT_AUTHORIZED") {
+            return Ok(None);
+        }
+        if self
+            .store
+            .successful_patch_recorded(&run_id, &pending.message_hash)?
+        {
+            return Err(CoordinatorError::operational(
+                "TERMINAL_TURN_RETRY_UNSAFE",
+                "controlled patch was recorded as successful before PATCH_NOT_AUTHORIZED",
+            ));
+        }
+        if let Some(blocker) = pending_controlled_patch_approval_blocker(
+            state,
+            &detail,
+            turn,
+            &pending.message_hash,
+            &["failed"],
+        ) {
+            return Err(CoordinatorError::operational(
+                "TERMINAL_TURN_RETRY_UNSAFE",
+                format!("completed controlled-patch blocker cannot be retried: {blocker}"),
+            ));
+        }
+        let reported_sha =
+            validate_patch_not_authorized_blocker(state, &pending.message_hash, &message)?;
+        let target = state.target_integration_branch.as_deref().ok_or_else(|| {
+            CoordinatorError::operational("INVALID_STATE", "target integration branch is missing")
+        })?;
+        let authoritative_sha = self
+            .safety
+            .verify_integration_patch_ready(&state.facts, target)?;
+        if authoritative_sha != reported_sha {
+            return Err(CoordinatorError::operational(
+                "TERMINAL_TURN_RETRY_UNSAFE",
+                "reported clean integration HEAD does not match the authoritative target branch",
+            ));
+        }
+
+        Ok(Some(RetryableCompletedTurn {
+            message_hash: pending.message_hash,
+            thread_id: thread_id.to_owned(),
+            turn_id: turn_id.to_owned(),
+            observed_status: status.to_owned(),
+        }))
+    }
+
     async fn inspect_completed_file_change_tool_unavailable_retry(
         &self,
         state: &RunState,
@@ -1113,12 +1225,6 @@ where
                 "completed file-change blocker lacks its deterministic request marker",
             ));
         }
-        if let Some(blocker) = terminal_turn_retry_blocker(turn) {
-            return Err(CoordinatorError::operational(
-                "TERMINAL_TURN_RETRY_UNSAFE",
-                format!("completed file-change blocker cannot be retried: {blocker}"),
-            ));
-        }
 
         let raw_response = final_agent_json(turn)?;
         let message = validate_message(raw_response).map_err(|error| {
@@ -1126,6 +1232,12 @@ where
         })?;
         if message.envelope.reason_code.as_deref() != Some("FILE_CHANGE_TOOL_UNAVAILABLE") {
             return Ok(None);
+        }
+        if let Some(blocker) = terminal_turn_retry_blocker(turn) {
+            return Err(CoordinatorError::operational(
+                "TERMINAL_TURN_RETRY_UNSAFE",
+                format!("completed file-change blocker cannot be retried: {blocker}"),
+            ));
         }
         let reported_sha =
             validate_file_change_tool_unavailable_blocker(state, &pending.message_hash, &message)?;
@@ -3033,6 +3145,82 @@ fn validate_file_change_tool_unavailable_blocker(
             CoordinatorError::operational(
                 "TERMINAL_TURN_RETRY_UNSAFE",
                 "file-change blocker omits a valid resulting integration SHA",
+            )
+        })?;
+    Ok(reported_sha.to_owned())
+}
+
+fn validate_patch_not_authorized_blocker(
+    state: &RunState,
+    request_hash: &str,
+    message: &ProtocolMessage,
+) -> Result<String, CoordinatorError> {
+    let envelope = &message.envelope;
+    if envelope.message_type != MessageType::Blocked
+        || envelope.phase != consensus_core::protocol::MessagePhase::Integrate
+        || envelope.run_id != state.facts.run_id
+        || envelope.round != state.round
+        || envelope.plan_revision != state.plan_revision
+        || envelope.primary_sha != state.facts.primary_sha
+        || envelope.reviewer_sha != state.facts.reviewer_sha
+        || envelope.integration_branch.is_some()
+        || envelope.integration_sha.is_some()
+        || envelope.reason_code.as_deref() != Some("PATCH_NOT_AUTHORIZED")
+    {
+        return Err(CoordinatorError::operational(
+            "TERMINAL_TURN_RETRY_UNSAFE",
+            "controlled-patch rejection envelope does not match the frozen integration action",
+        ));
+    }
+    let payload = message.payload.as_object().ok_or_else(|| {
+        CoordinatorError::operational(
+            "TERMINAL_TURN_RETRY_UNSAFE",
+            "controlled-patch rejection payload is not an object",
+        )
+    })?;
+    let exact_string =
+        |key: &str, expected: &str| payload.get(key).and_then(Value::as_str) == Some(expected);
+    let target = state
+        .target_integration_branch
+        .as_deref()
+        .unwrap_or_default();
+    let approved_plan_hash = state
+        .plan_approval_payload
+        .as_ref()
+        .and_then(|value| value.get("approved_plan_hash"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !exact_string("role", "PRIMARY")
+        || !exact_string("request_hash", request_hash)
+        || payload
+            .get("approved_plan_revision")
+            .and_then(Value::as_u64)
+            != state.plan_revision.map(u64::from)
+        || !exact_string("approved_primary_sha", &state.facts.primary_sha)
+        || !exact_string("approved_reviewer_sha", &state.facts.reviewer_sha)
+        || !exact_string("approved_plan_hash", approved_plan_hash)
+        || !exact_string("resulting_integration_branch", target)
+        || !payload
+            .get("blocking_condition")
+            .and_then(Value::as_str)
+            .is_some_and(|condition| {
+                condition.contains("PATCH_NOT_AUTHORIZED")
+                    && condition.contains("active primary integration turn")
+            })
+    {
+        return Err(CoordinatorError::operational(
+            "TERMINAL_TURN_RETRY_UNSAFE",
+            "controlled-patch rejection does not carry the exact approved identity and authorization evidence",
+        ));
+    }
+    let reported_sha = payload
+        .get("resulting_integration_sha")
+        .and_then(Value::as_str)
+        .filter(|sha| sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| {
+            CoordinatorError::operational(
+                "TERMINAL_TURN_RETRY_UNSAFE",
+                "controlled-patch rejection omits a valid resulting integration SHA",
             )
         })?;
     Ok(reported_sha.to_owned())
