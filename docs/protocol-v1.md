@@ -52,7 +52,10 @@ be attached to its authorized new local branch.
 Before each protocol turn, the daemon waits for the target task to become idle,
 resumes it by its frozen task ID, and only then sends `turn/start`. Reading task
 history is not a substitute for resuming a task that App Server reports as
-`notLoaded`.
+`notLoaded`. Version 0.1.26 treats this as a bounded inactivity wait: the
+default idle window is 30 minutes and renews only when canonical task status or
+turn history changes. A task with no canonical progress pauses with
+`COMMUNICATION_FAILURE`; cancellation remains available while waiting.
 
 Preflight reason codes include `UNREGISTERED_WORKTREE`,
 `DUPLICATE_WORKTREE`, `REPOSITORY_MISMATCH`, `DIRTY_WORKTREE`, and
@@ -320,7 +323,13 @@ resume may archive and retry only a Primary turn with exactly one request-bound
 exist, the authorized target must be clean at the reported merge SHA with both
 frozen ancestors, and source refs must remain unchanged. The existing merge is
 reused; unknown or additional tools, possible writes, mismatched evidence, or
-drift fail closed. Version 0.1.13 renders concrete direct-field payload templates for
+drift fail closed. Version 0.1.26 also recognizes the same exact failed patch
+call and blocker when App Server has persisted a final assistant message but
+left the Primary turn `inProgress` with `waitingOnApproval`. It first applies
+all 0.1.25 checks, then interrupts and atomically archives only that stale turn
+before retrying the same request. Every other `inProgress` failed-tool shape,
+missing final response, mismatch, possible write, or drift remains terminal.
+Version 0.1.13 renders concrete direct-field payload templates for
 `APPROVED_PLAN` and `APPROVED_RESULT`; the checked-in JSON Schema requires those
 approval identity fields at payload top level rather than accepting a nested
 identity object.

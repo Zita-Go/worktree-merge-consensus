@@ -1602,6 +1602,63 @@ async fn completed_patch_rejected_while_paused_retries_the_same_run() {
 }
 
 #[tokio::test]
+async fn in_progress_patch_rejected_while_paused_is_interrupted_and_retried() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let normal = conflict_free_replies();
+    let mut replies = normal[..5].to_vec();
+    replies.push(normal[4].clone());
+    replies.push(normal[5].clone());
+    let app = Arc::new(FakeAppServer::deferred(
+        replies,
+        5,
+        DeferMode::PatchApproval,
+    ));
+    let safety = Arc::new(InProgressRecoverySafety::default());
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::clone(&safety),
+        CoordinatorOptions {
+            wait_timeout: Duration::from_millis(15),
+            poll_interval: Duration::from_millis(1),
+            communication_attempts: 1,
+        },
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let paused = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+    assert_eq!(paused.reason_code.as_deref(), Some("COMMUNICATION_FAILURE"));
+    assert_eq!(paused.next_action, NextAction::RequestPrimaryIntegration);
+
+    safety
+        .integration_branch_active
+        .store(true, Ordering::SeqCst);
+    app.reject_deferred_patch_not_authorized_in_progress();
+    let result = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Accepted);
+    assert_eq!(
+        app.interrupts(),
+        vec![("primary".to_owned(), "turn-5".to_owned())]
+    );
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    assert_eq!(app.request_count(), 8);
+    let integration_prompts = app
+        .prompts()
+        .into_iter()
+        .filter(|prompt| prompt_action(prompt) == "REQUEST_PRIMARY_INTEGRATION")
+        .collect::<Vec<_>>();
+    assert_eq!(integration_prompts.len(), 2);
+    assert!(integration_prompts[1].contains("consensus_apply_patch"));
+    assert!(integration_prompts[1].contains("do not recreate or re-merge"));
+}
+
+#[tokio::test]
 async fn controlled_patch_requires_the_exact_active_request_and_succeeds_only_once() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -1771,7 +1828,51 @@ async fn active_turn_timeout_pauses_as_communication_failure() {
     assert_eq!(diagnostic.code, "COMMUNICATION_FAILURE");
     assert_eq!(diagnostic.action, NextAction::RequestPrimaryContract);
     assert_eq!(diagnostic.thread_id.as_deref(), Some("primary"));
-    assert!(diagnostic.detail.contains("bounded wait"));
+    assert!(diagnostic.detail.contains("bounded idle wait"));
+}
+
+#[tokio::test]
+async fn canonical_turn_progress_renews_the_bounded_idle_wait() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(FakeAppServer::deferred(
+        conflict_free_replies(),
+        1,
+        DeferMode::Hold,
+    ));
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        CoordinatorOptions {
+            wait_timeout: Duration::from_millis(250),
+            poll_interval: Duration::from_millis(1),
+            communication_attempts: 1,
+        },
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let driver = {
+        let coordinator = coordinator.clone();
+        tokio::spawn(async move { coordinator.drive(RUN_ID).await })
+    };
+    wait_for_request(&app).await;
+
+    for item_id in ["reasoning-progress-1", "reasoning-progress-2"] {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        app.append_turn_item(
+            "primary",
+            "turn-1",
+            json!({"id": item_id, "type": "reasoning", "summary": []}),
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    app.complete_deferred_turns();
+
+    let result = driver.await.unwrap().unwrap();
+    assert_eq!(result.status, RunStatus::Accepted);
 }
 
 #[tokio::test]
@@ -2321,6 +2422,27 @@ impl FakeAppServer {
     }
 
     fn reject_deferred_patch_not_authorized(&self) {
+        let (turn_id, reply) = self.patch_not_authorized_reply();
+        self.deferred_replies.lock().unwrap().insert(turn_id, reply);
+        self.complete_deferred_turns();
+    }
+
+    fn reject_deferred_patch_not_authorized_in_progress(&self) {
+        let (turn_id, reply) = self.patch_not_authorized_reply();
+        self.deferred_replies.lock().unwrap().remove(&turn_id);
+        self.append_turn_item(
+            "primary",
+            &turn_id,
+            json!({
+                "id": format!("assistant-{turn_id}"),
+                "type": "agentMessage",
+                "text": serde_json::to_string(&reply).unwrap(),
+                "phase": "final_answer"
+            }),
+        );
+    }
+
+    fn patch_not_authorized_reply(&self) -> (String, Value) {
         let (turn_id, prompt) = {
             let mut threads = self.threads.lock().unwrap();
             let turn = threads
@@ -2370,8 +2492,7 @@ impl FakeAppServer {
         reply["payload"]["approved_plan_hash"] = payload["approval"]["approved_plan_hash"].clone();
         reply["payload"]["resulting_integration_branch"] =
             payload["target_integration_branch"].clone();
-        self.deferred_replies.lock().unwrap().insert(turn_id, reply);
-        self.complete_deferred_turns();
+        (turn_id, reply)
     }
 
     fn detail(&self, thread_id: &str) -> ThreadDetail {
@@ -2396,7 +2517,10 @@ impl FakeAppServer {
                         .flatten()
                         .any(|item| {
                             item.get("type").and_then(Value::as_str) == Some("mcpToolCall")
-                                && item.get("status").and_then(Value::as_str) == Some("inProgress")
+                                && matches!(
+                                    item.get("status").and_then(Value::as_str),
+                                    Some("inProgress" | "failed")
+                                )
                         })
             });
             summary.status = json!({

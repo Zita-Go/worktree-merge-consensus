@@ -84,6 +84,12 @@ Version 0.1.25 does not broaden interruption behavior: it reads canonical
 completed history and retries only the exact failed request-bound
 `consensus_apply_patch` plus `PATCH_NOT_AUTHORIZED` shape described by the
 protocol, after repository and SQLite no-write checks.
+Version 0.1.26 adds one equally narrow interruption case for an App Server
+residue that has the same exact failed tool item and final blocker but remains
+`inProgress + waitingOnApproval`. The daemon revalidates the complete 0.1.25
+identity and repository proof before interrupting only that turn. Participant
+turns use a 30-minute canonical-inactivity timeout; changed canonical status or
+turn history renews the deadline, while unchanged active state remains bounded.
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
 fixed task ID. `thread/read` can return persisted history for a `notLoaded`
 task, but it does not load that task for model execution; starting a turn after

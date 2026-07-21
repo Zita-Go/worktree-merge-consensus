@@ -1,6 +1,6 @@
 {
   "name": "worktree-merge-consensus",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "description": "Coordinate reviewed integration across two existing Codex task worktrees.",
   "author": {
     "name": "Worktree Merge Consensus contributors"

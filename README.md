@@ -79,6 +79,15 @@ still clean at the reported merge SHA with both frozen ancestors, and both
 source refs remain unchanged. It reuses the existing merge and never creates a
 replacement Run.
 
+Version 0.1.26 covers the equivalent App Server residue in which that exact
+failed patch call and final blocker are present but the Primary turn remains
+`inProgress` with `waitingOnApproval`. Same-Run resume applies the same
+identity, no-write, clean-target, ancestry, and frozen-ref checks before
+interrupting and replacing only that stale turn. Participant waits now use a
+30-minute bounded idle window instead of a five-minute total window; changes
+to canonical task status or turn history renew the window, while a task with
+no canonical progress still pauses with `COMMUNICATION_FAILURE`.
+
 Read [the v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
 for the exact boundaries.
@@ -106,8 +115,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.25-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.25-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.26-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.26-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -325,6 +334,14 @@ requires no successful patch record, the clean existing target at the reported
 merge SHA, both frozen commits as ancestors, and unchanged source refs. Unknown
 or additional tool calls, a successful or ambiguous write, mismatched evidence,
 or repository drift remain terminal; branch creation and merge are not repeated.
+Version 0.1.26 additionally handles only the same exact failed call and blocker
+when App Server has persisted the final assistant JSON but leaves the turn
+`inProgress` and `waitingOnApproval`. Explicit resume revalidates all 0.1.25
+conditions, interrupts that one stale turn, and archives it atomically before
+retrying the same request. It also changes participant waiting from a fixed
+five-minute total timeout to a 30-minute inactivity timeout renewed by changes
+in canonical task status or turn history. Unchanged active state remains
+bounded and fails closed.
 Version 0.1.13 also
 places concrete, authoritative, direct-field
 payload templates for both approval message types next to the requested output;

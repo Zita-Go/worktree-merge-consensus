@@ -77,7 +77,12 @@ the evidence below.
    approval before the paused Run is reactivated. Confirm the canonical patch
    item completes as `failed` with `PATCH_NOT_AUTHORIZED`, no patch record or
    Git write exists, and explicit resume archives only that exact turn before
-   retrying the same Run on the existing merge.
+   retrying the same Run on the existing merge. Repeat with App Server leaving
+   the failed item and exact final blocker in an `inProgress` turn with
+   `waitingOnApproval`; confirm resume interrupts and archives only that stale
+   turn. Keep one disposable participant turn active for longer than five
+   minutes while canonical turn items continue to change, and confirm the Run
+   does not pause; unchanged state must still hit the bounded idle timeout.
 8. Verify `accepted_result` records the authoritative tests,
    `source_refs_unchanged: true`, and local-only/no-push/no-PR fields. Verify the
    test cwd is a cleanly materialized clone of the exact integration SHA with a

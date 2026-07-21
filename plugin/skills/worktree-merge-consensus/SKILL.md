@@ -153,6 +153,13 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   ancestors, and unchanged source refs. It reuses the existing merge; unknown
   or additional tools, ambiguous writes, mismatched evidence, or drift remain
   terminal.
+  Version 0.1.26 also handles only that exact failed call and blocker when App
+  Server has persisted the final assistant JSON but leaves the turn
+  `inProgress` with `waitingOnApproval`. Same-Run resume revalidates every
+  0.1.25 condition, interrupts only that stale turn, and atomically archives it
+  before retry. Participant waits use a 30-minute canonical-inactivity window;
+  canonical status or turn-history changes renew it, while unchanged active
+  state remains bounded.
   Network, added-permission, later-phase, mismatched, or side-effectful cases
   remain terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.

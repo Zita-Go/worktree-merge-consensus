@@ -36,6 +36,7 @@ use crate::policy::{
 use crate::store::{AcceptedTurn, SqliteRunStore, StoreError};
 
 const MAX_DRIVER_STEPS: usize = 128;
+const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(1_800);
 const TURN_INTERRUPT_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct CompletedTurn {
@@ -86,7 +87,7 @@ pub struct CoordinatorOptions {
 impl Default for CoordinatorOptions {
     fn default() -> Self {
         Self {
-            wait_timeout: Duration::from_secs(300),
+            wait_timeout: DEFAULT_WAIT_TIMEOUT,
             poll_interval: Duration::from_millis(500),
             communication_attempts: 3,
         }
@@ -966,18 +967,34 @@ where
                 "an in-progress approval turn already has a successful controlled patch record",
             ));
         }
-        if let Some(blocker) = pending_controlled_patch_approval_blocker(
-            state,
-            detail,
-            turn,
-            message_hash,
-            &["inProgress"],
-        ) {
-            return Err(CoordinatorError::operational(
-                "TERMINAL_TURN_RETRY_UNSAFE",
-                blocker,
-            ));
-        }
+        let retry_failed_patch_rejection = if let Some(blocker) =
+            pending_controlled_patch_approval_blocker(
+                state,
+                detail,
+                turn,
+                message_hash,
+                &["inProgress"],
+            ) {
+            if pending_controlled_patch_approval_blocker(
+                state,
+                detail,
+                turn,
+                message_hash,
+                &["failed"],
+            )
+            .is_some()
+            {
+                return Err(CoordinatorError::operational(
+                    "TERMINAL_TURN_RETRY_UNSAFE",
+                    blocker,
+                ));
+            }
+            self.verify_patch_not_authorized_retry_turn(state, detail, turn, message_hash)
+                .await?;
+            true
+        } else {
+            false
+        };
 
         let interrupt_error = self.app.interrupt_turn(thread_id, turn_id).await.err();
         let deadline = tokio::time::Instant::now()
@@ -1001,9 +1018,36 @@ where
                     )
                 })?;
             match status {
-                "completed" => return Ok(true),
+                "completed" => {
+                    if retry_failed_patch_rejection {
+                        self.verify_patch_not_authorized_retry_turn(
+                            state,
+                            &current,
+                            current_turn,
+                            message_hash,
+                        )
+                        .await?;
+                        self.store
+                            .reset_completed_integration_tool_failure_turn_for_retry(
+                                &state.facts.run_id.to_string(),
+                                message_hash,
+                                thread_id,
+                                turn_id,
+                                status,
+                            )?;
+                    }
+                    return Ok(true);
+                }
                 "failed" | "interrupted" => {
-                    if let Some(blocker) = pending_controlled_patch_approval_blocker(
+                    if retry_failed_patch_rejection {
+                        self.verify_patch_not_authorized_retry_turn(
+                            state,
+                            &current,
+                            current_turn,
+                            message_hash,
+                        )
+                        .await?;
+                    } else if let Some(blocker) = pending_controlled_patch_approval_blocker(
                         state,
                         &current,
                         current_turn,
@@ -1127,9 +1171,28 @@ where
         if message.envelope.reason_code.as_deref() != Some("PATCH_NOT_AUTHORIZED") {
             return Ok(None);
         }
+        self.verify_patch_not_authorized_retry_turn(state, &detail, turn, &pending.message_hash)
+            .await?;
+
+        Ok(Some(RetryableCompletedTurn {
+            message_hash: pending.message_hash,
+            thread_id: thread_id.to_owned(),
+            turn_id: turn_id.to_owned(),
+            observed_status: status.to_owned(),
+        }))
+    }
+
+    async fn verify_patch_not_authorized_retry_turn(
+        &self,
+        state: &RunState,
+        detail: &ThreadDetail,
+        turn: &Value,
+        message_hash: &str,
+    ) -> Result<(), CoordinatorError> {
+        let run_id = state.facts.run_id.to_string();
         if self
             .store
-            .successful_patch_recorded(&run_id, &pending.message_hash)?
+            .successful_patch_recorded(&run_id, message_hash)?
         {
             return Err(CoordinatorError::operational(
                 "TERMINAL_TURN_RETRY_UNSAFE",
@@ -1138,18 +1201,21 @@ where
         }
         if let Some(blocker) = pending_controlled_patch_approval_blocker(
             state,
-            &detail,
+            detail,
             turn,
-            &pending.message_hash,
+            message_hash,
             &["failed"],
         ) {
             return Err(CoordinatorError::operational(
                 "TERMINAL_TURN_RETRY_UNSAFE",
-                format!("completed controlled-patch blocker cannot be retried: {blocker}"),
+                format!("controlled-patch blocker cannot be retried: {blocker}"),
             ));
         }
-        let reported_sha =
-            validate_patch_not_authorized_blocker(state, &pending.message_hash, &message)?;
+        let raw_response = final_agent_json(turn)?;
+        let message = validate_message(raw_response).map_err(|error| {
+            CoordinatorError::operational("INVALID_RESPONSE", error.to_string())
+        })?;
+        let reported_sha = validate_patch_not_authorized_blocker(state, message_hash, &message)?;
         let target = state.target_integration_branch.as_deref().ok_or_else(|| {
             CoordinatorError::operational("INVALID_STATE", "target integration branch is missing")
         })?;
@@ -1162,13 +1228,7 @@ where
                 "reported clean integration HEAD does not match the authoritative target branch",
             ));
         }
-
-        Ok(Some(RetryableCompletedTurn {
-            message_hash: pending.message_hash,
-            thread_id: thread_id.to_owned(),
-            turn_id: turn_id.to_owned(),
-            observed_status: status.to_owned(),
-        }))
+        Ok(())
     }
 
     async fn inspect_completed_file_change_tool_unavailable_retry(
@@ -1866,7 +1926,8 @@ where
         role: Role,
         thread_id: &str,
     ) -> Result<ThreadDetail, CoordinatorError> {
-        let deadline = tokio::time::Instant::now() + self.options.wait_timeout;
+        let mut idle_deadline = tokio::time::Instant::now() + self.options.wait_timeout;
+        let mut last_progress = None;
         loop {
             let persisted = self.required_run(&state.facts.run_id.to_string())?;
             if persisted.status == RunStatus::Cancelled {
@@ -1878,6 +1939,11 @@ where
             }
             let detail = self.read_thread_with_retry(thread_id).await?;
             self.verify_thread_identity(state, role, &detail)?;
+            let progress = thread_progress_fingerprint(&detail);
+            if last_progress.as_deref() != Some(progress.as_str()) {
+                last_progress = Some(progress);
+                idle_deadline = tokio::time::Instant::now() + self.options.wait_timeout;
+            }
             if !detail.summary.is_active() {
                 if state.status == RunStatus::WaitingThread {
                     state.thread_became_idle()?;
@@ -1889,10 +1955,10 @@ where
                 state.wait_for_thread()?;
                 self.store.save_state(state)?;
             }
-            if tokio::time::Instant::now() >= deadline {
+            if tokio::time::Instant::now() >= idle_deadline {
                 return Err(CoordinatorError::operational(
                     "COMMUNICATION_FAILURE",
-                    "task remained active beyond the bounded wait",
+                    "task remained active without canonical progress beyond the bounded idle wait",
                 ));
             }
             tokio::time::sleep(self.options.poll_interval).await;
@@ -1905,7 +1971,8 @@ where
         thread_id: &str,
         turn_id: &str,
     ) -> Result<CompletedTurn, CoordinatorError> {
-        let deadline = tokio::time::Instant::now() + self.options.wait_timeout;
+        let mut idle_deadline = tokio::time::Instant::now() + self.options.wait_timeout;
+        let mut last_progress = None;
         loop {
             let persisted = self.required_run(&state.facts.run_id.to_string())?;
             if persisted.status == RunStatus::Cancelled {
@@ -1917,6 +1984,11 @@ where
             }
             let detail = self.read_thread_with_retry(thread_id).await?;
             if let Some(turn) = find_turn(&detail, turn_id) {
+                let progress = canonical_json_hash(turn);
+                if last_progress.as_deref() != Some(progress.as_str()) {
+                    last_progress = Some(progress);
+                    idle_deadline = tokio::time::Instant::now() + self.options.wait_timeout;
+                }
                 match turn.get("status").and_then(Value::as_str) {
                     Some("completed") => {
                         return Ok(CompletedTurn {
@@ -1933,10 +2005,10 @@ where
                     _ => {}
                 }
             }
-            if tokio::time::Instant::now() >= deadline {
+            if tokio::time::Instant::now() >= idle_deadline {
                 return Err(CoordinatorError::operational(
                     "COMMUNICATION_FAILURE",
-                    "task turn did not complete within the bounded wait",
+                    "task turn made no canonical progress within the bounded idle wait",
                 ));
             }
             match tokio::time::timeout(self.options.poll_interval, self.app.next_event()).await {
@@ -3231,6 +3303,13 @@ fn find_turn<'a>(detail: &'a ThreadDetail, turn_id: &str) -> Option<&'a Value> {
         .turns
         .iter()
         .find(|turn| turn.get("id").and_then(Value::as_str) == Some(turn_id))
+}
+
+fn thread_progress_fingerprint(detail: &ThreadDetail) -> String {
+    canonical_json_hash(&json!({
+        "status": &detail.summary.status,
+        "turns": &detail.turns,
+    }))
 }
 
 fn final_agent_json(turn: &Value) -> Result<Value, CoordinatorError> {
