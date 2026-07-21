@@ -750,7 +750,7 @@ async fn interrupted_side_effect_free_forbidden_operation_retries_the_same_run()
 }
 
 #[tokio::test]
-async fn interrupted_forbidden_operation_with_terminal_read_only_git_retries_the_same_run() {
+async fn interrupted_forbidden_operation_with_terminal_read_only_queries_retries_the_same_run() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
     let mut replies = conflict_free_replies();
@@ -806,6 +806,19 @@ async fn interrupted_forbidden_operation_with_terminal_read_only_git_retries_the
             "id": "declined-branch-preflight-turn-5",
             "type": "commandExecution",
             "command": "/bin/bash -lc 'git branch --list consensus/test-run'",
+            "cwd": "/repo/primary",
+            "status": "declined",
+            "exitCode": null,
+            "source": "agent"
+        }),
+    );
+    app.append_turn_item(
+        "primary",
+        "turn-5",
+        json!({
+            "id": "declined-stale-launcher-skill-read-turn-5",
+            "type": "commandExecution",
+            "command": "sed -n '1,240p' /opt/codex-home/plugins/cache/worktree-merge-consensus/worktree-merge-consensus/0.1.11/skills/worktree-merge-consensus/SKILL.md",
             "cwd": "/repo/primary",
             "status": "declined",
             "exitCode": null,

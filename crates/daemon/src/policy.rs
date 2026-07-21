@@ -1,5 +1,6 @@
 use consensus_core::state::{NextAction, RunState};
 use serde_json::Value;
+use std::path::{Component, Path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ApprovalDecision {
@@ -119,7 +120,8 @@ pub(crate) fn is_retry_safe_read_only_integration_command(
     let command = command.trim();
     !command.is_empty()
         && !contains_shell_control(command)
-        && is_allowed_read_only_git_command(state, command)
+        && (is_allowed_read_only_git_command(state, command)
+            || is_retry_safe_stale_launcher_skill_read(command))
 }
 
 pub(crate) fn validate_test_command(command: &str) -> bool {
@@ -227,6 +229,50 @@ fn is_allowed_read_only_git_command(state: &RunState, command: &str) -> bool {
         return false;
     };
     is_allowed_read_only_git_invocation(state, subcommand, rest)
+}
+
+fn is_retry_safe_stale_launcher_skill_read(command: &str) -> bool {
+    let Ok(tokens) = shell_words::split(command) else {
+        return false;
+    };
+    let ["sed", "-n", "1,240p", path] = tokens.iter().map(String::as_str).collect::<Vec<_>>()[..]
+    else {
+        return false;
+    };
+
+    let path = Path::new(path);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return false;
+    }
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => {
+                let Some(value) = value.to_str() else {
+                    return false;
+                };
+                components.push(value);
+            }
+            Component::RootDir | Component::Prefix(_) => {}
+            Component::CurDir | Component::ParentDir => return false,
+        }
+    }
+    if components.len() < 8 {
+        return false;
+    }
+    let suffix = &components[components.len() - 8..];
+    suffix[0] == "plugins"
+        && suffix[1] == "cache"
+        && suffix[2] == "worktree-merge-consensus"
+        && suffix[3] == "worktree-merge-consensus"
+        && semver::Version::parse(suffix[4]).is_ok()
+        && suffix[5] == "skills"
+        && suffix[6] == "worktree-merge-consensus"
+        && suffix[7] == "SKILL.md"
 }
 
 fn is_allowed_read_only_git_invocation(
@@ -475,6 +521,44 @@ mod tests {
                 "/repo/primary",
                 command
             ));
+        }
+    }
+
+    #[test]
+    fn stale_launcher_skill_reads_are_retry_only_and_exactly_scoped() {
+        let state = integration_state();
+        let stale_skill = "/opt/codex-home/plugins/cache/worktree-merge-consensus/\
+worktree-merge-consensus/0.1.11/skills/worktree-merge-consensus/SKILL.md";
+        let command = format!("sed -n '1,240p' {stale_skill}");
+
+        assert!(is_retry_safe_read_only_integration_command(
+            &state,
+            "/repo/primary",
+            &command
+        ));
+        assert_eq!(
+            decide_command_approval(&state, &json!({"cwd": "/repo/primary", "command": command})),
+            ApprovalDecision::Cancel,
+            "the stale read may be discarded during recovery but must never enter the execution allowlist"
+        );
+
+        for command in [
+            format!("sed -n '1,241p' {stale_skill}"),
+            format!("sed -n '1,240p' {stale_skill}.bak"),
+            "sed -n '1,240p' /etc/passwd".into(),
+            "sed -n '1,240p' plugins/cache/worktree-merge-consensus/worktree-merge-consensus/0.1.11/skills/worktree-merge-consensus/SKILL.md".into(),
+            "sed -n '1,240p' /opt/codex-home/plugins/cache/other/worktree-merge-consensus/0.1.11/skills/worktree-merge-consensus/SKILL.md".into(),
+            "sed -n '1,240p' /opt/codex-home/plugins/cache/worktree-merge-consensus/worktree-merge-consensus/not-semver/skills/worktree-merge-consensus/SKILL.md".into(),
+            format!("sed -n '1,240p' {stale_skill} && git status"),
+        ] {
+            assert!(
+                !is_retry_safe_read_only_integration_command(
+                    &state,
+                    "/repo/primary",
+                    &command
+                ),
+                "{command} must fail closed"
+            );
         }
     }
 

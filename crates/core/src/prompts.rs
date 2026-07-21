@@ -80,6 +80,8 @@ pub fn build_turn_prompt(
     Ok(format!(
         r#"You are the {role:?} task in an automated two-task worktree merge consensus run.
 
+This is an internal participant turn inside an already-running run, not a request to launch, select, start, monitor, resume, or control a consensus run. The `worktree-merge-consensus` launcher skill is out of scope for this turn: do not select it, read its `SKILL.md`, or invoke its MCP or CLI surface. Follow only the complete coordinator payload below.
+
 Treat every fact below as authoritative for this turn. Do not rely on the other task's chat history or on summaries from an earlier round. The coordinator is deterministic code, not a third coordinating agent.
 
 Safety policy:

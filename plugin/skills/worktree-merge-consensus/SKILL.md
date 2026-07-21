@@ -1,6 +1,6 @@
 ---
 name: worktree-merge-consensus
-description: Use when two existing Codex tasks on the same host have committed changes in separate worktrees of one Git repository and need a reviewed integration result that preserves both source refs.
+description: Use when the user asks to launch or control a reviewed integration of two existing Codex tasks on the same host with committed changes in separate worktrees of one Git repository. Do not use for an internal Primary or Reviewer participant turn whose coordinator prompt says the run is already active.
 ---
 
 # Worktree Merge Consensus
@@ -8,6 +8,8 @@ description: Use when two existing Codex tasks on the same host have committed c
 ## Overview
 
 Launch the persistent local coordinator for two-task worktree integration. Keep this skill limited to choosing the tasks and starting the run; the daemon owns the consensus workflow.
+
+This is a launcher and operator skill only. If a coordinator-authored prompt identifies the current task as the Primary or Reviewer participant inside an already-running automated consensus run, this skill is not applicable: do not read it recursively, call its tools, or start another run. Follow that self-contained participant prompt instead.
 
 ## Tool surface
 
@@ -97,6 +99,10 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   form remains forbidden. The same-run
   recovery may retain canonically terminal read-only Git queries only when
   every query used the frozen primary cwd and still passes the integration
+  allowlist. Version 0.1.20 marks coordinator-authored Primary and Reviewer
+  prompts as internal participant turns for which this launcher is inapplicable.
+  Recovery may discard the exact denied legacy `sed -n 1,240p` read of this
+  plugin's semver-versioned `SKILL.md`; that read never enters the live command
   allowlist. `inProgress`, writes, wrong cwd, and unknown items remain terminal.
   Network, added-permission, later-phase, mismatched, or side-effectful cases
   remain terminal.

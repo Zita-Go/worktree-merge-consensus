@@ -1987,7 +1987,7 @@ fn interrupted_forbidden_operation_retry_blocker(state: &RunState, turn: &Value)
                     || !is_retry_safe_read_only_integration_command(state, cwd, command)
                 {
                     return Some(
-                        "command execution is not a frozen-worktree read-only Git query".into(),
+                        "command execution is not an approved retry-safe read-only integration query".into(),
                     );
                 }
             }

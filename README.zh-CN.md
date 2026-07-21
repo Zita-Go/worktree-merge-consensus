@@ -58,8 +58,8 @@ Git 从主修源 SHA 到结果 SHA 的真实差异（包括大型文本文件）
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.19-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.19-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.20-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.20-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 v0.1.0 的 GNU 产物要求 GLIBC 2.39，现已停止推荐；受支持的 Linux 主机请使用
@@ -195,8 +195,10 @@ turn 显式选择同机 `local` 执行环境；空环境数组会禁用命令与
 子命令审批回调、非 `local` 执行环境和额外权限仍会失败关闭。0.1.17 只向集成白名单增加精确的
 `git show-ref --verify refs/heads/<目标集成分支>` 预检。0.1.19 另外只允许等价且精确的
 `git branch --list <目标集成分支>` 存在性查询，其他任何 `git branch` 形式仍会拒绝。同一 Run 的
-禁止操作恢复可以保留处于终态的只读 Git 查询，但每个规范 item 都必须使用冻结的主修 cwd 且仍通过该白名单；`inProgress`、
-写命令、错误 cwd、未知 item 或其他副作用仍是终态。0.1.13 还会在两类批准请求旁给出带权威值的扁平 payload
+禁止操作恢复可以保留处于终态的只读 Git 查询，但每个规范 item 都必须使用冻结的主修 cwd 且仍通过该白名单。
+0.1.20 会把协调器发出的主修与复核 turn 明确标记为内部参与轮次，避免递归调用启动器 Skill；恢复时只能丢弃
+已被拒绝的、精确读取本插件版本化 `SKILL.md` 的 `sed -n 1,240p` 旧查询，该查询仍不属于实时执行白名单。
+`inProgress`、写命令、错误 cwd、未知 item 或其他副作用仍是终态。0.1.13 还会在两类批准请求旁给出带权威值的扁平 payload
 模板，并由 JSON Schema 拒绝仅嵌套在其他对象中的批准身份。待完成的验证 turn 可能在克隆中留下测试产物；恢复时
 可允许该克隆变脏，但仍强制要求持久化路径、精确 detached SHA、独立 Git common directory
 且无 remote。

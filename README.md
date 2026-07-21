@@ -78,8 +78,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.19-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.19-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.20-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.20-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -245,8 +245,12 @@ preflight to that integration allowlist. Version 0.1.19 additionally accepts
 only `git branch --list <target-integration-branch>` as the equivalent exact
 target-existence query; every other `git branch` form remains denied. Same-run
 forbidden-operation recovery may retain terminal read-only Git queries only when each canonical
-item used the frozen primary cwd and still passes that allowlist; `inProgress`,
-a write, wrong cwd, unknown item, or other side effect remains terminal.
+item used the frozen primary cwd and still passes that allowlist. Version 0.1.20
+marks coordinator-authored Primary and Reviewer turns as internal participants,
+so they do not recursively invoke the launcher skill. Recovery may discard only
+the exact legacy `sed -n 1,240p` read of this plugin's versioned `SKILL.md` after
+the command was denied; that read remains outside the live execution allowlist.
+`inProgress`, a write, wrong cwd, unknown item, or other side effect remains terminal.
 Version 0.1.13 also
 places concrete, authoritative, direct-field
 payload templates for both approval message types next to the requested output;

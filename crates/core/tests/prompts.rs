@@ -38,6 +38,8 @@ fn every_prompt_is_self_contained_and_declares_strict_output() {
         "Worktree Merge Consensus Protocol v1",
         "Text outside that one JSON object is invalid",
         "including BLOCKED, must copy phase",
+        "This is an internal participant turn inside an already-running run",
+        "do not select it, read its `SKILL.md`",
         "Do not call `worktreeMergeConsensus`",
         "payload.approved_plan_revision must equal",
         "Every required `approved_*` field must be a direct child of payload",
