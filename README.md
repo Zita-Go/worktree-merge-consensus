@@ -44,8 +44,10 @@ roots, and can run only a narrow Git command set. The separate verification
 turn can write only inside the isolated clone and can run only the exact frozen
 test commands. Each command must appear exactly once as a successful App Server
 `commandExecution` item with the expected cwd; a model's self-reported success
-is not evidence. Deterministic approval rules cancel publication, destructive
-Git, shell chaining, wrong-directory commands, and permission escalation.
+is not evidence. Frozen tests must be direct non-Git commands; Git executables,
+shell control, and dynamic shell or interpreter launchers are rejected.
+Deterministic approval rules cancel publication, destructive Git, shell
+chaining, wrong-directory commands, and permission escalation.
 Conflict scanning uses Git's actual primary-to-result diff, including large
 text files, rather than the task's file list.
 
@@ -76,8 +78,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.9-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.9-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.10-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.10-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -207,11 +209,17 @@ connection as well as a fresh direct connection. A non-idempotent `turn/start`
 is never blindly retried after uncertain delivery. On an explicit resume from
 `COMMUNICATION_FAILURE`, an exact `failed` or `interrupted` turn is replaced
 only when canonical history shows no command, file-change, or unknown
-side-effect item; the old attempt remains audited in SQLite. Do not use
-`resume` for `BLOCKED` or `CANCELLED` runs. A pending verification turn may leave test
-artifacts in its clone; recovery permits that clone to be dirty only while
-still requiring the persisted path, exact detached SHA, independent Git common
-directory, and no remote.
+side-effect item; the old attempt remains audited in SQLite. If a contract or
+plan declares a forbidden Git test, the run pauses with `INVALID_TEST_COMMAND`.
+An explicit resume revalidates both frozen sources, archives the completed
+pre-integration read-only turn, and requests one corrected response only when
+canonical history contains no file change, incomplete command, or unknown item.
+Version 0.1.10 can also recover the equivalent legacy `BLOCKED` state produced
+by 0.1.9 while atomically reacquiring the repository lock. Do not use `resume`
+for any other `BLOCKED` run or for a `CANCELLED` run. A pending verification turn
+may leave test artifacts in its clone; recovery permits that clone to be dirty
+only while still requiring the persisted path, exact detached SHA, independent
+Git common directory, and no remote.
 
 ## State, logs, and privacy
 

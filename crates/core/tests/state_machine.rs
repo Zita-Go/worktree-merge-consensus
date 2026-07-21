@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use consensus_core::{
     canonical_json_hash,
     protocol::{ProtocolMessage, validate_message},
-    state::{NextAction, Phase, Role, RunFacts, RunState, RunStatus},
+    state::{NextAction, Phase, Role, RunDiagnostic, RunFacts, RunState, RunStatus},
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -202,6 +202,29 @@ fn pause_and_resume_preserve_the_pending_action() {
     let resumed = state.resume().unwrap();
     assert_eq!(resumed, expected);
     assert_eq!(state.status, RunStatus::Running);
+}
+
+#[test]
+fn legacy_invalid_test_block_restores_only_its_read_only_declaration_action() {
+    let mut state = RunState::new(facts());
+    state.record_error(RunDiagnostic {
+        code: "INVALID_TEST_COMMAND".into(),
+        detail: "git test command is forbidden".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryContract,
+        role: Some(Role::Primary),
+        thread_id: Some("primary-thread".into()),
+    });
+    state.block("INVALID_TEST_COMMAND");
+
+    let action = state.retry_blocked_invalid_test_command().unwrap();
+
+    assert_eq!(action, NextAction::RequestPrimaryContract);
+    assert_eq!(state.status, RunStatus::Running);
+    assert_eq!(state.phase, Phase::Contract);
+    assert_eq!(state.next_action, NextAction::RequestPrimaryContract);
+    assert!(state.reason_code.is_none());
+    assert!(state.last_error.is_none());
 }
 
 #[test]

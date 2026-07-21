@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use consensus_core::state::{RunFacts, RunState, RunStatus};
+use consensus_core::state::{NextAction, Role, RunDiagnostic, RunFacts, RunState, RunStatus};
 use consensus_daemon::store::SqliteRunStore;
 use rusqlite::{Connection, params};
 use serde_json::Value;
@@ -131,6 +131,55 @@ fn terminal_turn_retry_rejects_wrong_identity_or_status_without_mutation() {
     assert_eq!(pending.thread_id.as_deref(), Some("reviewer-thread"));
     assert_eq!(pending.turn_id.as_deref(), Some("turn-7"));
     assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+}
+
+#[test]
+fn completed_read_only_retry_reactivates_a_legacy_blocked_run_atomically() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let run = fixture_run(RUN_ID, "/repo/.git");
+    store.insert_run(&run).unwrap();
+    store
+        .record_pending_send(RUN_ID, "PRIMARY", "CONTRACT", 1, "request-hash")
+        .unwrap();
+    store
+        .record_turn_started(RUN_ID, "request-hash", "primary-thread", "turn-7")
+        .unwrap();
+    let mut blocked = run;
+    blocked.record_error(RunDiagnostic {
+        code: "INVALID_TEST_COMMAND".into(),
+        detail: "git command is not an allowed test".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryContract,
+        role: Some(Role::Primary),
+        thread_id: Some("primary-thread".into()),
+    });
+    blocked.block("INVALID_TEST_COMMAND");
+    store.save_state(&blocked).unwrap();
+    let mut resumed = blocked.clone();
+    resumed.retry_blocked_invalid_test_command().unwrap();
+
+    store
+        .reactivate_blocked_run_with_completed_turn_retry(
+            &blocked,
+            &resumed,
+            "request-hash",
+            "primary-thread",
+            "turn-7",
+            "completed",
+        )
+        .unwrap();
+
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), resumed);
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    assert!(pending.thread_id.is_none());
+    assert!(pending.turn_id.is_none());
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    let competing = fixture_run("9f8a5c17-0f06-4df9-873f-589f3b54dbcc", "/repo/.git");
+    assert_eq!(
+        store.insert_run(&competing).unwrap_err().code(),
+        "ACTIVE_RUN_EXISTS"
+    );
 }
 
 #[test]

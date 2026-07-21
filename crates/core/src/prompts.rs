@@ -90,6 +90,7 @@ Safety policy:
 - Do not request user input, network access, broader filesystem access, or sandbox escalation. Return BLOCKED with evidence if the complete payload is insufficient.
 - No integration branch may be created before exact APPROVED_PLAN authorization.
 - Approval is valid only for the exact run, source SHAs, plan revision, round, branch, and integration SHA in the envelope.
+- Contract and plan test commands must be direct non-Git commands. Never declare `git diff --check` or any other Git executable as a test. Shell control operators and dynamic shell or interpreter launchers are also forbidden.
 - Every response envelope, including BLOCKED, must copy phase, round, plan_revision, integration_branch, and integration_sha exactly from the authoritative turn metadata. The coordinator performs any transition to BLOCKED only after accepting the response.
 
 Authoritative turn metadata:
@@ -230,13 +231,13 @@ fn expected_message_type(action: NextAction) -> &'static str {
 fn action_instruction(action: NextAction) -> &'static str {
     match action {
         NextAction::RequestPrimaryContract => {
-            "Inspect your existing task context and frozen commit. Return payload.role as \"PRIMARY\" and payload.contract as a complete implementation contract covering goals, user-visible behavior, rationale, invariants, interfaces, edge cases, rejected alternatives, relevant files, and tests. payload.contract.tests must be a nonempty array of exact commands. Do not modify Git or files in this turn."
+            "Inspect your existing task context and frozen commit. Return payload.role as \"PRIMARY\" and payload.contract as a complete implementation contract covering goals, user-visible behavior, rationale, invariants, interfaces, edge cases, rejected alternatives, relevant files, and tests. payload.contract.tests must be a nonempty array of exact direct non-Git commands without shell control or dynamic launchers. Do not modify Git or files in this turn."
         }
         NextAction::RequestReviewerContract => {
-            "Inspect your existing task context and frozen commit. Return payload.role as \"REVIEWER\" and payload.contract as a complete implementation contract covering every behavior the integration must preserve, including rationale, invariants, interfaces, edge cases, relevant files, and tests. payload.contract.tests must be a nonempty array of exact commands. Do not modify Git or files."
+            "Inspect your existing task context and frozen commit. Return payload.role as \"REVIEWER\" and payload.contract as a complete implementation contract covering every behavior the integration must preserve, including rationale, invariants, interfaces, edge cases, relevant files, and tests. payload.contract.tests must be a nonempty array of exact direct non-Git commands without shell control or dynamic launchers. Do not modify Git or files."
         }
         NextAction::RequestPrimaryPlan => {
-            "Produce a complete integration plan for both contracts. Include both contracts verbatim in payload, a versioned plan, conflict decisions with rationale, one coverage_matrix row for every contract item, and a nonempty test_commands array containing every exact command required by either contract plus plan-level verification. Do not create or modify an integration branch."
+            "Produce a complete integration plan for both contracts. Include both contracts verbatim in payload, a versioned plan, conflict decisions with rationale, one coverage_matrix row for every contract item, and a nonempty test_commands array containing every exact allowed command required by either contract plus plan-level verification. Every test command must be direct and non-Git, without shell control or dynamic launchers. Do not create or modify an integration branch."
         }
         NextAction::RequestReviewerPlanVerdict => {
             "Audit the complete proposed plan against every item in both contracts. Return APPROVED_PLAN only when uncovered_items is empty and every approval identity exactly matches the envelope, including approved_plan_hash copied from the payload; otherwise return CHANGES_REQUIRED with stable issue_ids and concrete evidence. Do not modify Git or files."

@@ -819,6 +819,111 @@ async fn explicit_resume_rejects_an_interrupted_turn_with_execution_evidence() {
 }
 
 #[tokio::test]
+async fn invalid_declared_git_test_can_resume_the_same_legacy_blocked_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let mut replies = conflict_free_replies();
+    let mut invalid_reviewer_contract = replies[1].clone();
+    invalid_reviewer_contract["payload"]["contract"]["tests"] = json!(["git diff --check"]);
+    replies.insert(1, invalid_reviewer_contract);
+    let app = Arc::new(FakeAppServer::new(replies));
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let paused = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+    assert_eq!(paused.reason_code.as_deref(), Some("INVALID_TEST_COMMAND"));
+    assert_eq!(paused.next_action, NextAction::RequestReviewerContract);
+    assert_eq!(app.request_count(), 2);
+    app.append_turn_item(
+        "reviewer",
+        "turn-2",
+        json!({
+            "id": "read-only-turn-2",
+            "type": "commandExecution",
+            "command": "cargo metadata --no-deps",
+            "cwd": "/repo/reviewer",
+            "status": "completed",
+            "exitCode": 0
+        }),
+    );
+    let mut legacy_blocked = paused;
+    legacy_blocked.block("INVALID_TEST_COMMAND");
+    store.save_state(&legacy_blocked).unwrap();
+
+    let result = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Accepted);
+    assert_eq!(app.request_count(), 8);
+    assert_eq!(
+        app.request_order()
+            .iter()
+            .filter(|request| request.as_str() == "reviewer:REQUEST_REVIEWER_CONTRACT")
+            .count(),
+        2
+    );
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    let reviewer_prompts = app
+        .prompts()
+        .into_iter()
+        .filter(|prompt| prompt_action(prompt) == "REQUEST_REVIEWER_CONTRACT")
+        .collect::<Vec<_>>();
+    assert_eq!(reviewer_prompts.len(), 2);
+    assert!(reviewer_prompts[1].contains("direct non-Git commands"));
+}
+
+#[tokio::test]
+async fn invalid_test_response_retry_rejects_file_change_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let mut replies = conflict_free_replies();
+    let mut invalid_reviewer_contract = replies[1].clone();
+    invalid_reviewer_contract["payload"]["contract"]["tests"] = json!(["git diff --check"]);
+    replies.insert(1, invalid_reviewer_contract);
+    let app = Arc::new(FakeAppServer::new(replies));
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let paused = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+    app.append_turn_item(
+        "reviewer",
+        "turn-2",
+        json!({
+            "id": "file-turn-2",
+            "type": "fileChange",
+            "status": "completed"
+        }),
+    );
+
+    let error = coordinator.resume(RUN_ID).await.unwrap_err();
+
+    assert_eq!(error.code(), "MODEL_RESPONSE_RETRY_UNSAFE");
+    assert_eq!(app.request_count(), 2);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+    assert_eq!(
+        store.load_run(RUN_ID).unwrap().unwrap().status,
+        RunStatus::PausedUserAction
+    );
+}
+
+#[tokio::test]
 async fn user_input_during_integration_resumes_the_authorized_in_progress_turn() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -1394,6 +1499,17 @@ impl FakeAppServer {
                     "content": [{"type": "text", "text": prompt, "text_elements": []}]
                 }]
             }));
+    }
+
+    fn append_turn_item(&self, thread_id: &str, turn_id: &str, item: Value) {
+        let mut threads = self.threads.lock().unwrap();
+        let turn = threads
+            .get_mut(thread_id)
+            .unwrap()
+            .iter_mut()
+            .find(|turn| turn.get("id").and_then(Value::as_str) == Some(turn_id))
+            .unwrap();
+        turn["items"].as_array_mut().unwrap().push(item);
     }
 
     fn complete_deferred_turns(&self) {

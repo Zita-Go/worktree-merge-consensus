@@ -35,6 +35,13 @@ struct CompletedTurn {
     turn: Value,
 }
 
+struct RetryableCompletedTurn {
+    message_hash: String,
+    thread_id: String,
+    turn_id: String,
+    observed_status: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct StartRequest {
     pub integration_branch: Option<String>,
@@ -465,6 +472,11 @@ where
                     self.store.save_state(&state)?;
                     return Ok(state);
                 }
+                if error.code() == "INVALID_TEST_COMMAND" && is_test_declaration_action(action) {
+                    state.pause("INVALID_TEST_COMMAND")?;
+                    self.store.save_state(&state)?;
+                    return Ok(state);
+                }
                 if error.code() == "INCOMPATIBLE_CODEX" {
                     state.mark_incompatible("INCOMPATIBLE_CODEX");
                     self.store.save_state(&state)?;
@@ -491,7 +503,9 @@ where
     pub async fn prepare_resume(&self, run_id: &str) -> Result<RunState, CoordinatorError> {
         let mut state = self.required_run(run_id)?;
         let retry_terminal_turn = state.reason_code.as_deref() == Some("COMMUNICATION_FAILURE");
-        if state.next_action == NextAction::RequestPrimaryIntegration {
+        let retry_invalid_test_action = invalid_test_retry_action(&state)?;
+        let effective_action = retry_invalid_test_action.unwrap_or(state.next_action);
+        if effective_action == NextAction::RequestPrimaryIntegration {
             let target = state.target_integration_branch.as_deref().ok_or_else(|| {
                 CoordinatorError::operational(
                     "INVALID_STATE",
@@ -505,6 +519,38 @@ where
         }
         if retry_terminal_turn {
             self.prepare_terminal_turn_retry(&state).await?;
+        }
+        if let Some(action) = retry_invalid_test_action {
+            let retry = self
+                .inspect_completed_read_only_turn_retry(&state, action)
+                .await?;
+            if state.status == RunStatus::Blocked {
+                let blocked_state = state.clone();
+                let restored_action = state.retry_blocked_invalid_test_command()?;
+                if restored_action != action {
+                    return Err(CoordinatorError::operational(
+                        "INCOMPATIBLE_STATE",
+                        "restored invalid-test action does not match its diagnostic",
+                    ));
+                }
+                self.store
+                    .reactivate_blocked_run_with_completed_turn_retry(
+                        &blocked_state,
+                        &state,
+                        &retry.message_hash,
+                        &retry.thread_id,
+                        &retry.turn_id,
+                        &retry.observed_status,
+                    )?;
+                return Ok(state);
+            }
+            self.store.reset_completed_read_only_turn_for_retry(
+                run_id,
+                &retry.message_hash,
+                &retry.thread_id,
+                &retry.turn_id,
+                &retry.observed_status,
+            )?;
         }
         state.resume()?;
         self.store.save_state(&state)?;
@@ -593,6 +639,100 @@ where
             status,
         )?;
         Ok(())
+    }
+
+    async fn inspect_completed_read_only_turn_retry(
+        &self,
+        state: &RunState,
+        action: NextAction,
+    ) -> Result<RetryableCompletedTurn, CoordinatorError> {
+        if !is_test_declaration_action(action)
+            || state.integration_branch.is_some()
+            || state.integration_sha.is_some()
+            || state.current_integration_payload.is_some()
+        {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                "invalid test-command retry is limited to pre-integration read-only turns",
+            ));
+        }
+        let run_id = state.facts.run_id.to_string();
+        let pending = self.store.pending_send(&run_id)?.ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "invalid model response has no persisted pending turn",
+            )
+        })?;
+        let (Some(thread_id), Some(turn_id)) =
+            (pending.thread_id.as_deref(), pending.turn_id.as_deref())
+        else {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "invalid model response has no exact persisted turn identity",
+            ));
+        };
+        let role = action_role(action).ok_or_else(|| {
+            CoordinatorError::operational(
+                "INCOMPATIBLE_STATE",
+                "invalid test-command diagnostic has no task role",
+            )
+        })?;
+        let expected_phase = declaration_phase(action).ok_or_else(|| {
+            CoordinatorError::operational(
+                "INCOMPATIBLE_STATE",
+                "invalid test-command diagnostic is not a declaration action",
+            )
+        })?;
+        let expected_thread_id = role_thread_id(state, role);
+        if pending.role != role_name(role)
+            || pending.phase != phase_name(expected_phase)
+            || pending.round != state.round
+            || thread_id != expected_thread_id
+        {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "invalid model response does not match the deterministic pending declaration",
+            ));
+        }
+
+        let detail = self.read_thread_with_retry(thread_id).await?;
+        self.verify_thread_identity(state, role, &detail)?;
+        let turn = find_turn(&detail, turn_id).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "persisted invalid model-response turn is absent from canonical task history",
+            )
+        })?;
+        let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "persisted invalid model-response turn has no canonical status",
+            )
+        })?;
+        if status != "completed" {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                format!("invalid model-response turn has unexpected status {status}"),
+            ));
+        }
+        if !turn_contains_request_hash(turn, &pending.message_hash) {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "persisted invalid model-response turn lacks its deterministic request marker",
+            ));
+        }
+        if let Some(blocker) = completed_read_only_turn_retry_blocker(turn) {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                format!("completed declaration turn {turn_id} cannot be retried: {blocker}"),
+            ));
+        }
+        Ok(RetryableCompletedTurn {
+            message_hash: pending.message_hash,
+            thread_id: thread_id.to_owned(),
+            turn_id: turn_id.to_owned(),
+            observed_status: status.to_owned(),
+        })
     }
 
     async fn drive_model_action(
@@ -1541,6 +1681,103 @@ fn terminal_turn_retry_blocker(turn: &Value) -> Option<String> {
         }
     }
     None
+}
+
+fn completed_read_only_turn_retry_blocker(turn: &Value) -> Option<String> {
+    let Some(items) = turn.get("items").and_then(Value::as_array) else {
+        return Some("canonical items are unavailable".into());
+    };
+    if items.is_empty() {
+        return Some("canonical items are empty".into());
+    }
+    let mut has_agent_message = false;
+    for item in items {
+        let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+            return Some("canonical item has no type".into());
+        };
+        match item_type {
+            "userMessage" | "reasoning" => {}
+            "agentMessage" => has_agent_message = true,
+            "commandExecution" => {
+                if item.get("status").and_then(Value::as_str) != Some("completed") {
+                    return Some("command execution is not canonically completed".into());
+                }
+                if item.get("command").and_then(Value::as_str).is_none() {
+                    return Some("command execution omits its canonical command".into());
+                }
+            }
+            _ => {
+                return Some(format!(
+                    "canonical item type {item_type} is not allowed in a read-only response retry"
+                ));
+            }
+        }
+    }
+    (!has_agent_message).then(|| "canonical turn has no agent response".into())
+}
+
+fn is_test_declaration_action(action: NextAction) -> bool {
+    matches!(
+        action,
+        NextAction::RequestPrimaryContract
+            | NextAction::RequestReviewerContract
+            | NextAction::RequestPrimaryPlan
+    )
+}
+
+fn declaration_phase(action: NextAction) -> Option<Phase> {
+    match action {
+        NextAction::RequestPrimaryContract | NextAction::RequestReviewerContract => {
+            Some(Phase::Contract)
+        }
+        NextAction::RequestPrimaryPlan => Some(Phase::PlanReview),
+        _ => None,
+    }
+}
+
+fn invalid_test_retry_action(state: &RunState) -> Result<Option<NextAction>, CoordinatorError> {
+    if state.reason_code.as_deref() != Some("INVALID_TEST_COMMAND") {
+        return Ok(None);
+    }
+    if !matches!(
+        state.status,
+        RunStatus::PausedUserAction | RunStatus::Blocked
+    ) {
+        return Err(CoordinatorError::operational(
+            "INCOMPATIBLE_STATE",
+            "invalid test-command reason is attached to a non-retryable run status",
+        ));
+    }
+    let diagnostic = state.last_error.as_ref().ok_or_else(|| {
+        CoordinatorError::operational(
+            "INCOMPATIBLE_STATE",
+            "invalid test-command state has no originating diagnostic",
+        )
+    })?;
+    if diagnostic.code != "INVALID_TEST_COMMAND" || !is_test_declaration_action(diagnostic.action) {
+        return Err(CoordinatorError::operational(
+            "INCOMPATIBLE_STATE",
+            "invalid test-command state has a mismatched originating action",
+        ));
+    }
+    if state.status == RunStatus::PausedUserAction
+        && (state.next_action != diagnostic.action
+            || declaration_phase(diagnostic.action) != Some(state.phase))
+    {
+        return Err(CoordinatorError::operational(
+            "INCOMPATIBLE_STATE",
+            "paused invalid test-command state does not preserve its pending declaration",
+        ));
+    }
+    if state.status == RunStatus::Blocked
+        && (state.next_action != NextAction::Stop || state.phase != Phase::Blocked)
+    {
+        return Err(CoordinatorError::operational(
+            "INCOMPATIBLE_STATE",
+            "legacy blocked invalid test-command state has inconsistent terminal metadata",
+        ));
+    }
+    Ok(Some(diagnostic.action))
 }
 
 fn find_turn<'a>(detail: &'a ThreadDetail, turn_id: &str) -> Option<&'a Value> {

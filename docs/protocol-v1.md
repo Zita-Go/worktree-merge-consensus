@@ -40,6 +40,8 @@ directory before recording the mapping.
 
 Every frozen test command must be a direct command. Git executables, shell
 control operators, and dynamic shell/interpreter command launchers are invalid.
+Contract and plan prompts state this same restriction before a task declares
+tests; a model-generated violation is not silently removed or executed.
 
 The task IDs, worktrees, common directory, source SHAs, and source refs are
 immutable for the life of the run. Source drift, a dirty worktree, a mismatched
@@ -225,6 +227,18 @@ from canonical task history. A `failed` or `interrupted` attempt is archived and
 the same deterministic request may receive one new turn only when every
 canonical item is side-effect-free. Command execution, file changes, missing
 history, and unknown item types fail closed instead of being duplicated.
+
+`INVALID_TEST_COMMAND` from a contract or plan declaration is a correctable
+pre-integration model-output error. New runs pause while preserving their exact
+action. On explicit resume, the coordinator revalidates the frozen sources and
+reads the exact completed turn from canonical history. It may archive and
+replace that turn only when the original action used the read-only execution
+policy and every item is a message, reasoning, or completed command execution;
+file changes, incomplete commands, missing history, and unknown items fail
+closed. The replacement prompt explicitly forbids Git test commands. For the
+legacy terminal state emitted by version 0.1.9, version 0.1.10 restores the same
+run and reacquires its repository lock in the same SQLite transaction that
+archives the old attempt. Other `BLOCKED` states remain terminal.
 
 ## Git postconditions
 

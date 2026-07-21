@@ -297,48 +297,116 @@ impl SqliteRunStore {
 
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
-        let turn_record_id = transaction
-            .query_row(
-                "SELECT id FROM turns
-                 WHERE run_id = ?1 AND message_hash = ?2
-                   AND delivery_state = 'SENT'
-                   AND thread_id = ?3 AND turn_id = ?4",
-                params![run_id, message_hash, thread_id, turn_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .ok_or_else(|| {
-                StoreError::TerminalTurnNotRetryable(format!(
-                    "turn {turn_id} is not the persisted pending attempt for run {run_id}"
-                ))
-            })?;
-        transaction.execute(
-            "INSERT INTO turn_attempts (
-                turn_record_id, run_id, message_hash, thread_id, turn_id,
-                terminal_status, recorded_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                turn_record_id,
-                run_id,
-                message_hash,
-                thread_id,
-                turn_id,
-                terminal_status,
-                now_unix(),
-            ],
+        archive_and_reset_turn(
+            &transaction,
+            run_id,
+            message_hash,
+            thread_id,
+            turn_id,
+            terminal_status,
         )?;
-        let changed = transaction.execute(
-            "UPDATE turns
-             SET delivery_state = 'PENDING', thread_id = NULL, turn_id = NULL
-             WHERE id = ?1 AND delivery_state = 'SENT'
-               AND thread_id = ?2 AND turn_id = ?3",
-            params![turn_record_id, thread_id, turn_id],
-        )?;
-        if changed != 1 {
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn reset_completed_read_only_turn_for_retry(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+        thread_id: &str,
+        turn_id: &str,
+        observed_status: &str,
+    ) -> Result<(), StoreError> {
+        if observed_status != "completed" {
             return Err(StoreError::TerminalTurnNotRetryable(format!(
-                "turn {turn_id} changed while preparing its retry"
+                "turn {turn_id} has non-completed model-response retry status {observed_status}"
             )));
         }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        archive_and_reset_turn(
+            &transaction,
+            run_id,
+            message_hash,
+            thread_id,
+            turn_id,
+            observed_status,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn reactivate_blocked_run_with_completed_turn_retry(
+        &self,
+        blocked_state: &RunState,
+        resumed_state: &RunState,
+        message_hash: &str,
+        thread_id: &str,
+        turn_id: &str,
+        observed_status: &str,
+    ) -> Result<(), StoreError> {
+        if blocked_state.status != RunStatus::Blocked
+            || resumed_state.status != RunStatus::Running
+            || blocked_state.facts != resumed_state.facts
+            || observed_status != "completed"
+        {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "blocked-run reactivation identity or status is invalid".into(),
+            ));
+        }
+
+        let run_id = blocked_state.facts.run_id.to_string();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let current_json = transaction
+            .query_row(
+                "SELECT state_json FROM runs WHERE run_id = ?1",
+                [&run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::RunNotFound(run_id.clone()))?;
+        let current_state = deserialize_state(&current_json)?;
+        if current_state != *blocked_state {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "run {run_id} changed while preparing blocked model-response retry"
+            )));
+        }
+
+        let common_dir = resumed_state.facts.git_common_dir.to_string_lossy();
+        match transaction.execute(
+            "INSERT INTO locks (repository_id, run_id, primary_worktree, acquired_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                common_dir.as_ref(),
+                run_id,
+                resumed_state
+                    .facts
+                    .primary_worktree
+                    .to_string_lossy()
+                    .as_ref(),
+                now_unix(),
+            ],
+        ) {
+            Ok(_) => {}
+            Err(error) if is_constraint(&error) => {
+                return Err(StoreError::ActiveRunExists(format!(
+                    "repository {} already has an active run",
+                    resumed_state.facts.git_common_dir.display()
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        archive_and_reset_turn(
+            &transaction,
+            &run_id,
+            message_hash,
+            thread_id,
+            turn_id,
+            observed_status,
+        )?;
+        update_run_row(&transaction, &run_id, resumed_state)?;
         transaction.commit()?;
         Ok(())
     }
@@ -463,6 +531,59 @@ impl SqliteRunStore {
     fn lock(&self) -> Result<MutexGuard<'_, Connection>, StoreError> {
         self.connection.lock().map_err(|_| StoreError::Poisoned)
     }
+}
+
+fn archive_and_reset_turn(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    message_hash: &str,
+    thread_id: &str,
+    turn_id: &str,
+    observed_status: &str,
+) -> Result<(), StoreError> {
+    let turn_record_id = transaction
+        .query_row(
+            "SELECT id FROM turns
+             WHERE run_id = ?1 AND message_hash = ?2
+               AND delivery_state = 'SENT'
+               AND thread_id = ?3 AND turn_id = ?4",
+            params![run_id, message_hash, thread_id, turn_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            StoreError::TerminalTurnNotRetryable(format!(
+                "turn {turn_id} is not the persisted pending attempt for run {run_id}"
+            ))
+        })?;
+    transaction.execute(
+        "INSERT INTO turn_attempts (
+            turn_record_id, run_id, message_hash, thread_id, turn_id,
+            terminal_status, recorded_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            turn_record_id,
+            run_id,
+            message_hash,
+            thread_id,
+            turn_id,
+            observed_status,
+            now_unix(),
+        ],
+    )?;
+    let changed = transaction.execute(
+        "UPDATE turns
+         SET delivery_state = 'PENDING', thread_id = NULL, turn_id = NULL
+         WHERE id = ?1 AND delivery_state = 'SENT'
+           AND thread_id = ?2 AND turn_id = ?3",
+        params![turn_record_id, thread_id, turn_id],
+    )?;
+    if changed != 1 {
+        return Err(StoreError::TerminalTurnNotRetryable(format!(
+            "turn {turn_id} changed while preparing its retry"
+        )));
+    }
+    Ok(())
 }
 
 fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {

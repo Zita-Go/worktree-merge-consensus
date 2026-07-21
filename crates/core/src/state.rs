@@ -357,6 +357,58 @@ impl RunState {
         Ok(self.next_action)
     }
 
+    pub fn retry_blocked_invalid_test_command(&mut self) -> Result<NextAction, StateError> {
+        if self.status != RunStatus::Blocked
+            || self.reason_code.as_deref() != Some("INVALID_TEST_COMMAND")
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "only a legacy INVALID_TEST_COMMAND blocked run can be retried",
+            ));
+        }
+        let diagnostic = self.last_error.as_ref().ok_or_else(|| {
+            state_error(
+                "INCOMPATIBLE_STATE",
+                "blocked invalid-test state has no originating diagnostic",
+            )
+        })?;
+        if diagnostic.code != "INVALID_TEST_COMMAND" {
+            return Err(state_error(
+                "INCOMPATIBLE_STATE",
+                "blocked invalid-test reason does not match its diagnostic",
+            ));
+        }
+        let phase = match diagnostic.action {
+            NextAction::RequestPrimaryContract | NextAction::RequestReviewerContract => {
+                Phase::Contract
+            }
+            NextAction::RequestPrimaryPlan => Phase::PlanReview,
+            _ => {
+                return Err(state_error(
+                    "NOT_RETRYABLE",
+                    "invalid test-command recovery is limited to pre-integration declaration turns",
+                ));
+            }
+        };
+        if self.integration_branch.is_some()
+            || self.integration_sha.is_some()
+            || self.current_integration_payload.is_some()
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "invalid test-command recovery cannot rewrite a run after integration begins",
+            ));
+        }
+
+        self.status = RunStatus::Running;
+        self.phase = phase;
+        self.next_action = diagnostic.action;
+        self.reason_code = None;
+        self.last_error = None;
+        self.validate_persisted()?;
+        Ok(self.next_action)
+    }
+
     pub fn cancel(&mut self) -> NextAction {
         self.status = RunStatus::Cancelled;
         self.phase = Phase::Cancelled;
