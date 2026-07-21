@@ -42,6 +42,13 @@ struct RetryableCompletedTurn {
     observed_status: String,
 }
 
+struct RetryableTerminalTurn {
+    message_hash: String,
+    thread_id: String,
+    turn_id: String,
+    observed_status: String,
+}
+
 struct RetryableAcceptedExecutionToolTurn {
     accepted: AcceptedTurn,
     observed_status: String,
@@ -511,12 +518,14 @@ where
         let retry_invalid_test_action = invalid_test_retry_action(&state)?;
         let retry_invalid_response_action = invalid_response_retry_action(&state)?;
         let retry_execution_tool_action = execution_tool_unavailable_retry_action(&state)?;
+        let retry_forbidden_operation_action = forbidden_operation_retry_action(&state)?;
         let retry_completed_response_action =
             retry_invalid_test_action.or(retry_invalid_response_action);
         let effective_action = retry_execution_tool_action
+            .or(retry_forbidden_operation_action)
             .or(retry_completed_response_action)
             .unwrap_or(state.next_action);
-        if retry_execution_tool_action.is_some() {
+        if retry_execution_tool_action.is_some() || retry_forbidden_operation_action.is_some() {
             let target = state.target_integration_branch.as_deref().ok_or_else(|| {
                 CoordinatorError::operational(
                     "INVALID_STATE",
@@ -539,6 +548,29 @@ where
         }
         if retry_terminal_turn {
             self.prepare_terminal_turn_retry(&state).await?;
+        }
+        if let Some(action) = retry_forbidden_operation_action {
+            let retry = self
+                .inspect_interrupted_forbidden_operation_retry(&state, action)
+                .await?;
+            let blocked_state = state.clone();
+            let restored_action = state.retry_blocked_preintegration_forbidden_operation()?;
+            if restored_action != action {
+                return Err(CoordinatorError::operational(
+                    "INCOMPATIBLE_STATE",
+                    "restored forbidden-operation action does not match its interrupted turn",
+                ));
+            }
+            self.store
+                .reactivate_blocked_run_with_interrupted_forbidden_operation_retry(
+                    &blocked_state,
+                    &state,
+                    &retry.message_hash,
+                    &retry.thread_id,
+                    &retry.turn_id,
+                    &retry.observed_status,
+                )?;
+            return Ok(state);
         }
         if let Some(action) = retry_execution_tool_action {
             let retry = self
@@ -780,6 +812,89 @@ where
             ));
         }
         Ok(RetryableCompletedTurn {
+            message_hash: pending.message_hash,
+            thread_id: thread_id.to_owned(),
+            turn_id: turn_id.to_owned(),
+            observed_status: status.to_owned(),
+        })
+    }
+
+    async fn inspect_interrupted_forbidden_operation_retry(
+        &self,
+        state: &RunState,
+        action: NextAction,
+    ) -> Result<RetryableTerminalTurn, CoordinatorError> {
+        if action != NextAction::RequestPrimaryIntegration
+            || state.integration_branch.is_some()
+            || state.integration_sha.is_some()
+            || state.current_integration_payload.is_some()
+            || state.verification_worktree.is_some()
+            || !state.test_evidence.is_empty()
+        {
+            return Err(CoordinatorError::operational(
+                "TERMINAL_TURN_RETRY_UNSAFE",
+                "forbidden-operation recovery is limited to the first integration turn",
+            ));
+        }
+        let run_id = state.facts.run_id.to_string();
+        let pending = self.store.pending_send(&run_id)?.ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "forbidden-operation blocker has no persisted pending turn",
+            )
+        })?;
+        let (Some(thread_id), Some(turn_id)) =
+            (pending.thread_id.as_deref(), pending.turn_id.as_deref())
+        else {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "forbidden-operation blocker has no exact persisted turn identity",
+            ));
+        };
+        if pending.role != "PRIMARY"
+            || pending.phase != "INTEGRATE"
+            || pending.round != state.round
+            || thread_id != state.facts.primary_thread_id
+        {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "forbidden-operation blocker does not match the frozen integration action",
+            ));
+        }
+
+        let detail = self.read_thread_with_retry(thread_id).await?;
+        self.verify_thread_identity(state, Role::Primary, &detail)?;
+        let turn = find_turn(&detail, turn_id).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "forbidden-operation turn is absent from canonical task history",
+            )
+        })?;
+        let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "forbidden-operation turn has no canonical status",
+            )
+        })?;
+        if !matches!(status, "failed" | "interrupted") {
+            return Err(CoordinatorError::operational(
+                "TERMINAL_TURN_RETRY_UNSAFE",
+                format!("forbidden-operation turn has unexpected status {status}"),
+            ));
+        }
+        if !turn_contains_request_hash(turn, &pending.message_hash) {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "forbidden-operation turn lacks its deterministic request marker",
+            ));
+        }
+        if let Some(blocker) = terminal_turn_retry_blocker(turn) {
+            return Err(CoordinatorError::operational(
+                "TERMINAL_TURN_RETRY_UNSAFE",
+                format!("forbidden-operation turn cannot be retried: {blocker}"),
+            ));
+        }
+        Ok(RetryableTerminalTurn {
             message_hash: pending.message_hash,
             thread_id: thread_id.to_owned(),
             turn_id: turn_id.to_owned(),
@@ -2022,6 +2137,51 @@ fn execution_tool_unavailable_retry_action(
         return Err(CoordinatorError::operational(
             "MODEL_RESPONSE_RETRY_UNSAFE",
             "execution-tool recovery cannot run after integration side effects exist",
+        ));
+    }
+    Ok(Some(NextAction::RequestPrimaryIntegration))
+}
+
+fn forbidden_operation_retry_action(
+    state: &RunState,
+) -> Result<Option<NextAction>, CoordinatorError> {
+    if state.reason_code.as_deref() != Some("FORBIDDEN_OPERATION") {
+        return Ok(None);
+    }
+    if state.status != RunStatus::Blocked
+        || state.phase != Phase::Blocked
+        || state.next_action != NextAction::Stop
+    {
+        return Err(CoordinatorError::operational(
+            "INCOMPATIBLE_STATE",
+            "forbidden-operation reason is attached to inconsistent terminal metadata",
+        ));
+    }
+    let diagnostic = state.last_error.as_ref().ok_or_else(|| {
+        CoordinatorError::operational(
+            "INCOMPATIBLE_STATE",
+            "forbidden-operation blocker has no originating diagnostic",
+        )
+    })?;
+    if diagnostic.code != "FORBIDDEN_OPERATION"
+        || diagnostic.action != NextAction::RequestPrimaryIntegration
+        || diagnostic.role != Some(Role::Primary)
+        || diagnostic.thread_id.as_deref() != Some(state.facts.primary_thread_id.as_str())
+    {
+        return Err(CoordinatorError::operational(
+            "TERMINAL_TURN_RETRY_UNSAFE",
+            "forbidden-operation recovery is limited to the bound primary integration turn",
+        ));
+    }
+    if state.integration_branch.is_some()
+        || state.integration_sha.is_some()
+        || state.current_integration_payload.is_some()
+        || state.verification_worktree.is_some()
+        || !state.test_evidence.is_empty()
+    {
+        return Err(CoordinatorError::operational(
+            "TERMINAL_TURN_RETRY_UNSAFE",
+            "forbidden-operation recovery cannot run after integration side effects exist",
         ));
     }
     Ok(Some(NextAction::RequestPrimaryIntegration))

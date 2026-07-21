@@ -58,8 +58,8 @@ Git 从主修源 SHA 到结果 SHA 的真实差异（包括大型文本文件）
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.14-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.14-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.15-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.15-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 v0.1.0 的 GNU 产物要求 GLIBC 2.39，现已停止推荐；受支持的 Linux 主机请使用
@@ -185,8 +185,12 @@ MCP 请求会重新连接 daemon，并以幂等方式恢复可继续的工作。
 只读 turn；合并后或含副作用的无效响应仍是终态。0.1.14 会为每个受约束的 App Server
 turn 显式选择同机 `local` 执行环境；空环境数组会禁用命令与文件工具。对于精确的合并前
 `BLOCKED / EXECUTION_TOOL_UNAVAILABLE`，只有在规范历史、响应哈希、源引用、干净工作树和
-目标分支不存在共同证明没有发生集成副作用后，才允许恢复同一个 Run。不要对其他 `BLOCKED` 或任何
-`CANCELLED` 运行调用 `resume`。0.1.13 还会在两类批准请求旁给出带权威值的扁平 payload
+目标分支不存在共同证明没有发生集成副作用后，才允许恢复同一个 Run。不要对无关 `BLOCKED` 或任何
+`CANCELLED` 运行调用 `resume`。0.1.15 将 App Server 的
+`proposedExecpolicyAmendment` 视为一次性 `accept` 不会应用的元数据；网络或额外权限请求仍会取消。
+对于首次集成阶段的精确 `BLOCKED / FORBIDDEN_OPERATION`，也只有在被拒 turn 的规范状态为
+`failed` 或 `interrupted`、不存在可产生副作用的 item、两个工作树和引用仍冻结且干净、目标分支仍
+不存在时，才允许恢复同一个 Run。0.1.13 还会在两类批准请求旁给出带权威值的扁平 payload
 模板，并由 JSON Schema 拒绝仅嵌套在其他对象中的批准身份。待完成的验证 turn 可能在克隆中留下测试产物；恢复时
 可允许该克隆变脏，但仍强制要求持久化路径、精确 detached SHA、独立 Git common directory
 且无 remote。

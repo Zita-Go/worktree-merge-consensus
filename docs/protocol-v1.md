@@ -205,6 +205,10 @@ policy `untrusted`; the daemon accepts only a narrow set of branch creation,
 exact-SHA merge, staging, commit, and read-only Git commands. The primary
 verification turn supplies only the isolated clone as a writable root, remains
 offline, uses approval policy `untrusted`, and accepts only exact frozen tests.
+App Server may attach a `proposedExecpolicyAmendment` to a one-time command
+approval. The coordinator ignores that proposal and returns plain `accept`; it
+never applies or persists the amendment. Additional filesystem, network, and
+network-policy requests are still cancelled.
 Publication, destructive Git operations, shell chaining, wrong-directory
 execution, and added permission requests are cancelled at the App Server
 request boundary.
@@ -254,7 +258,13 @@ payload that explicitly reports no writes, no command/file-change items, both
 frozen worktrees clean, both source refs unchanged, and the target integration
 branch absent. The same version explicitly selects environment `local` with the
 authorized cwd on every turn; it never sends an empty environment selection,
-which would disable execution tools. Version 0.1.13 renders concrete direct-field payload templates for
+which would disable execution tools. Version 0.1.15 adds one more narrow
+recovery for a first-integration `BLOCKED / FORBIDDEN_OPERATION`: the exact
+pending turn must be canonically `failed` or `interrupted`, contain no
+side-effect-capable item, have no integration identity or test evidence, and
+pass strict frozen-source and absent-target-branch checks before the run lock
+is reacquired and the attempt is archived. All other forbidden-operation
+states remain terminal. Version 0.1.13 renders concrete direct-field payload templates for
 `APPROVED_PLAN` and `APPROVED_RESULT`; the checked-in JSON Schema requires those
 approval identity fields at payload top level rather than accepting a nested
 identity object.

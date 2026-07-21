@@ -509,6 +509,66 @@ impl RunState {
         Ok(self.next_action)
     }
 
+    pub fn retry_blocked_preintegration_forbidden_operation(
+        &mut self,
+    ) -> Result<NextAction, StateError> {
+        if self.status != RunStatus::Blocked
+            || self.phase != Phase::Blocked
+            || self.next_action != NextAction::Stop
+            || self.reason_code.as_deref() != Some("FORBIDDEN_OPERATION")
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "only a terminal pre-integration FORBIDDEN_OPERATION can be retried",
+            ));
+        }
+        let diagnostic = self.last_error.as_ref().ok_or_else(|| {
+            state_error(
+                "INCOMPATIBLE_STATE",
+                "forbidden-operation recovery requires its originating diagnostic",
+            )
+        })?;
+        if diagnostic.code != "FORBIDDEN_OPERATION"
+            || diagnostic.action != NextAction::RequestPrimaryIntegration
+            || diagnostic.role != Some(Role::Primary)
+            || diagnostic.thread_id.as_deref() != Some(self.facts.primary_thread_id.as_str())
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "forbidden-operation recovery is limited to the bound primary integration turn",
+            ));
+        }
+        if !self.plan_approved
+            || self.current_plan_payload.is_none()
+            || self.plan_approval_payload.is_none()
+            || self.target_integration_branch.is_none()
+        {
+            return Err(state_error(
+                "INCOMPATIBLE_STATE",
+                "forbidden-operation recovery requires an approved frozen integration plan",
+            ));
+        }
+        if self.integration_branch.is_some()
+            || self.integration_sha.is_some()
+            || self.current_integration_payload.is_some()
+            || self.verification_worktree.is_some()
+            || !self.test_evidence.is_empty()
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "forbidden-operation recovery is limited to a side-effect-free first integration turn",
+            ));
+        }
+
+        self.status = RunStatus::Running;
+        self.phase = Phase::Integrate;
+        self.next_action = NextAction::RequestPrimaryIntegration;
+        self.reason_code = None;
+        self.last_error = None;
+        self.validate_persisted()?;
+        Ok(self.next_action)
+    }
+
     pub fn cancel(&mut self) -> NextAction {
         self.status = RunStatus::Cancelled;
         self.phase = Phase::Cancelled;

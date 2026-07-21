@@ -702,6 +702,47 @@ async fn forbidden_integration_command_is_cancelled_and_blocks_the_run() {
 }
 
 #[tokio::test]
+async fn interrupted_side_effect_free_forbidden_operation_retries_the_same_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let mut replies = conflict_free_replies();
+    replies.insert(4, replies[4].clone());
+    let app = Arc::new(FakeAppServer::deferred(
+        replies,
+        5,
+        DeferMode::ForbiddenCommand,
+    ));
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let blocked = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(blocked.status, RunStatus::Blocked);
+    assert_eq!(blocked.reason_code.as_deref(), Some("FORBIDDEN_OPERATION"));
+    app.set_turn_status("primary", "turn-5", "interrupted");
+
+    let accepted = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(accepted.status, RunStatus::Accepted);
+    assert_eq!(app.request_count(), 8);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    assert_eq!(
+        app.request_order()
+            .iter()
+            .filter(|request| request.ends_with("REQUEST_PRIMARY_INTEGRATION"))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn file_change_grant_root_is_cancelled_and_blocks_the_run() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -1691,6 +1732,17 @@ impl FakeAppServer {
             .find(|turn| turn.get("id").and_then(Value::as_str) == Some(turn_id))
             .unwrap();
         turn["items"].as_array_mut().unwrap().push(item);
+    }
+
+    fn set_turn_status(&self, thread_id: &str, turn_id: &str, status: &str) {
+        let mut threads = self.threads.lock().unwrap();
+        let turn = threads
+            .get_mut(thread_id)
+            .unwrap()
+            .iter_mut()
+            .find(|turn| turn.get("id").and_then(Value::as_str) == Some(turn_id))
+            .unwrap();
+        turn["status"] = json!(status);
     }
 
     fn complete_deferred_turns(&self) {

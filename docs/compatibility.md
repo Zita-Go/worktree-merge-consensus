@@ -77,6 +77,10 @@ roots, approval policy, a same-host `local` environment selection with that
 cwd, and one of three sandbox profiles: offline read-only
 review, offline primary integration with source worktree/Git-common writes, or
 offline primary verification with only the isolated clone writable. The
+App Server may include a `proposedExecpolicyAmendment` in an approval request;
+the coordinator's plain one-time `accept` does not apply that proposal. The
+proposal therefore does not by itself fail the command gate, while actual
+additional filesystem or network permissions still fail closed. The
 integration profile disables temporary-directory writes; the verification
 profile permits temporary build artifacts but has no source Git-common root.
 These fields are part of the checked-in `supported-methods` fixture and are

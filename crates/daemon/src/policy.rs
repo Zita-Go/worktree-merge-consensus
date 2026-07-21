@@ -16,10 +16,12 @@ pub(crate) fn decide_command_approval(state: &RunState, params: &Value) -> Appro
     if params.get("cwd").and_then(Value::as_str) != expected_cwd.and_then(|path| path.to_str()) {
         return ApprovalDecision::Cancel;
     }
+    // App Server may suggest an execpolicy amendment for an otherwise ordinary
+    // one-time approval. Returning `accept` does not apply that suggestion, so
+    // it is metadata rather than an additional permission request.
     if [
         "additionalPermissions",
         "networkApprovalContext",
-        "proposedExecpolicyAmendment",
         "proposedNetworkPolicyAmendments",
     ]
     .iter()
@@ -228,6 +230,18 @@ mod tests {
                 &json!({
                     "cwd": "/repo/primary",
                     "command": format!("git merge --no-ff --no-edit {REVIEWER_SHA}")
+                })
+            ),
+            ApprovalDecision::Accept
+        );
+        assert_eq!(
+            decide_command_approval(
+                &state,
+                &json!({
+                    "cwd": "/repo/primary",
+                    "command": "git rev-parse HEAD",
+                    "proposedExecpolicyAmendment": ["git", "rev-parse", "HEAD"],
+                    "availableDecisions": ["accept", "acceptForSession", "decline", "cancel"]
                 })
             ),
             ApprovalDecision::Accept

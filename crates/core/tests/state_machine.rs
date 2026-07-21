@@ -319,6 +319,52 @@ fn execution_tool_blocker_is_not_retryable_after_integration_identity_exists() {
 }
 
 #[test]
+fn side_effect_free_primary_integration_forbidden_operation_is_retryable() {
+    let mut state = fixture_plan_state();
+    let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
+    state.apply_message(approved_plan(&plan_hash)).unwrap();
+    state.record_error(RunDiagnostic {
+        code: "FORBIDDEN_OPERATION".into(),
+        detail: "the task requested a command outside policy".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some(state.facts.primary_thread_id.clone()),
+    });
+    state.block("FORBIDDEN_OPERATION");
+
+    let action = state
+        .retry_blocked_preintegration_forbidden_operation()
+        .unwrap();
+
+    assert_eq!(action, NextAction::RequestPrimaryIntegration);
+    assert_eq!(state.status, RunStatus::Running);
+    assert_eq!(state.phase, Phase::Integrate);
+    assert!(state.reason_code.is_none());
+    assert!(state.last_error.is_none());
+}
+
+#[test]
+fn forbidden_operation_after_integration_identity_is_not_retryable() {
+    let mut state = fixture_result_state("cccccccccccccccccccccccccccccccccccccccc");
+    state.record_error(RunDiagnostic {
+        code: "FORBIDDEN_OPERATION".into(),
+        detail: "forbidden command".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some(state.facts.primary_thread_id.clone()),
+    });
+    state.block("FORBIDDEN_OPERATION");
+
+    let error = state
+        .retry_blocked_preintegration_forbidden_operation()
+        .unwrap_err();
+
+    assert_eq!(error.code(), "NOT_RETRYABLE");
+}
+
+#[test]
 fn incompatible_adapter_has_a_distinct_terminal_status() {
     let mut state = RunState::new(facts());
 

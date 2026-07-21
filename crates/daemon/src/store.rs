@@ -5,7 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use consensus_core::state::{RunState, RunStatus};
+use consensus_core::state::{NextAction, Role, RunState, RunStatus};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -449,6 +449,100 @@ impl SqliteRunStore {
             observed_status,
         )?;
         update_run_row(&transaction, &run_id, resumed_state)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn reactivate_blocked_run_with_interrupted_forbidden_operation_retry(
+        &self,
+        blocked_state: &RunState,
+        resumed_state: &RunState,
+        message_hash: &str,
+        thread_id: &str,
+        turn_id: &str,
+        observed_status: &str,
+    ) -> Result<(), StoreError> {
+        let diagnostic = blocked_state.last_error.as_ref();
+        if blocked_state.status != RunStatus::Blocked
+            || blocked_state.reason_code.as_deref() != Some("FORBIDDEN_OPERATION")
+            || diagnostic.map(|value| value.code.as_str()) != Some("FORBIDDEN_OPERATION")
+            || diagnostic.map(|value| value.action) != Some(NextAction::RequestPrimaryIntegration)
+            || diagnostic.and_then(|value| value.role) != Some(Role::Primary)
+            || resumed_state.status != RunStatus::Running
+            || blocked_state.facts != resumed_state.facts
+            || !matches!(observed_status, "failed" | "interrupted")
+        {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "blocked forbidden-operation retry identity or status is invalid".into(),
+            ));
+        }
+
+        let run_id = blocked_state.facts.run_id.to_string();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let current_json = transaction
+            .query_row(
+                "SELECT state_json FROM runs WHERE run_id = ?1",
+                [&run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::RunNotFound(run_id.clone()))?;
+        let current_state = deserialize_state(&current_json)?;
+        if current_state != *blocked_state {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "run {run_id} changed while preparing forbidden-operation recovery"
+            )));
+        }
+
+        let common_dir = resumed_state.facts.git_common_dir.to_string_lossy();
+        match transaction.execute(
+            "INSERT INTO locks (repository_id, run_id, primary_worktree, acquired_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                common_dir.as_ref(),
+                run_id,
+                resumed_state
+                    .facts
+                    .primary_worktree
+                    .to_string_lossy()
+                    .as_ref(),
+                now_unix(),
+            ],
+        ) {
+            Ok(_) => {}
+            Err(error) if is_constraint(&error) => {
+                return Err(StoreError::ActiveRunExists(format!(
+                    "repository {} already has an active run",
+                    resumed_state.facts.git_common_dir.display()
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        archive_and_reset_turn(
+            &transaction,
+            &run_id,
+            message_hash,
+            thread_id,
+            turn_id,
+            "SENT",
+            observed_status,
+        )?;
+        update_run_row(&transaction, &run_id, resumed_state)?;
+        transaction.execute(
+            "INSERT INTO transitions (
+                run_id, from_phase, to_phase, status, reason_code,
+                response_hash, created_at
+             ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)",
+            params![
+                run_id,
+                enum_name(&blocked_state.phase)?,
+                enum_name(&resumed_state.phase)?,
+                enum_name(&resumed_state.status)?,
+                now_unix(),
+            ],
+        )?;
         transaction.commit()?;
         Ok(())
     }

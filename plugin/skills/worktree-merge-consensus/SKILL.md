@@ -78,6 +78,16 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   reports no writes, no command or file-change item exists, both frozen sources
   are unchanged and clean, and the target branch is absent. Any mismatch,
   integration identity, side effect, or later-phase blocker remains terminal.
+- For a first-integration `BLOCKED / FORBIDDEN_OPERATION`, report the denied
+  execution boundary and do not create a replacement run. After explicit user
+  authorization, call `consensus_resume` on the same run. Version 0.1.15
+  retries only an exact canonically `failed` or `interrupted` primary turn with
+  no side-effect-capable item, no integration identity, both frozen sources
+  unchanged and clean, and the target branch absent. An App Server
+  `proposedExecpolicyAmendment` does not itself request more access when the
+  coordinator returns one-time `accept`; the amendment is never applied.
+  Network, added-permission, later-phase, mismatched, or side-effectful cases
+  remain terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
 Read [references/protocol.md](references/protocol.md) when explaining lifecycle states, acceptance evidence, or recovery behavior.
