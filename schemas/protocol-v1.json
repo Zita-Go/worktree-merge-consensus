@@ -90,6 +90,67 @@
       "type": "object"
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "message_type": { "const": "APPROVED_PLAN" }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "required": [
+              "approved_plan_revision",
+              "approved_primary_sha",
+              "approved_reviewer_sha",
+              "approved_plan_hash",
+              "uncovered_items"
+            ],
+            "properties": {
+              "approved_plan_revision": { "type": "integer", "minimum": 1 },
+              "approved_primary_sha": { "$ref": "#/$defs/sha" },
+              "approved_reviewer_sha": { "$ref": "#/$defs/sha" },
+              "approved_plan_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{64}$"
+              },
+              "uncovered_items": { "type": "array", "maxItems": 0 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "message_type": { "const": "APPROVED_RESULT" }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "required": [
+              "approved_plan_revision",
+              "approved_primary_sha",
+              "approved_reviewer_sha",
+              "approved_integration_branch",
+              "approved_integration_sha",
+              "uncovered_items"
+            ],
+            "properties": {
+              "approved_plan_revision": { "type": "integer", "minimum": 1 },
+              "approved_primary_sha": { "$ref": "#/$defs/sha" },
+              "approved_reviewer_sha": { "$ref": "#/$defs/sha" },
+              "approved_integration_branch": { "type": "string", "minLength": 1 },
+              "approved_integration_sha": { "$ref": "#/$defs/sha" },
+              "uncovered_items": { "type": "array", "maxItems": 0 }
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "sha": {
       "type": "string",

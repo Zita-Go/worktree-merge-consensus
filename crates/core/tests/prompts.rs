@@ -40,6 +40,7 @@ fn every_prompt_is_self_contained_and_declares_strict_output() {
         "including BLOCKED, must copy phase",
         "Do not call `worktreeMergeConsensus`",
         "payload.approved_plan_revision must equal",
+        "Every required `approved_*` field must be a direct child of payload",
     ] {
         assert!(prompt.contains(required), "missing {required:?}");
     }
@@ -119,6 +120,52 @@ fn plan_verdict_prompt_contains_both_contracts_plan_and_coverage() {
     assert!(prompt.contains("preserve reviewer retry semantics"));
     assert!(prompt.contains("coverage_matrix"));
     assert!(prompt.contains("merge"));
+    for required in [
+        "Action-specific approval payload contract".to_owned(),
+        "If returning APPROVED_PLAN".to_owned(),
+        format!("\"approved_primary_sha\": \"{PRIMARY_SHA}\""),
+        format!("\"approved_reviewer_sha\": \"{REVIEWER_SHA}\""),
+        "\"approved_plan_revision\": 1".to_owned(),
+        "\"approved_plan_hash\": \"0000000000000000000000000000000000000000000000000000000000000000\"".to_owned(),
+        "do not move them under `approval_identity`".to_owned(),
+    ] {
+        assert!(prompt.contains(&required), "missing {required:?}");
+    }
+}
+
+#[test]
+fn result_verdict_prompt_declares_direct_approval_identity_fields() {
+    let state = result_state();
+    let payload = json!({
+        "primary_contract": {"goal": "preserve primary API"},
+        "reviewer_contract": {"goal": "preserve reviewer behavior"},
+        "approved_plan": {"steps": ["merge", "verify"]},
+        "coverage_matrix": [{"contract_item": "all", "plan_step": "verify"}],
+        "integration_evidence": {"summary": "integrated"},
+        "test_evidence": [{"command": "cargo test", "exit_code": 0}],
+        "changed_files": ["combined.txt"],
+        "integration_branch": "consensus/test-run",
+        "integration_sha": INTEGRATION_SHA
+    });
+
+    let prompt = build_turn_prompt(
+        Role::Reviewer,
+        NextAction::RequestReviewerResultVerdict,
+        &state,
+        &payload,
+    )
+    .unwrap();
+
+    for required in [
+        "If returning APPROVED_RESULT".to_owned(),
+        format!("\"approved_primary_sha\": \"{PRIMARY_SHA}\""),
+        format!("\"approved_reviewer_sha\": \"{REVIEWER_SHA}\""),
+        "\"approved_integration_branch\": \"consensus/test-run\"".to_owned(),
+        format!("\"approved_integration_sha\": \"{INTEGRATION_SHA}\""),
+        "do not move them under `approval_identity`".to_owned(),
+    ] {
+        assert!(prompt.contains(&required), "missing {required:?}");
+    }
 }
 
 #[test]

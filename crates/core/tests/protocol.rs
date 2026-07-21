@@ -27,6 +27,30 @@ fn valid_approval() -> serde_json::Value {
     })
 }
 
+fn valid_result_approval() -> serde_json::Value {
+    json!({
+        "protocol": "worktree-merge-consensus/v1",
+        "run_id": "4b230bd8-d870-4ef4-bf20-05a4c61020af",
+        "message_type": "APPROVED_RESULT",
+        "phase": "RESULT_REVIEW",
+        "round": 1,
+        "primary_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "reviewer_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "plan_revision": 1,
+        "integration_branch": "consensus/test-run",
+        "integration_sha": "cccccccccccccccccccccccccccccccccccccccc",
+        "reason_code": null,
+        "payload": {
+            "approved_plan_revision": 1,
+            "approved_primary_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "approved_reviewer_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "approved_integration_branch": "consensus/test-run",
+            "approved_integration_sha": "cccccccccccccccccccccccccccccccccccccccc",
+            "uncovered_items": []
+        }
+    })
+}
+
 #[test]
 fn approval_requires_exact_nonempty_source_shas() {
     let parsed = validate_message(valid_approval()).expect("valid approval");
@@ -77,6 +101,44 @@ fn plan_approval_payload_must_match_envelope() {
     value["payload"]["approved_primary_sha"] = json!("cccccccccccccccccccccccccccccccccccccccc");
 
     assert!(validate_message(value).is_err());
+}
+
+#[test]
+fn plan_approval_schema_rejects_nested_identity_without_direct_approval_keys() {
+    let mut value = valid_approval();
+    let payload = value["payload"].as_object_mut().unwrap();
+    payload.remove("approved_primary_sha");
+    payload.remove("approved_reviewer_sha");
+    payload.insert(
+        "approval_identity".into(),
+        json!({
+            "primary_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "reviewer_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }),
+    );
+
+    let error = validate_message(value).unwrap_err();
+    assert!(error.to_string().contains("schema validation failed"));
+}
+
+#[test]
+fn result_approval_schema_requires_direct_integration_identity() {
+    validate_message(valid_result_approval()).expect("valid result approval");
+
+    let mut nested = valid_result_approval();
+    let payload = nested["payload"].as_object_mut().unwrap();
+    payload.remove("approved_integration_branch");
+    payload.remove("approved_integration_sha");
+    payload.insert(
+        "approval_identity".into(),
+        json!({
+            "integration_branch": "consensus/test-run",
+            "integration_sha": "cccccccccccccccccccccccccccccccccccccccc"
+        }),
+    );
+
+    let error = validate_message(nested).unwrap_err();
+    assert!(error.to_string().contains("schema validation failed"));
 }
 
 #[test]

@@ -67,7 +67,9 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   reviewer-plan-verdict actions whose exact completed canonical turn passes the
   same read-only history checks. Never resume a post-integration, side-effectful,
   incomplete, external, or unknown invalid response, and never create a
-  replacement run implicitly.
+  replacement run implicitly. Version 0.1.13 supplies concrete top-level payload
+  templates for both approval message types and rejects approval identities that
+  exist only under a nested object.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
 Read [references/protocol.md](references/protocol.md) when explaining lifecycle states, acceptance evidence, or recovery behavior.

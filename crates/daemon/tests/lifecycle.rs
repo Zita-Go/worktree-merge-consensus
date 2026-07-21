@@ -15,8 +15,11 @@ async fn live_daemon_is_reused_without_spawning_the_configured_executable() {
     let config = ServerConfig::new(temp.path());
     let store = SqliteRunStore::open(&config.database_path).unwrap();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let server = tokio::spawn(run_server(config.clone(), store, shutdown_rx));
-    wait_for_socket(&config.socket_path).await;
+    let mut server = tokio::spawn(run_server(config.clone(), store, shutdown_rx));
+    tokio::select! {
+        result = &mut server => panic!("daemon exited before creating its socket: {result:?}"),
+        () = wait_for_socket(&config.socket_path) => {}
+    }
 
     let options = EnsureDaemonOptions {
         executable: PathBuf::from("/definitely/missing/codex-consensus"),

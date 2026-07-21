@@ -246,7 +246,10 @@ atomic-lock safeguards to a pre-integration `BLOCKED / INVALID_RESPONSE` caused
 by malformed model output. Only contract, primary-plan, and reviewer-plan
 verdict actions are eligible; post-integration, side-effectful, incomplete,
 external, and unknown histories remain terminal. Other `BLOCKED` states remain
-terminal.
+terminal. Version 0.1.13 renders concrete direct-field payload templates for
+`APPROVED_PLAN` and `APPROVED_RESULT`; the checked-in JSON Schema requires those
+approval identity fields at payload top level rather than accepting a nested
+identity object.
 
 ## Git postconditions
 

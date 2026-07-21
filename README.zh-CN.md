@@ -58,8 +58,8 @@ Git 从主修源 SHA 到结果 SHA 的真实差异（包括大型文本文件）
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.12-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.12-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.13-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.13-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 v0.1.0 的 GNU 产物要求 GLIBC 2.39，现已停止推荐；受支持的 Linux 主机请使用
@@ -183,7 +183,8 @@ MCP 请求会重新连接 daemon，并以幂等方式恢复可继续的工作。
 产生的同类旧 `BLOCKED` 状态，并在同一事务中重新获取仓库锁。0.1.12 还能用相同的规范
 历史检查恢复由模型格式错误导致的合并前 `BLOCKED / INVALID_RESPONSE`，但只限精确的已完成
 只读 turn；合并后或含副作用的无效响应仍是终态。不要对其他 `BLOCKED` 或任何
-`CANCELLED` 运行调用 `resume`。待完成的验证 turn 可能在克隆中留下测试产物；恢复时
+`CANCELLED` 运行调用 `resume`。0.1.13 还会在两类批准请求旁给出带权威值的扁平 payload
+模板，并由 JSON Schema 拒绝仅嵌套在其他对象中的批准身份。待完成的验证 turn 可能在克隆中留下测试产物；恢复时
 可允许该克隆变脏，但仍强制要求持久化路径、精确 detached SHA、独立 Git common directory
 且无 remote。
 
