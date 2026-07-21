@@ -70,6 +70,14 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   replacement run implicitly. Version 0.1.13 supplies concrete top-level payload
   templates for both approval message types and rejects approval identities that
   exist only under a nested object.
+- For `BLOCKED / EXECUTION_TOOL_UNAVAILABLE` before an integration branch or SHA
+  exists, report that the selected task lacked its same-host execution tools.
+  After explicit user authorization, call `consensus_resume` on the same run.
+  Version 0.1.14 retries only the exact accepted primary integration turn when
+  canonical history and its response hash match, the response explicitly
+  reports no writes, no command or file-change item exists, both frozen sources
+  are unchanged and clean, and the target branch is absent. Any mismatch,
+  integration identity, side effect, or later-phase blocker remains terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
 Read [references/protocol.md](references/protocol.md) when explaining lifecycle states, acceptance evidence, or recovery behavior.

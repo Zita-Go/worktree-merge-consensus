@@ -193,8 +193,9 @@ terminates with `FORBIDDEN_OPERATION`. Explicit task input may pause as
 ## App Server execution policy
 
 The App Server connection declares `capabilities.experimentalApi: true` during
-`initialize`. Every turn then supplies an empty `environments` array so it
-cannot inherit a sticky task execution environment. Irrespective of the task's initial or subsequently
+`initialize`. Every turn explicitly selects the same-host `local` execution
+environment with the authorized absolute cwd, so command and file tools remain
+available without inheriting an arbitrary sticky environment. Irrespective of the task's initial or subsequently
 reported cwd, contract, plan, and review turns supply the explicitly bound
 absolute role worktree, one runtime workspace root, a read-only sandbox, network
 disabled, and approval policy `never`. The authorized primary integration turn
@@ -246,7 +247,14 @@ atomic-lock safeguards to a pre-integration `BLOCKED / INVALID_RESPONSE` caused
 by malformed model output. Only contract, primary-plan, and reviewer-plan
 verdict actions are eligible; post-integration, side-effectful, incomplete,
 external, and unknown histories remain terminal. Other `BLOCKED` states remain
-terminal. Version 0.1.13 renders concrete direct-field payload templates for
+terminal except the exact side-effect-free pre-integration
+`EXECUTION_TOOL_UNAVAILABLE` case added in 0.1.14. That recovery requires the
+accepted primary turn and response hash to match canonical history, a blocker
+payload that explicitly reports no writes, no command/file-change items, both
+frozen worktrees clean, both source refs unchanged, and the target integration
+branch absent. The same version explicitly selects environment `local` with the
+authorized cwd on every turn; it never sends an empty environment selection,
+which would disable execution tools. Version 0.1.13 renders concrete direct-field payload templates for
 `APPROVED_PLAN` and `APPROVED_RESULT`; the checked-in JSON Schema requires those
 approval identity fields at payload top level rather than accepting a nested
 identity object.

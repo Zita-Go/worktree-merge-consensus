@@ -612,6 +612,10 @@ impl AppServer for CodexAppServer {
     ) -> Result<TurnHandle, AppServerError> {
         let (cwd, runtime_workspace_roots, approval_policy, sandbox_policy) =
             turn_policy_params(policy)?;
+        let environments = json!([{
+            "environmentId": "local",
+            "cwd": cwd.clone(),
+        }]);
         let raw = self
             .rpc_request(
                 "turn/start",
@@ -626,7 +630,7 @@ impl AppServer for CodexAppServer {
                     "runtimeWorkspaceRoots": runtime_workspace_roots,
                     "approvalPolicy": approval_policy,
                     "approvalsReviewer": "user",
-                    "environments": [],
+                    "environments": environments,
                     "sandboxPolicy": sandbox_policy,
                 }),
             )

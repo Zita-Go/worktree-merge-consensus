@@ -457,6 +457,84 @@ async fn invalid_plan_approval_revision_can_resume_the_same_blocked_run() {
 }
 
 #[tokio::test]
+async fn side_effect_free_execution_tool_blocker_retries_the_same_integration_action() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let mut replies = conflict_free_replies();
+    replies.insert(4, execution_tool_unavailable_blocker());
+    let app = Arc::new(FakeAppServer::new(replies));
+    let safety = Arc::new(RecordingSafety::default());
+    let coordinator = Coordinator::new(Arc::clone(&app), store.clone(), safety, fast_options());
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let blocked = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(blocked.status, RunStatus::Blocked);
+    assert_eq!(
+        blocked.reason_code.as_deref(),
+        Some("EXECUTION_TOOL_UNAVAILABLE")
+    );
+    assert_eq!(blocked.integration_branch, None);
+    assert_eq!(blocked.integration_sha, None);
+    assert_eq!(app.request_count(), 5);
+
+    let accepted = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(accepted.status, RunStatus::Accepted);
+    assert_eq!(app.request_count(), 8);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    assert_eq!(
+        app.request_order()
+            .iter()
+            .filter(|request| request.ends_with("REQUEST_PRIMARY_INTEGRATION"))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn execution_tool_blocker_with_command_evidence_is_not_retryable() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let mut replies = conflict_free_replies();
+    replies.insert(4, execution_tool_unavailable_blocker());
+    let app = Arc::new(FakeAppServer::new(replies));
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let blocked = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(blocked.status, RunStatus::Blocked);
+    app.append_turn_item(
+        "primary",
+        "turn-5",
+        json!({
+            "id": "command-turn-5",
+            "type": "commandExecution",
+            "command": "git status --short",
+            "cwd": "/repo/primary",
+            "status": "completed",
+            "exitCode": 0
+        }),
+    );
+
+    let error = coordinator.resume(RUN_ID).await.unwrap_err();
+
+    assert_eq!(error.code(), "MODEL_RESPONSE_RETRY_UNSAFE");
+    assert_eq!(app.request_count(), 5);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+}
+
+#[tokio::test]
 async fn failed_required_test_blocks_before_result_review() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -1739,6 +1817,23 @@ impl AppServer for FakeAppServer {
             reply["payload"]["approved_plan_hash"] =
                 prompt_json_block(prompt, "Complete current payload")["plan_hash"].clone();
         }
+        if action == "REQUEST_PRIMARY_INTEGRATION"
+            && reply["message_type"] == "BLOCKED"
+            && reply["reason_code"] == "EXECUTION_TOOL_UNAVAILABLE"
+        {
+            let metadata = prompt_json_block(prompt, "Authoritative turn metadata:");
+            let payload = prompt_json_block(prompt, "Complete current payload");
+            let delivery =
+                prompt_json_block(prompt, "Coordinator delivery identity for crash recovery:");
+            reply["payload"]["request_hash"] = delivery["request_hash"].clone();
+            reply["payload"]["approved_plan_revision"] = metadata["plan_revision"].clone();
+            reply["payload"]["approved_primary_sha"] = metadata["primary_sha"].clone();
+            reply["payload"]["approved_reviewer_sha"] = metadata["reviewer_sha"].clone();
+            reply["payload"]["approved_plan_hash"] =
+                payload["approval"]["approved_plan_hash"].clone();
+            reply["payload"]["target_integration_branch"] =
+                payload["target_integration_branch"].clone();
+        }
         self.reply_types.lock().unwrap().push(
             reply["message_type"]
                 .as_str()
@@ -2133,6 +2228,35 @@ fn conflict_free_replies() -> Vec<Value> {
             }),
         ),
     ]
+}
+
+fn execution_tool_unavailable_blocker() -> Value {
+    let mut blocked = message(
+        "BLOCKED",
+        "INTEGRATE",
+        1,
+        Some(1),
+        None,
+        None,
+        json!({
+            "role": "PRIMARY",
+            "request_hash": "filled-from-prompt",
+            "approved_plan_revision": 1,
+            "approved_primary_sha": PRIMARY_SHA,
+            "approved_reviewer_sha": REVIEWER_SHA,
+            "approved_plan_hash": "filled-from-prompt",
+            "target_integration_branch": "consensus/test-run",
+            "evidence": ["the local execution tool was unavailable"],
+            "writes_performed": false,
+            "branch_created": false,
+            "merge_performed": false,
+            "files_modified": [],
+            "tests_run": [],
+            "safety_state": ["no integration branch was created"]
+        }),
+    );
+    blocked["reason_code"] = json!("EXECUTION_TOOL_UNAVAILABLE");
+    blocked
 }
 
 fn plan_revision_replies() -> Vec<Value> {

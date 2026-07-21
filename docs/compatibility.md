@@ -63,16 +63,18 @@ fixture is an adapter contract, not a claim that the server echoed the client's
 own method list.
 
 The client declares `capabilities.experimentalApi: true` during `initialize`.
-App Server requires that opt-in before accepting the pinned empty
-`turn/start.environments` array used to prevent sticky environment inheritance.
+App Server requires that opt-in before accepting the pinned
+`turn/start.environments` selection. Each turn selects environment `local` with
+the authorized absolute cwd instead of disabling execution environments or
+inheriting an arbitrary sticky environment.
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
 fixed task ID. `thread/read` can return persisted history for a `notLoaded`
 task, but it does not load that task for model execution; starting a turn after
 only reading history can produce a completed user-message-only turn.
 
 Every `turn/start` also carries the pinned role-specific cwd, runtime workspace
-roots, approval policy, an empty `environments` array that disables inherited
-sticky environments, and one of three sandbox profiles: offline read-only
+roots, approval policy, a same-host `local` environment selection with that
+cwd, and one of three sandbox profiles: offline read-only
 review, offline primary integration with source worktree/Git-common writes, or
 offline primary verification with only the isolated clone writable. The
 integration profile disables temporary-directory writes; the verification

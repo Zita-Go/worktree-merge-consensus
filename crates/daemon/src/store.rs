@@ -29,6 +29,18 @@ pub struct PendingSend {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptedTurn {
+    pub run_id: String,
+    pub role: String,
+    pub phase: String,
+    pub round: u32,
+    pub message_hash: String,
+    pub response_hash: String,
+    pub thread_id: String,
+    pub turn_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunSummary {
     pub run_id: String,
     pub status: String,
@@ -260,6 +272,33 @@ impl SqliteRunStore {
             .map_err(Into::into)
     }
 
+    pub fn latest_accepted_turn(&self, run_id: &str) -> Result<Option<AcceptedTurn>, StoreError> {
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT run_id, role, phase, round, message_hash, response_hash,
+                        thread_id, turn_id
+                 FROM turns
+                 WHERE run_id = ?1 AND delivery_state = 'ACCEPTED'
+                 ORDER BY id DESC LIMIT 1",
+                [run_id],
+                |row| {
+                    Ok(AcceptedTurn {
+                        run_id: row.get(0)?,
+                        role: row.get(1)?,
+                        phase: row.get(2)?,
+                        round: row.get(3)?,
+                        message_hash: row.get(4)?,
+                        response_hash: row.get(5)?,
+                        thread_id: row.get(6)?,
+                        turn_id: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn record_turn_started(
         &self,
         run_id: &str,
@@ -303,6 +342,7 @@ impl SqliteRunStore {
             message_hash,
             thread_id,
             turn_id,
+            "SENT",
             terminal_status,
         )?;
         transaction.commit()?;
@@ -331,6 +371,7 @@ impl SqliteRunStore {
             message_hash,
             thread_id,
             turn_id,
+            "SENT",
             observed_status,
         )?;
         transaction.commit()?;
@@ -404,9 +445,109 @@ impl SqliteRunStore {
             message_hash,
             thread_id,
             turn_id,
+            "SENT",
             observed_status,
         )?;
         update_run_row(&transaction, &run_id, resumed_state)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn reactivate_blocked_run_with_accepted_execution_tool_retry(
+        &self,
+        blocked_state: &RunState,
+        resumed_state: &RunState,
+        accepted: &AcceptedTurn,
+        observed_status: &str,
+    ) -> Result<(), StoreError> {
+        if blocked_state.status != RunStatus::Blocked
+            || blocked_state.reason_code.as_deref() != Some("EXECUTION_TOOL_UNAVAILABLE")
+            || resumed_state.status != RunStatus::Running
+            || blocked_state.facts != resumed_state.facts
+            || observed_status != "completed"
+        {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "blocked execution-tool retry identity or status is invalid".into(),
+            ));
+        }
+
+        let run_id = blocked_state.facts.run_id.to_string();
+        if accepted.run_id != run_id
+            || accepted.role != "PRIMARY"
+            || accepted.phase != "INTEGRATE"
+            || accepted.round != blocked_state.round
+            || accepted.thread_id != blocked_state.facts.primary_thread_id
+        {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "accepted execution-tool blocker does not match the frozen integration action"
+                    .into(),
+            ));
+        }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let current_json = transaction
+            .query_row(
+                "SELECT state_json FROM runs WHERE run_id = ?1",
+                [&run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::RunNotFound(run_id.clone()))?;
+        let current_state = deserialize_state(&current_json)?;
+        if current_state != *blocked_state {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "run {run_id} changed while preparing execution-tool recovery"
+            )));
+        }
+
+        let common_dir = resumed_state.facts.git_common_dir.to_string_lossy();
+        match transaction.execute(
+            "INSERT INTO locks (repository_id, run_id, primary_worktree, acquired_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                common_dir.as_ref(),
+                run_id,
+                resumed_state
+                    .facts
+                    .primary_worktree
+                    .to_string_lossy()
+                    .as_ref(),
+                now_unix(),
+            ],
+        ) {
+            Ok(_) => {}
+            Err(error) if is_constraint(&error) => {
+                return Err(StoreError::ActiveRunExists(format!(
+                    "repository {} already has an active run",
+                    resumed_state.facts.git_common_dir.display()
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        archive_and_reset_turn(
+            &transaction,
+            &run_id,
+            &accepted.message_hash,
+            &accepted.thread_id,
+            &accepted.turn_id,
+            "ACCEPTED",
+            observed_status,
+        )?;
+        update_run_row(&transaction, &run_id, resumed_state)?;
+        transaction.execute(
+            "INSERT INTO transitions (
+                run_id, from_phase, to_phase, status, reason_code,
+                response_hash, created_at
+             ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)",
+            params![
+                run_id,
+                enum_name(&blocked_state.phase)?,
+                enum_name(&resumed_state.phase)?,
+                enum_name(&resumed_state.status)?,
+                now_unix(),
+            ],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -539,15 +680,16 @@ fn archive_and_reset_turn(
     message_hash: &str,
     thread_id: &str,
     turn_id: &str,
+    delivery_state: &str,
     observed_status: &str,
 ) -> Result<(), StoreError> {
     let turn_record_id = transaction
         .query_row(
             "SELECT id FROM turns
              WHERE run_id = ?1 AND message_hash = ?2
-               AND delivery_state = 'SENT'
-               AND thread_id = ?3 AND turn_id = ?4",
-            params![run_id, message_hash, thread_id, turn_id],
+               AND delivery_state = ?3
+               AND thread_id = ?4 AND turn_id = ?5",
+            params![run_id, message_hash, delivery_state, thread_id, turn_id],
             |row| row.get::<_, i64>(0),
         )
         .optional()?
@@ -573,10 +715,11 @@ fn archive_and_reset_turn(
     )?;
     let changed = transaction.execute(
         "UPDATE turns
-         SET delivery_state = 'PENDING', thread_id = NULL, turn_id = NULL
-         WHERE id = ?1 AND delivery_state = 'SENT'
-           AND thread_id = ?2 AND turn_id = ?3",
-        params![turn_record_id, thread_id, turn_id],
+         SET delivery_state = 'PENDING', thread_id = NULL, turn_id = NULL,
+             response_hash = NULL, accepted_at = NULL
+         WHERE id = ?1 AND delivery_state = ?2
+           AND thread_id = ?3 AND turn_id = ?4",
+        params![turn_record_id, delivery_state, thread_id, turn_id],
     )?;
     if changed != 1 {
         return Err(StoreError::TerminalTurnNotRetryable(format!(

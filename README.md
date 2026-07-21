@@ -78,8 +78,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.13-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.13-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.14-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.14-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -222,8 +222,13 @@ while atomically reacquiring the repository lock. Version 0.1.12 can similarly
 reactivate a pre-integration `BLOCKED / INVALID_RESPONSE` caused by malformed
 model output, but only for the exact completed read-only turn and after the same
 canonical-history checks. Post-integration and side-effectful invalid responses
-remain terminal. Do not use `resume` for any other `BLOCKED` run or for a
-`CANCELLED` run. Version 0.1.13 also places concrete, authoritative, direct-field
+remain terminal. Version 0.1.14 explicitly selects the same-host `local`
+execution environment for every pinned App Server turn; an empty environment
+selection disables command and file tools. It can resume an exact
+pre-integration `BLOCKED / EXECUTION_TOOL_UNAVAILABLE` response only after
+canonical history, the response hash, source refs, clean worktrees, and target
+branch absence jointly prove that no integration side effect occurred. Do not
+use `resume` for any other `BLOCKED` run or for a `CANCELLED` run. Version 0.1.13 also places concrete, authoritative, direct-field
 payload templates for both approval message types next to the requested output;
 the JSON Schema rejects approval identities supplied only in nested objects. A pending verification turn
 may leave test artifacts in its clone; recovery permits that clone to be dirty

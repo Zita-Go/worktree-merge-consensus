@@ -26,7 +26,7 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::policy::{ApprovalDecision, decide_command_approval, validate_test_command};
-use crate::store::{SqliteRunStore, StoreError};
+use crate::store::{AcceptedTurn, SqliteRunStore, StoreError};
 
 const MAX_DRIVER_STEPS: usize = 128;
 
@@ -39,6 +39,11 @@ struct RetryableCompletedTurn {
     message_hash: String,
     thread_id: String,
     turn_id: String,
+    observed_status: String,
+}
+
+struct RetryableAcceptedExecutionToolTurn {
+    accepted: AcceptedTurn,
     observed_status: String,
 }
 
@@ -505,10 +510,22 @@ where
         let retry_terminal_turn = state.reason_code.as_deref() == Some("COMMUNICATION_FAILURE");
         let retry_invalid_test_action = invalid_test_retry_action(&state)?;
         let retry_invalid_response_action = invalid_response_retry_action(&state)?;
+        let retry_execution_tool_action = execution_tool_unavailable_retry_action(&state)?;
         let retry_completed_response_action =
             retry_invalid_test_action.or(retry_invalid_response_action);
-        let effective_action = retry_completed_response_action.unwrap_or(state.next_action);
-        if effective_action == NextAction::RequestPrimaryIntegration {
+        let effective_action = retry_execution_tool_action
+            .or(retry_completed_response_action)
+            .unwrap_or(state.next_action);
+        if retry_execution_tool_action.is_some() {
+            let target = state.target_integration_branch.as_deref().ok_or_else(|| {
+                CoordinatorError::operational(
+                    "INVALID_STATE",
+                    "target integration branch is missing",
+                )
+            })?;
+            self.safety.verify_frozen(&state.facts)?;
+            self.safety.verify_branch_absent(&state.facts, target)?;
+        } else if effective_action == NextAction::RequestPrimaryIntegration {
             let target = state.target_integration_branch.as_deref().ok_or_else(|| {
                 CoordinatorError::operational(
                     "INVALID_STATE",
@@ -522,6 +539,27 @@ where
         }
         if retry_terminal_turn {
             self.prepare_terminal_turn_retry(&state).await?;
+        }
+        if let Some(action) = retry_execution_tool_action {
+            let retry = self
+                .inspect_completed_execution_tool_unavailable_retry(&state, action)
+                .await?;
+            let blocked_state = state.clone();
+            let restored_action = state.retry_blocked_integration_execution_tool_unavailable()?;
+            if restored_action != action {
+                return Err(CoordinatorError::operational(
+                    "INCOMPATIBLE_STATE",
+                    "restored execution-tool action does not match its accepted blocker",
+                ));
+            }
+            self.store
+                .reactivate_blocked_run_with_accepted_execution_tool_retry(
+                    &blocked_state,
+                    &state,
+                    &retry.accepted,
+                    &retry.observed_status,
+                )?;
+            return Ok(state);
         }
         if let Some(action) = retry_completed_response_action {
             let retry = self
@@ -745,6 +783,90 @@ where
             message_hash: pending.message_hash,
             thread_id: thread_id.to_owned(),
             turn_id: turn_id.to_owned(),
+            observed_status: status.to_owned(),
+        })
+    }
+
+    async fn inspect_completed_execution_tool_unavailable_retry(
+        &self,
+        state: &RunState,
+        action: NextAction,
+    ) -> Result<RetryableAcceptedExecutionToolTurn, CoordinatorError> {
+        if action != NextAction::RequestPrimaryIntegration
+            || state.integration_branch.is_some()
+            || state.integration_sha.is_some()
+            || state.current_integration_payload.is_some()
+        {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                "execution-tool recovery is limited to the first integration turn",
+            ));
+        }
+        let run_id = state.facts.run_id.to_string();
+        let accepted = self.store.latest_accepted_turn(&run_id)?.ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "execution-tool blocker has no accepted turn record",
+            )
+        })?;
+        if accepted.role != "PRIMARY"
+            || accepted.phase != "INTEGRATE"
+            || accepted.round != state.round
+            || accepted.thread_id != state.facts.primary_thread_id
+        {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "accepted execution-tool blocker does not match the frozen integration action",
+            ));
+        }
+
+        let detail = self.read_thread_with_retry(&accepted.thread_id).await?;
+        self.verify_thread_identity(state, Role::Primary, &detail)?;
+        let turn = find_turn(&detail, &accepted.turn_id).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "accepted execution-tool blocker is absent from canonical task history",
+            )
+        })?;
+        let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "accepted execution-tool blocker has no canonical status",
+            )
+        })?;
+        if status != "completed" {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                format!("execution-tool blocker has unexpected status {status}"),
+            ));
+        }
+        if !turn_contains_request_hash(turn, &accepted.message_hash) {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "accepted execution-tool blocker lacks its deterministic request marker",
+            ));
+        }
+        if let Some(blocker) = terminal_turn_retry_blocker(turn) {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                format!("accepted execution-tool blocker cannot be retried: {blocker}"),
+            ));
+        }
+
+        let raw_response = final_agent_json(turn)?;
+        if canonical_json_hash(&raw_response) != accepted.response_hash {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "accepted execution-tool response hash does not match canonical task history",
+            ));
+        }
+        let message = validate_message(raw_response).map_err(|error| {
+            CoordinatorError::operational("INVALID_RESPONSE", error.to_string())
+        })?;
+        validate_execution_tool_unavailable_blocker(state, &accepted, &message)?;
+
+        Ok(RetryableAcceptedExecutionToolTurn {
+            accepted,
             observed_status: status.to_owned(),
         })
     }
@@ -1873,6 +1995,115 @@ fn invalid_response_retry_action(state: &RunState) -> Result<Option<NextAction>,
         ));
     }
     Ok(Some(diagnostic.action))
+}
+
+fn execution_tool_unavailable_retry_action(
+    state: &RunState,
+) -> Result<Option<NextAction>, CoordinatorError> {
+    if state.reason_code.as_deref() != Some("EXECUTION_TOOL_UNAVAILABLE") {
+        return Ok(None);
+    }
+    if state.status != RunStatus::Blocked
+        || state.phase != Phase::Blocked
+        || state.next_action != NextAction::Stop
+        || state.last_error.is_some()
+    {
+        return Err(CoordinatorError::operational(
+            "INCOMPATIBLE_STATE",
+            "execution-tool blocker has inconsistent terminal metadata",
+        ));
+    }
+    if state.integration_branch.is_some()
+        || state.integration_sha.is_some()
+        || state.current_integration_payload.is_some()
+        || state.verification_worktree.is_some()
+        || !state.test_evidence.is_empty()
+    {
+        return Err(CoordinatorError::operational(
+            "MODEL_RESPONSE_RETRY_UNSAFE",
+            "execution-tool recovery cannot run after integration side effects exist",
+        ));
+    }
+    Ok(Some(NextAction::RequestPrimaryIntegration))
+}
+
+fn validate_execution_tool_unavailable_blocker(
+    state: &RunState,
+    accepted: &AcceptedTurn,
+    message: &ProtocolMessage,
+) -> Result<(), CoordinatorError> {
+    let envelope = &message.envelope;
+    if envelope.message_type != MessageType::Blocked
+        || envelope.phase != consensus_core::protocol::MessagePhase::Integrate
+        || envelope.run_id != state.facts.run_id
+        || envelope.round != state.round
+        || envelope.plan_revision != state.plan_revision
+        || envelope.primary_sha != state.facts.primary_sha
+        || envelope.reviewer_sha != state.facts.reviewer_sha
+        || envelope.integration_branch.is_some()
+        || envelope.integration_sha.is_some()
+        || envelope.reason_code.as_deref() != Some("EXECUTION_TOOL_UNAVAILABLE")
+    {
+        return Err(CoordinatorError::operational(
+            "MODEL_RESPONSE_RETRY_UNSAFE",
+            "accepted execution-tool blocker envelope does not match the frozen integration action",
+        ));
+    }
+    let payload = message.payload.as_object().ok_or_else(|| {
+        CoordinatorError::operational(
+            "MODEL_RESPONSE_RETRY_UNSAFE",
+            "accepted execution-tool blocker payload is not an object",
+        )
+    })?;
+    let exact_string =
+        |key: &str, expected: &str| payload.get(key).and_then(Value::as_str) == Some(expected);
+    let false_value = |key: &str| payload.get(key).and_then(Value::as_bool) == Some(false);
+    let empty_array = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+    };
+    let nonempty_array = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty())
+    };
+    let target = state
+        .target_integration_branch
+        .as_deref()
+        .unwrap_or_default();
+    let approved_plan_hash = state
+        .plan_approval_payload
+        .as_ref()
+        .and_then(|value| value.get("approved_plan_hash"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !exact_string("role", "PRIMARY")
+        || !exact_string("request_hash", &accepted.message_hash)
+        || payload
+            .get("approved_plan_revision")
+            .and_then(Value::as_u64)
+            != state.plan_revision.map(u64::from)
+        || !exact_string("approved_primary_sha", &state.facts.primary_sha)
+        || !exact_string("approved_reviewer_sha", &state.facts.reviewer_sha)
+        || !exact_string("approved_plan_hash", approved_plan_hash)
+        || !exact_string("target_integration_branch", target)
+        || !false_value("writes_performed")
+        || !false_value("branch_created")
+        || !false_value("merge_performed")
+        || !empty_array("files_modified")
+        || !empty_array("tests_run")
+        || !nonempty_array("evidence")
+        || !nonempty_array("safety_state")
+    {
+        return Err(CoordinatorError::operational(
+            "MODEL_RESPONSE_RETRY_UNSAFE",
+            "accepted execution-tool blocker does not prove a side-effect-free failed integration attempt",
+        ));
+    }
+    Ok(())
 }
 
 fn find_turn<'a>(detail: &'a ThreadDetail, turn_id: &str) -> Option<&'a Value> {

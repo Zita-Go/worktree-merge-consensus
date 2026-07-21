@@ -104,7 +104,10 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
         assert!(turn["params"].get("outputSchema").is_none());
         assert_eq!(turn["params"]["approvalPolicy"], "never");
         assert_eq!(turn["params"]["approvalsReviewer"], "user");
-        assert_eq!(turn["params"]["environments"], json!([]));
+        assert_eq!(
+            turn["params"]["environments"],
+            json!([{"environmentId": "local", "cwd": "/repo/reviewer"}])
+        );
         assert_eq!(turn["params"]["cwd"], "/repo/reviewer");
         assert_eq!(
             turn["params"]["runtimeWorkspaceRoots"],
@@ -124,7 +127,10 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
         let integration_turn = read_request(&mut lines).await;
         assert_eq!(integration_turn["method"], "turn/start");
         assert_eq!(integration_turn["params"]["approvalPolicy"], "untrusted");
-        assert_eq!(integration_turn["params"]["environments"], json!([]));
+        assert_eq!(
+            integration_turn["params"]["environments"],
+            json!([{"environmentId": "local", "cwd": "/repo/primary"}])
+        );
         assert_eq!(integration_turn["params"]["cwd"], "/repo/primary");
         assert_eq!(
             integration_turn["params"]["runtimeWorkspaceRoots"],
@@ -150,7 +156,13 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
         let verification_turn = read_request(&mut lines).await;
         assert_eq!(verification_turn["method"], "turn/start");
         assert_eq!(verification_turn["params"]["approvalPolicy"], "untrusted");
-        assert_eq!(verification_turn["params"]["environments"], json!([]));
+        assert_eq!(
+            verification_turn["params"]["environments"],
+            json!([{
+                "environmentId": "local",
+                "cwd": "/state/verification/run"
+            }])
+        );
         assert_eq!(
             verification_turn["params"]["cwd"],
             "/state/verification/run"

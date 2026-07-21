@@ -368,8 +368,13 @@ fn validate_turn_policy(
     if params.get("approvalsReviewer") != Some(&json!("user")) {
         return Err("turn/start approvalsReviewer is not user".to_owned());
     }
-    if params.get("environments") != Some(&json!([])) {
-        return Err("turn/start inherited sticky environments".to_owned());
+    if params.get("environments")
+        != Some(&json!([{
+            "environmentId": "local",
+            "cwd": expected_cwd
+        }]))
+    {
+        return Err("turn/start local execution environment is not pinned".to_owned());
     }
     let expected_approval = if integration || verification {
         "untrusted"

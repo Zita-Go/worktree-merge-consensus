@@ -465,6 +465,50 @@ impl RunState {
         Ok(self.next_action)
     }
 
+    pub fn retry_blocked_integration_execution_tool_unavailable(
+        &mut self,
+    ) -> Result<NextAction, StateError> {
+        if self.status != RunStatus::Blocked
+            || self.phase != Phase::Blocked
+            || self.next_action != NextAction::Stop
+            || self.reason_code.as_deref() != Some("EXECUTION_TOOL_UNAVAILABLE")
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "only a terminal EXECUTION_TOOL_UNAVAILABLE integration blocker can be retried",
+            ));
+        }
+        if !self.plan_approved
+            || self.current_plan_payload.is_none()
+            || self.plan_approval_payload.is_none()
+            || self.target_integration_branch.is_none()
+        {
+            return Err(state_error(
+                "INCOMPATIBLE_STATE",
+                "execution-tool recovery requires an approved frozen integration plan",
+            ));
+        }
+        if self.integration_branch.is_some()
+            || self.integration_sha.is_some()
+            || self.current_integration_payload.is_some()
+            || self.verification_worktree.is_some()
+            || !self.test_evidence.is_empty()
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "execution-tool recovery is limited to a side-effect-free pre-integration blocker",
+            ));
+        }
+
+        self.status = RunStatus::Running;
+        self.phase = Phase::Integrate;
+        self.next_action = NextAction::RequestPrimaryIntegration;
+        self.reason_code = None;
+        self.last_error = None;
+        self.validate_persisted()?;
+        Ok(self.next_action)
+    }
+
     pub fn cancel(&mut self) -> NextAction {
         self.status = RunStatus::Cancelled;
         self.phase = Phase::Cancelled;

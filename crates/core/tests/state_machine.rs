@@ -273,6 +273,52 @@ fn blocked_postintegration_invalid_response_is_not_retryable() {
 }
 
 #[test]
+fn side_effect_free_integration_tool_blocker_restores_the_integration_action() {
+    let mut state = fixture_plan_state();
+    let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
+    let approval = message(json!({
+        "message_type": "APPROVED_PLAN",
+        "phase": "PLAN_REVIEW",
+        "round": 1,
+        "plan_revision": 1,
+        "integration_branch": null,
+        "integration_sha": null,
+        "reason_code": null,
+        "payload": {
+            "approved_plan_revision": 1,
+            "approved_primary_sha": PRIMARY_SHA,
+            "approved_reviewer_sha": REVIEWER_SHA,
+            "approved_plan_hash": plan_hash,
+            "uncovered_items": []
+        }
+    }));
+    state.apply_message(approval).unwrap();
+    state.block("EXECUTION_TOOL_UNAVAILABLE");
+
+    let action = state
+        .retry_blocked_integration_execution_tool_unavailable()
+        .unwrap();
+
+    assert_eq!(action, NextAction::RequestPrimaryIntegration);
+    assert_eq!(state.status, RunStatus::Running);
+    assert_eq!(state.phase, Phase::Integrate);
+    assert_eq!(state.next_action, NextAction::RequestPrimaryIntegration);
+    assert!(state.reason_code.is_none());
+}
+
+#[test]
+fn execution_tool_blocker_is_not_retryable_after_integration_identity_exists() {
+    let mut state = fixture_result_state("cccccccccccccccccccccccccccccccccccccccc");
+    state.block("EXECUTION_TOOL_UNAVAILABLE");
+
+    let error = state
+        .retry_blocked_integration_execution_tool_unavailable()
+        .unwrap_err();
+
+    assert_eq!(error.code(), "NOT_RETRYABLE");
+}
+
+#[test]
 fn incompatible_adapter_has_a_distinct_terminal_status() {
     let mut state = RunState::new(facts());
 
@@ -366,6 +412,9 @@ fn user_contract_and_plan_tests_are_frozen_before_integration() {
 
 fn fixture_plan_state() -> RunState {
     let mut state = RunState::new(facts());
+    state
+        .configure_integration("consensus/test-run", vec!["cargo test".into()])
+        .unwrap();
     assert_eq!(
         state
             .apply_message(contract_ready(
