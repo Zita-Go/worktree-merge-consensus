@@ -504,7 +504,10 @@ where
         let mut state = self.required_run(run_id)?;
         let retry_terminal_turn = state.reason_code.as_deref() == Some("COMMUNICATION_FAILURE");
         let retry_invalid_test_action = invalid_test_retry_action(&state)?;
-        let effective_action = retry_invalid_test_action.unwrap_or(state.next_action);
+        let retry_invalid_response_action = invalid_response_retry_action(&state)?;
+        let retry_completed_response_action =
+            retry_invalid_test_action.or(retry_invalid_response_action);
+        let effective_action = retry_completed_response_action.unwrap_or(state.next_action);
         if effective_action == NextAction::RequestPrimaryIntegration {
             let target = state.target_integration_branch.as_deref().ok_or_else(|| {
                 CoordinatorError::operational(
@@ -520,17 +523,28 @@ where
         if retry_terminal_turn {
             self.prepare_terminal_turn_retry(&state).await?;
         }
-        if let Some(action) = retry_invalid_test_action {
+        if let Some(action) = retry_completed_response_action {
             let retry = self
-                .inspect_completed_read_only_turn_retry(&state, action)
+                .inspect_completed_read_only_model_response_retry(&state, action)
                 .await?;
             if state.status == RunStatus::Blocked {
                 let blocked_state = state.clone();
-                let restored_action = state.retry_blocked_invalid_test_command()?;
+                let restored_action = match state.reason_code.as_deref() {
+                    Some("INVALID_TEST_COMMAND") => state.retry_blocked_invalid_test_command()?,
+                    Some("INVALID_RESPONSE") => {
+                        state.retry_blocked_preintegration_invalid_response()?
+                    }
+                    _ => {
+                        return Err(CoordinatorError::operational(
+                            "INCOMPATIBLE_STATE",
+                            "completed model-response retry has an unsupported blocked reason",
+                        ));
+                    }
+                };
                 if restored_action != action {
                     return Err(CoordinatorError::operational(
                         "INCOMPATIBLE_STATE",
-                        "restored invalid-test action does not match its diagnostic",
+                        "restored model-response action does not match its diagnostic",
                     ));
                 }
                 self.store
@@ -641,19 +655,19 @@ where
         Ok(())
     }
 
-    async fn inspect_completed_read_only_turn_retry(
+    async fn inspect_completed_read_only_model_response_retry(
         &self,
         state: &RunState,
         action: NextAction,
     ) -> Result<RetryableCompletedTurn, CoordinatorError> {
-        if !is_test_declaration_action(action)
+        if preintegration_read_only_phase(action).is_none()
             || state.integration_branch.is_some()
             || state.integration_sha.is_some()
             || state.current_integration_payload.is_some()
         {
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
-                "invalid test-command retry is limited to pre-integration read-only turns",
+                "model-response retry is limited to pre-integration read-only turns",
             ));
         }
         let run_id = state.facts.run_id.to_string();
@@ -674,13 +688,13 @@ where
         let role = action_role(action).ok_or_else(|| {
             CoordinatorError::operational(
                 "INCOMPATIBLE_STATE",
-                "invalid test-command diagnostic has no task role",
+                "invalid model-response diagnostic has no task role",
             )
         })?;
-        let expected_phase = declaration_phase(action).ok_or_else(|| {
+        let expected_phase = preintegration_read_only_phase(action).ok_or_else(|| {
             CoordinatorError::operational(
                 "INCOMPATIBLE_STATE",
-                "invalid test-command diagnostic is not a declaration action",
+                "invalid model-response diagnostic is not a pre-integration read-only action",
             )
         })?;
         let expected_thread_id = role_thread_id(state, role);
@@ -691,7 +705,7 @@ where
         {
             return Err(CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
-                "invalid model response does not match the deterministic pending declaration",
+                "invalid model response does not match the deterministic pending action",
             ));
         }
 
@@ -724,7 +738,7 @@ where
         if let Some(blocker) = completed_read_only_turn_retry_blocker(turn) {
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
-                format!("completed declaration turn {turn_id} cannot be retried: {blocker}"),
+                format!("completed pre-integration turn {turn_id} cannot be retried: {blocker}"),
             ));
         }
         Ok(RetryableCompletedTurn {
@@ -1765,6 +1779,18 @@ fn declaration_phase(action: NextAction) -> Option<Phase> {
     }
 }
 
+fn preintegration_read_only_phase(action: NextAction) -> Option<Phase> {
+    match action {
+        NextAction::RequestPrimaryContract | NextAction::RequestReviewerContract => {
+            Some(Phase::Contract)
+        }
+        NextAction::RequestPrimaryPlan | NextAction::RequestReviewerPlanVerdict => {
+            Some(Phase::PlanReview)
+        }
+        _ => None,
+    }
+}
+
 fn invalid_test_retry_action(state: &RunState) -> Result<Option<NextAction>, CoordinatorError> {
     if state.reason_code.as_deref() != Some("INVALID_TEST_COMMAND") {
         return Ok(None);
@@ -1805,6 +1831,45 @@ fn invalid_test_retry_action(state: &RunState) -> Result<Option<NextAction>, Coo
         return Err(CoordinatorError::operational(
             "INCOMPATIBLE_STATE",
             "legacy blocked invalid test-command state has inconsistent terminal metadata",
+        ));
+    }
+    Ok(Some(diagnostic.action))
+}
+
+fn invalid_response_retry_action(state: &RunState) -> Result<Option<NextAction>, CoordinatorError> {
+    if state.reason_code.as_deref() != Some("INVALID_RESPONSE") {
+        return Ok(None);
+    }
+    if state.status != RunStatus::Blocked
+        || state.next_action != NextAction::Stop
+        || state.phase != Phase::Blocked
+    {
+        return Err(CoordinatorError::operational(
+            "INCOMPATIBLE_STATE",
+            "invalid-response reason is attached to inconsistent terminal metadata",
+        ));
+    }
+    let diagnostic = state.last_error.as_ref().ok_or_else(|| {
+        CoordinatorError::operational(
+            "INCOMPATIBLE_STATE",
+            "invalid-response state has no originating diagnostic",
+        )
+    })?;
+    if diagnostic.code != "INVALID_RESPONSE"
+        || preintegration_read_only_phase(diagnostic.action).is_none()
+    {
+        return Err(CoordinatorError::operational(
+            "MODEL_RESPONSE_RETRY_UNSAFE",
+            "invalid-response recovery is limited to a matching pre-integration read-only action",
+        ));
+    }
+    if state.integration_branch.is_some()
+        || state.integration_sha.is_some()
+        || state.current_integration_payload.is_some()
+    {
+        return Err(CoordinatorError::operational(
+            "MODEL_RESPONSE_RETRY_UNSAFE",
+            "invalid-response recovery cannot run after integration begins",
         ));
     }
     Ok(Some(diagnostic.action))

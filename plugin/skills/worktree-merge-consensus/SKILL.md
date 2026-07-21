@@ -61,6 +61,13 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   queries are retry-safe. Version 0.1.10 and later may also recover this reason
   from the legacy `BLOCKED` state created by 0.1.9; do not treat any other
   `BLOCKED` state as resumable.
+- For a pre-integration `BLOCKED / INVALID_RESPONSE`, report the exact validation
+  diagnostic. After explicit user authorization, call `consensus_resume` on the
+  same run. Version 0.1.12 reactivates only contract, primary-plan, or
+  reviewer-plan-verdict actions whose exact completed canonical turn passes the
+  same read-only history checks. Never resume a post-integration, side-effectful,
+  incomplete, external, or unknown invalid response, and never create a
+  replacement run implicitly.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
 Read [references/protocol.md](references/protocol.md) when explaining lifecycle states, acceptance evidence, or recovery behavior.

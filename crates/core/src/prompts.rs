@@ -91,6 +91,7 @@ Safety policy:
 - Do not call `worktreeMergeConsensus` or any `consensus_*` tool from this task turn. The coordinator already supplied the frozen identity and complete payload.
 - No integration branch may be created before exact APPROVED_PLAN authorization.
 - Approval is valid only for the exact run, source SHAs, plan revision, round, branch, and integration SHA in the envelope.
+- For APPROVED_PLAN, payload.approved_plan_revision must equal the authoritative metadata plan_revision exactly. If it does not, return a corrected APPROVED_PLAN or CHANGES_REQUIRED; never approve a different revision.
 - Contract and plan test commands must be direct non-Git commands. Never declare `git diff --check` or any other Git executable as a test. Shell control operators and dynamic shell or interpreter launchers are also forbidden.
 - Every response envelope, including BLOCKED, must copy phase, round, plan_revision, integration_branch, and integration_sha exactly from the authoritative turn metadata. The coordinator performs any transition to BLOCKED only after accepting the response.
 

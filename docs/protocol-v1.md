@@ -241,7 +241,12 @@ unknown items fail closed. The replacement prompt explicitly forbids Git test
 commands and recursive `consensus_*` calls. For the legacy terminal state
 emitted by version 0.1.9, version 0.1.10 and later restore the same run and
 reacquire its repository lock in the same SQLite transaction that archives the
-old attempt. Other `BLOCKED` states remain terminal.
+old attempt. Version 0.1.12 applies the same exact-turn, canonical-history, and
+atomic-lock safeguards to a pre-integration `BLOCKED / INVALID_RESPONSE` caused
+by malformed model output. Only contract, primary-plan, and reviewer-plan
+verdict actions are eligible; post-integration, side-effectful, incomplete,
+external, and unknown histories remain terminal. Other `BLOCKED` states remain
+terminal.
 
 ## Git postconditions
 

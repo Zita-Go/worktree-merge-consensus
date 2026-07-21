@@ -228,6 +228,51 @@ fn legacy_invalid_test_block_restores_only_its_read_only_declaration_action() {
 }
 
 #[test]
+fn blocked_preintegration_invalid_plan_verdict_restores_the_exact_action() {
+    let mut state = fixture_plan_state();
+    state.record_error(RunDiagnostic {
+        code: "INVALID_RESPONSE".into(),
+        detail: "approved plan revision does not match the envelope".into(),
+        operation: None,
+        action: NextAction::RequestReviewerPlanVerdict,
+        role: Some(Role::Reviewer),
+        thread_id: Some("reviewer-thread".into()),
+    });
+    state.block("INVALID_RESPONSE");
+
+    let action = state
+        .retry_blocked_preintegration_invalid_response()
+        .unwrap();
+
+    assert_eq!(action, NextAction::RequestReviewerPlanVerdict);
+    assert_eq!(state.status, RunStatus::Running);
+    assert_eq!(state.phase, Phase::PlanReview);
+    assert_eq!(state.next_action, NextAction::RequestReviewerPlanVerdict);
+    assert!(state.reason_code.is_none());
+    assert!(state.last_error.is_none());
+}
+
+#[test]
+fn blocked_postintegration_invalid_response_is_not_retryable() {
+    let mut state = fixture_result_state("cccccccccccccccccccccccccccccccccccccccc");
+    state.record_error(RunDiagnostic {
+        code: "INVALID_RESPONSE".into(),
+        detail: "invalid result verdict".into(),
+        operation: None,
+        action: NextAction::RequestReviewerResultVerdict,
+        role: Some(Role::Reviewer),
+        thread_id: Some("reviewer-thread".into()),
+    });
+    state.block("INVALID_RESPONSE");
+
+    let error = state
+        .retry_blocked_preintegration_invalid_response()
+        .unwrap_err();
+
+    assert_eq!(error.code(), "NOT_RETRYABLE");
+}
+
+#[test]
 fn incompatible_adapter_has_a_distinct_terminal_status() {
     let mut state = RunState::new(facts());
 

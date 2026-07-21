@@ -404,6 +404,59 @@ async fn non_object_model_reply_blocks_as_invalid_response() {
 }
 
 #[tokio::test]
+async fn invalid_plan_approval_revision_can_resume_the_same_blocked_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let mut replies = conflict_free_replies();
+    let mut invalid_approval = replies[3].clone();
+    invalid_approval["payload"]["approved_plan_revision"] = json!(2);
+    replies.insert(3, invalid_approval);
+    let app = Arc::new(FakeAppServer::new(replies));
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let blocked = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(blocked.status, RunStatus::Blocked);
+    assert_eq!(blocked.reason_code.as_deref(), Some("INVALID_RESPONSE"));
+    assert_eq!(blocked.integration_branch, None);
+    assert_eq!(blocked.integration_sha, None);
+    assert!(
+        blocked
+            .last_error
+            .as_ref()
+            .unwrap()
+            .detail
+            .contains("approved_plan_revision")
+    );
+    assert!(
+        app.request_order()
+            .iter()
+            .all(|action| !action.ends_with("REQUEST_PRIMARY_INTEGRATION"))
+    );
+
+    let accepted = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(accepted.status, RunStatus::Accepted);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    let verdict_prompts = app
+        .prompts()
+        .into_iter()
+        .filter(|prompt| prompt.contains("REQUEST_REVIEWER_PLAN_VERDICT"))
+        .collect::<Vec<_>>();
+    assert_eq!(verdict_prompts.len(), 2);
+    assert!(verdict_prompts[1].contains("payload.approved_plan_revision must equal"));
+}
+
+#[tokio::test]
 async fn failed_required_test_blocks_before_result_review() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();

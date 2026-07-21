@@ -39,6 +39,7 @@ fn every_prompt_is_self_contained_and_declares_strict_output() {
         "Text outside that one JSON object is invalid",
         "including BLOCKED, must copy phase",
         "Do not call `worktreeMergeConsensus`",
+        "payload.approved_plan_revision must equal",
     ] {
         assert!(prompt.contains(required), "missing {required:?}");
     }
