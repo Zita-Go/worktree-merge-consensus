@@ -27,7 +27,8 @@ use tokio::sync::Mutex;
 
 use crate::policy::{
     ApprovalDecision, command_approval_denial, decide_command_approval,
-    normalize_app_server_command, validate_test_command,
+    is_retry_safe_read_only_integration_command, normalize_app_server_command,
+    validate_test_command,
 };
 use crate::store::{AcceptedTurn, SqliteRunStore, StoreError};
 
@@ -891,7 +892,7 @@ where
                 "forbidden-operation turn lacks its deterministic request marker",
             ));
         }
-        if let Some(blocker) = terminal_turn_retry_blocker(turn) {
+        if let Some(blocker) = interrupted_forbidden_operation_retry_blocker(state, turn) {
             return Err(CoordinatorError::operational(
                 "TERMINAL_TURN_RETRY_UNSAFE",
                 format!("forbidden-operation turn cannot be retried: {blocker}"),
@@ -1941,6 +1942,60 @@ fn terminal_turn_retry_blocker(turn: &Value) -> Option<String> {
             return Some(format!(
                 "canonical item type {item_type} may have side effects"
             ));
+        }
+    }
+    None
+}
+
+fn interrupted_forbidden_operation_retry_blocker(state: &RunState, turn: &Value) -> Option<String> {
+    let Some(items) = turn.get("items").and_then(Value::as_array) else {
+        return Some("canonical items are unavailable".into());
+    };
+    if items.is_empty() {
+        return Some("canonical items are empty".into());
+    }
+    for item in items {
+        let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+            return Some("canonical item has no type".into());
+        };
+        match item_type {
+            "userMessage" | "agentMessage" | "reasoning" => {}
+            "commandExecution" => {
+                let status = item.get("status").and_then(Value::as_str);
+                let exit_code = item.get("exitCode");
+                let terminal_shape_is_valid = match status {
+                    Some("completed") => exit_code.and_then(Value::as_i64).is_some(),
+                    Some("failed" | "declined") => {
+                        exit_code.is_none_or(|value| value.is_null() || value.as_i64().is_some())
+                    }
+                    _ => false,
+                };
+                if !terminal_shape_is_valid {
+                    return Some(
+                        "read-only command execution is not in a canonical terminal state".into(),
+                    );
+                }
+                let Some(command) = item.get("command").and_then(Value::as_str) else {
+                    return Some("read-only command execution omits its canonical command".into());
+                };
+                let Some(cwd) = item.get("cwd").and_then(Value::as_str) else {
+                    return Some("read-only command execution omits its canonical cwd".into());
+                };
+                if item
+                    .get("source")
+                    .is_some_and(|source| source.as_str() != Some("agent"))
+                    || !is_retry_safe_read_only_integration_command(state, cwd, command)
+                {
+                    return Some(
+                        "command execution is not a frozen-worktree read-only Git query".into(),
+                    );
+                }
+            }
+            _ => {
+                return Some(format!(
+                    "canonical item type {item_type} may have side effects"
+                ));
+            }
         }
     }
     None

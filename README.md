@@ -78,8 +78,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.16-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.16-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.17-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.17-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -239,7 +239,13 @@ the target branch is absent. Version 0.1.16 recognizes the App Server's one
 canonical known-shell `-c` or `-lc` wrapper, removes that wrapper exactly once,
 and applies the unchanged Git or frozen-test allowlist to the inner command.
 Nested shell launchers, subcommand approval callbacks, non-local execution
-environments, and added permissions still fail closed. Version 0.1.13 also
+environments, and added permissions still fail closed. Version 0.1.17 adds only
+the exact `git show-ref --verify refs/heads/<target-integration-branch>`
+preflight to that integration allowlist. Its same-run forbidden-operation
+recovery may retain terminal read-only Git queries only when each canonical
+item used the frozen primary cwd and still passes that allowlist; `inProgress`,
+a write, wrong cwd, unknown item, or other side effect remains terminal.
+Version 0.1.13 also
 places concrete, authoritative, direct-field
 payload templates for both approval message types next to the requested output;
 the JSON Schema rejects approval identities supplied only in nested objects. A pending verification turn

@@ -90,6 +90,11 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   wrapper, removes it exactly once, and applies the existing command policy to
   the inner script. Nested shell launchers, non-null subcommand approval IDs,
   non-local environments, and added permissions remain forbidden.
+  Version 0.1.17 permits only the exact target-branch existence preflight
+  `git show-ref --verify refs/heads/<target-integration-branch>`. The same-run
+  recovery may retain canonically terminal read-only Git queries only when
+  every query used the frozen primary cwd and still passes the integration
+  allowlist. `inProgress`, writes, wrong cwd, and unknown items remain terminal.
   Network, added-permission, later-phase, mismatched, or side-effectful cases
   remain terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.

@@ -750,6 +750,147 @@ async fn interrupted_side_effect_free_forbidden_operation_retries_the_same_run()
 }
 
 #[tokio::test]
+async fn interrupted_forbidden_operation_with_terminal_read_only_git_retries_the_same_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let mut replies = conflict_free_replies();
+    replies.insert(4, replies[4].clone());
+    let app = Arc::new(FakeAppServer::deferred(
+        replies,
+        5,
+        DeferMode::ForbiddenCommand,
+    ));
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let blocked = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(blocked.status, RunStatus::Blocked);
+    app.append_turn_item(
+        "primary",
+        "turn-5",
+        json!({
+            "id": "read-only-command-turn-5",
+            "type": "commandExecution",
+            "command": "/bin/bash -lc 'git rev-parse HEAD'",
+            "cwd": "/repo/primary",
+            "status": "completed",
+            "exitCode": 0,
+            "source": "agent"
+        }),
+    );
+    app.append_turn_item(
+        "primary",
+        "turn-5",
+        json!({
+            "id": "declined-preflight-turn-5",
+            "type": "commandExecution",
+            "command": "/bin/bash -lc 'git show-ref --verify refs/heads/consensus/test-run'",
+            "cwd": "/repo/primary",
+            "status": "declined",
+            "exitCode": null,
+            "source": "agent"
+        }),
+    );
+    app.set_turn_status("primary", "turn-5", "interrupted");
+
+    let accepted = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(accepted.status, RunStatus::Accepted);
+}
+
+#[tokio::test]
+async fn interrupted_forbidden_operation_with_completed_git_write_is_not_retryable() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(FakeAppServer::deferred(
+        conflict_free_replies(),
+        5,
+        DeferMode::ForbiddenCommand,
+    ));
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let blocked = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(blocked.status, RunStatus::Blocked);
+    app.append_turn_item(
+        "primary",
+        "turn-5",
+        json!({
+            "id": "write-command-turn-5",
+            "type": "commandExecution",
+            "command": format!("git switch -c consensus/test-run {PRIMARY_SHA}"),
+            "cwd": "/repo/primary",
+            "status": "completed",
+            "exitCode": 0,
+            "source": "agent"
+        }),
+    );
+    app.set_turn_status("primary", "turn-5", "interrupted");
+
+    let error = coordinator.resume(RUN_ID).await.unwrap_err();
+
+    assert_eq!(error.code(), "TERMINAL_TURN_RETRY_UNSAFE");
+}
+
+#[tokio::test]
+async fn interrupted_forbidden_operation_with_in_progress_read_only_git_is_not_retryable() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(FakeAppServer::deferred(
+        conflict_free_replies(),
+        5,
+        DeferMode::ForbiddenCommand,
+    ));
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let blocked = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(blocked.status, RunStatus::Blocked);
+    app.append_turn_item(
+        "primary",
+        "turn-5",
+        json!({
+            "id": "in-progress-command-turn-5",
+            "type": "commandExecution",
+            "command": "git rev-parse HEAD",
+            "cwd": "/repo/primary",
+            "status": "inProgress",
+            "exitCode": null,
+            "source": "agent"
+        }),
+    );
+    app.set_turn_status("primary", "turn-5", "interrupted");
+
+    let error = coordinator.resume(RUN_ID).await.unwrap_err();
+
+    assert_eq!(error.code(), "TERMINAL_TURN_RETRY_UNSAFE");
+}
+
+#[tokio::test]
 async fn file_change_grant_root_is_cancelled_and_blocks_the_run() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();

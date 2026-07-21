@@ -105,6 +105,23 @@ pub(crate) fn normalize_app_server_command(command: &str) -> Option<String> {
     }
 }
 
+pub(crate) fn is_retry_safe_read_only_integration_command(
+    state: &RunState,
+    cwd: &str,
+    command: &str,
+) -> bool {
+    if state.facts.primary_worktree.to_str() != Some(cwd) {
+        return false;
+    }
+    let Some(command) = normalize_app_server_command(command) else {
+        return false;
+    };
+    let command = command.trim();
+    !command.is_empty()
+        && !contains_shell_control(command)
+        && is_allowed_read_only_git_command(state, command)
+}
+
 pub(crate) fn validate_test_command(command: &str) -> bool {
     let command = command.trim();
     !command.is_empty()
@@ -174,10 +191,10 @@ fn is_allowed_git_command(state: &RunState, command: &str) -> bool {
     let ["git", subcommand, rest @ ..] = tokens.as_slice() else {
         return false;
     };
+    if is_allowed_read_only_git_invocation(state, subcommand, rest) {
+        return true;
+    }
     match *subcommand {
-        "status" | "diff" | "show" | "log" | "rev-parse" | "merge-base" | "ls-files" => {
-            safe_read_only_git_arguments(rest)
-        }
         "switch" => {
             matches!(
                 rest,
@@ -199,6 +216,39 @@ fn is_allowed_git_command(state: &RunState, command: &str) -> bool {
         }
         _ => false,
     }
+}
+
+fn is_allowed_read_only_git_command(state: &RunState, command: &str) -> bool {
+    let Ok(tokens) = shell_words::split(command) else {
+        return false;
+    };
+    let tokens = tokens.iter().map(String::as_str).collect::<Vec<_>>();
+    let ["git", subcommand, rest @ ..] = tokens.as_slice() else {
+        return false;
+    };
+    is_allowed_read_only_git_invocation(state, subcommand, rest)
+}
+
+fn is_allowed_read_only_git_invocation(
+    state: &RunState,
+    subcommand: &str,
+    arguments: &[&str],
+) -> bool {
+    match subcommand {
+        "status" | "diff" | "show" | "log" | "rev-parse" | "merge-base" | "ls-files" => {
+            safe_read_only_git_arguments(arguments)
+        }
+        "show-ref" => safe_show_ref_arguments(state, arguments),
+        _ => false,
+    }
+}
+
+fn safe_show_ref_arguments(state: &RunState, arguments: &[&str]) -> bool {
+    let Some(branch) = state.target_integration_branch.as_deref() else {
+        return false;
+    };
+    let target_ref = format!("refs/heads/{branch}");
+    matches!(arguments, ["--verify", reference] if *reference == target_ref)
 }
 
 fn safe_read_only_git_arguments(arguments: &[&str]) -> bool {
@@ -232,8 +282,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ApprovalDecision, decide_command_approval, normalize_app_server_command,
-        validate_test_command,
+        ApprovalDecision, decide_command_approval, is_retry_safe_read_only_integration_command,
+        normalize_app_server_command, validate_test_command,
     };
 
     const PRIMARY_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -348,6 +398,50 @@ mod tests {
                 ApprovalDecision::Cancel,
                 "{command} must fail closed"
             );
+        }
+    }
+
+    #[test]
+    fn show_ref_is_limited_to_verifying_the_frozen_target_branch() {
+        let state = integration_state();
+        let target = "refs/heads/consensus/test-run";
+        let wrapped = format!("/bin/bash -lc 'git show-ref --verify {target}'");
+
+        assert_eq!(
+            decide_command_approval(
+                &state,
+                &json!({
+                    "approvalId": null,
+                    "environmentId": "local",
+                    "cwd": "/repo/primary",
+                    "command": wrapped,
+                    "availableDecisions": ["accept"]
+                })
+            ),
+            ApprovalDecision::Accept
+        );
+        assert!(is_retry_safe_read_only_integration_command(
+            &state,
+            "/repo/primary",
+            &format!("/bin/bash -lc 'git show-ref --verify {target}'")
+        ));
+        assert!(!is_retry_safe_read_only_integration_command(
+            &state,
+            "/repo/reviewer",
+            &format!("/bin/bash -lc 'git show-ref --verify {target}'")
+        ));
+        for command in [
+            "git show-ref --verify refs/heads/primary",
+            "git show-ref --verify --quiet refs/heads/consensus/test-run",
+            "git show-ref --exclude-existing=refs/heads/consensus/test-run",
+            "/bin/bash -lc \"bash -lc 'git show-ref --verify refs/heads/consensus/test-run'\"",
+            "git switch -c consensus/test-run aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(!is_retry_safe_read_only_integration_command(
+                &state,
+                "/repo/primary",
+                command
+            ));
         }
     }
 

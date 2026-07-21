@@ -268,7 +268,14 @@ pending turn must be canonically `failed` or `interrupted`, contain no
 side-effect-capable item, have no integration identity or test evidence, and
 pass strict frozen-source and absent-target-branch checks before the run lock
 is reacquired and the attempt is archived. All other forbidden-operation
-states remain terminal. Version 0.1.13 renders concrete direct-field payload templates for
+states remain terminal. Version 0.1.16 removes exactly one App Server-generated
+known-shell `-c` or `-lc` wrapper before applying the inner-command allowlist.
+Version 0.1.17 adds only the exact target-ref
+`git show-ref --verify refs/heads/<target-integration-branch>` preflight. During
+the same-run forbidden-operation recovery, terminal command items are allowed
+only when they are frozen-primary-cwd, policy-valid read-only Git queries;
+`inProgress`, writes, wrong cwd, nested shells, and unknown items remain
+terminal. Version 0.1.13 renders concrete direct-field payload templates for
 `APPROVED_PLAN` and `APPROVED_RESULT`; the checked-in JSON Schema requires those
 approval identity fields at payload top level rather than accepting a nested
 identity object.
