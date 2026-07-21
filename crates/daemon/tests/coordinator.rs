@@ -799,6 +799,19 @@ async fn interrupted_forbidden_operation_with_terminal_read_only_git_retries_the
             "source": "agent"
         }),
     );
+    app.append_turn_item(
+        "primary",
+        "turn-5",
+        json!({
+            "id": "declined-branch-preflight-turn-5",
+            "type": "commandExecution",
+            "command": "/bin/bash -lc 'git branch --list consensus/test-run'",
+            "cwd": "/repo/primary",
+            "status": "declined",
+            "exitCode": null,
+            "source": "agent"
+        }),
+    );
     app.set_turn_status("primary", "turn-5", "interrupted");
 
     let accepted = coordinator.resume(RUN_ID).await.unwrap();

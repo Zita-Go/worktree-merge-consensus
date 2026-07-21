@@ -271,7 +271,10 @@ is reacquired and the attempt is archived. All other forbidden-operation
 states remain terminal. Version 0.1.16 removes exactly one App Server-generated
 known-shell `-c` or `-lc` wrapper before applying the inner-command allowlist.
 Version 0.1.17 adds only the exact target-ref
-`git show-ref --verify refs/heads/<target-integration-branch>` preflight. During
+`git show-ref --verify refs/heads/<target-integration-branch>` preflight.
+Version 0.1.19 additionally permits only the equivalent exact
+`git branch --list <target-integration-branch>` query; every other `git branch`
+form remains forbidden. During
 the same-run forbidden-operation recovery, terminal command items are allowed
 only when they are frozen-primary-cwd, policy-valid read-only Git queries;
 `inProgress`, writes, wrong cwd, nested shells, and unknown items remain

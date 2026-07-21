@@ -94,7 +94,7 @@ async fn cli_managed_app_server_identity_is_accepted_end_to_end() {
         temp.path(),
         &log,
         "0.144.6",
-        "worktree-merge-consensus/0.144.6 (Debian 12.0.0; x86_64) unknown (worktree-merge-consensus; 0.1.18)",
+        "worktree-merge-consensus/0.144.6 (Debian 12.0.0; x86_64) unknown (worktree-merge-consensus; 0.1.19)",
     );
 
     CodexAppServer::connect(ConnectOptions {

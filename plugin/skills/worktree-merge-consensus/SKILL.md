@@ -91,7 +91,10 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   the inner script. Nested shell launchers, non-null subcommand approval IDs,
   non-local environments, and added permissions remain forbidden.
   Version 0.1.17 permits only the exact target-branch existence preflight
-  `git show-ref --verify refs/heads/<target-integration-branch>`. The same-run
+  `git show-ref --verify refs/heads/<target-integration-branch>`. Version 0.1.19
+  also permits only the equivalent exact
+  `git branch --list <target-integration-branch>` query; every other `git branch`
+  form remains forbidden. The same-run
   recovery may retain canonically terminal read-only Git queries only when
   every query used the frozen primary cwd and still passes the integration
   allowlist. `inProgress`, writes, wrong cwd, and unknown items remain terminal.

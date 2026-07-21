@@ -238,9 +238,17 @@ fn is_allowed_read_only_git_invocation(
         "status" | "diff" | "show" | "log" | "rev-parse" | "merge-base" | "ls-files" => {
             safe_read_only_git_arguments(arguments)
         }
+        "branch" => safe_branch_list_arguments(state, arguments),
         "show-ref" => safe_show_ref_arguments(state, arguments),
         _ => false,
     }
+}
+
+fn safe_branch_list_arguments(state: &RunState, arguments: &[&str]) -> bool {
+    let Some(branch) = state.target_integration_branch.as_deref() else {
+        return false;
+    };
+    matches!(arguments, ["--list", candidate] if *candidate == branch)
 }
 
 fn safe_show_ref_arguments(state: &RunState, arguments: &[&str]) -> bool {
@@ -402,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn show_ref_is_limited_to_verifying_the_frozen_target_branch() {
+    fn target_branch_queries_are_limited_to_the_frozen_target_branch() {
         let state = integration_state();
         let target = "refs/heads/consensus/test-run";
         let wrapped = format!("/bin/bash -lc 'git show-ref --verify {target}'");
@@ -425,6 +433,24 @@ mod tests {
             "/repo/primary",
             &format!("/bin/bash -lc 'git show-ref --verify {target}'")
         ));
+        assert_eq!(
+            decide_command_approval(
+                &state,
+                &json!({
+                    "approvalId": null,
+                    "environmentId": "local",
+                    "cwd": "/repo/primary",
+                    "command": "/bin/bash -lc 'git branch --list consensus/test-run'",
+                    "availableDecisions": ["accept"]
+                })
+            ),
+            ApprovalDecision::Accept
+        );
+        assert!(is_retry_safe_read_only_integration_command(
+            &state,
+            "/repo/primary",
+            "/bin/bash -lc 'git branch --list consensus/test-run'"
+        ));
         assert!(!is_retry_safe_read_only_integration_command(
             &state,
             "/repo/reviewer",
@@ -434,6 +460,13 @@ mod tests {
             "git show-ref --verify refs/heads/primary",
             "git show-ref --verify --quiet refs/heads/consensus/test-run",
             "git show-ref --exclude-existing=refs/heads/consensus/test-run",
+            "git branch --list primary",
+            "git branch --list",
+            "git branch --list consensus/test-run primary",
+            "git branch -a --list consensus/test-run",
+            "git branch --contains consensus/test-run",
+            "git branch --list consensus/*",
+            "git branch consensus/test-run aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "/bin/bash -lc \"bash -lc 'git show-ref --verify refs/heads/consensus/test-run'\"",
             "git switch -c consensus/test-run aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ] {
