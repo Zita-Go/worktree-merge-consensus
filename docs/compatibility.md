@@ -96,6 +96,11 @@ is complete and allowlisted, no successful patch is recorded, and the clean
 authorized merge SHA is identical before and after interruption. If any agent
 message exists, it must still validate as the exact 0.1.25 blocker. Unknown
 items, possible writes, target movement, and source drift remain terminal.
+Version 0.1.28 keeps every machine-checkable blocker field mandatory but no
+longer requires the redundant `payload.role` label or free-form
+`blocking_condition` prose. The pending send already binds the exact Primary
+task, and a paused Run rejects `consensus_apply_patch` before Git access. A
+missing request, plan, source, target, or result-SHA identity still fails closed.
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
 fixed task ID. `thread/read` can return persisted history for a `notLoaded`
 task, but it does not load that task for model execution; starting a turn after

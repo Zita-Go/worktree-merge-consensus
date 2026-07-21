@@ -166,6 +166,11 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   allowlisted, no successful patch is recorded, and the clean authorized merge
   SHA remains identical across interruption. Unknown items, ambiguous writes,
   target movement, or source drift remain terminal.
+  Version 0.1.28 keeps the blocker's direct request, plan, source, target, and
+  merge-SHA identity mandatory while treating `payload.role` and free-form
+  `blocking_condition` as redundant diagnostics. The persisted pending send
+  already binds the Primary task, and the paused Run rejects the patch before
+  Git access. Missing machine identity still fails closed.
   Network, added-permission, later-phase, mismatched, or side-effectful cases
   remain terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.

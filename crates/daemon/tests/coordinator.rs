@@ -1602,6 +1602,93 @@ async fn completed_patch_rejected_while_paused_retries_the_same_run() {
 }
 
 #[tokio::test]
+async fn completed_patch_rejection_without_redundant_text_retries_the_same_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let normal = conflict_free_replies();
+    let mut replies = normal[..5].to_vec();
+    replies.push(normal[4].clone());
+    replies.push(normal[5].clone());
+    let app = Arc::new(FakeAppServer::deferred(
+        replies,
+        5,
+        DeferMode::PatchApproval,
+    ));
+    let safety = Arc::new(InProgressRecoverySafety::default());
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::clone(&safety),
+        CoordinatorOptions {
+            wait_timeout: Duration::from_millis(15),
+            poll_interval: Duration::from_millis(1),
+            communication_attempts: 1,
+        },
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let paused = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+    safety
+        .integration_branch_active
+        .store(true, Ordering::SeqCst);
+    app.reject_deferred_patch_not_authorized_without_redundant_text();
+
+    let result = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Accepted);
+    assert!(app.interrupts().is_empty());
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    assert_eq!(app.request_count(), 8);
+}
+
+#[tokio::test]
+async fn completed_patch_rejection_without_critical_identity_is_not_retryable() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(FakeAppServer::deferred(
+        conflict_free_replies(),
+        5,
+        DeferMode::PatchApproval,
+    ));
+    let safety = Arc::new(InProgressRecoverySafety::default());
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::clone(&safety),
+        CoordinatorOptions {
+            wait_timeout: Duration::from_millis(15),
+            poll_interval: Duration::from_millis(1),
+            communication_attempts: 1,
+        },
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let paused = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+    safety
+        .integration_branch_active
+        .store(true, Ordering::SeqCst);
+    app.reject_deferred_patch_not_authorized_without_plan_hash();
+
+    let error = coordinator.resume(RUN_ID).await.unwrap_err();
+
+    assert_eq!(error.code(), "TERMINAL_TURN_RETRY_UNSAFE");
+    assert_eq!(app.request_count(), 5);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+    assert_eq!(
+        store.load_run(RUN_ID).unwrap().unwrap().status,
+        RunStatus::PausedUserAction
+    );
+}
+
+#[tokio::test]
 async fn in_progress_patch_rejected_while_paused_is_interrupted_and_retried() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -2524,6 +2611,25 @@ impl FakeAppServer {
 
     fn reject_deferred_patch_not_authorized(&self) {
         let (turn_id, reply) = self.patch_not_authorized_reply();
+        self.deferred_replies.lock().unwrap().insert(turn_id, reply);
+        self.complete_deferred_turns();
+    }
+
+    fn reject_deferred_patch_not_authorized_without_redundant_text(&self) {
+        let (turn_id, mut reply) = self.patch_not_authorized_reply();
+        let payload = reply["payload"].as_object_mut().unwrap();
+        payload.remove("role");
+        payload.remove("blocking_condition");
+        self.deferred_replies.lock().unwrap().insert(turn_id, reply);
+        self.complete_deferred_turns();
+    }
+
+    fn reject_deferred_patch_not_authorized_without_plan_hash(&self) {
+        let (turn_id, mut reply) = self.patch_not_authorized_reply();
+        reply["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("approved_plan_hash");
         self.deferred_replies.lock().unwrap().insert(turn_id, reply);
         self.complete_deferred_turns();
     }

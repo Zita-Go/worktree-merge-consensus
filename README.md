@@ -96,6 +96,14 @@ allowlisted, SQLite records no successful patch, and the authorized integration
 branch is clean at the same verified merge SHA before and after interruption.
 Unknown items, ambiguous writes, a changed target, or source drift fail closed.
 
+Version 0.1.28 treats `payload.role` and free-form `blocking_condition` as
+non-authoritative diagnostics in this recovery. A completed
+`PATCH_NOT_AUTHORIZED` blocker may omit them, because the persisted pending send
+already binds the Primary task and the paused daemon state determines why the
+single patch call was rejected before Git access. All machine identity fields,
+the reported and authoritative merge SHA, canonical tool history, SQLite
+no-write proof, and frozen refs remain mandatory.
+
 Read [the v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
 for the exact boundaries.
@@ -123,8 +131,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.27-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.27-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.28-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.28-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -358,6 +366,12 @@ authorized merge SHA, interrupts only that turn, and requires the same SHA and
 clean repository state afterward before atomically retrying the request.
 Any assistant message that is present must still be the exact validated
 `PATCH_NOT_AUTHORIZED` blocker.
+Version 0.1.28 clarifies that the exact validated blocker is defined by its
+protocol envelope and direct machine identity fields. The redundant
+`payload.role` label and free-form `blocking_condition` prose may be absent;
+the pending-send role binding and paused daemon authorization check are the
+authoritative evidence for those facts. Missing plan/source/request/branch/SHA
+identity remains terminal.
 Version 0.1.13 also
 places concrete, authoritative, direct-field
 payload templates for both approval message types next to the requested output;

@@ -83,6 +83,10 @@ the evidence below.
    turn. Repeat once more with the failed item canonical but no final assistant
    JSON; confirm the clean integration SHA is identical before and after the
    single-turn interruption and the same Run retries on that existing merge.
+   Repeat with a machine-valid `PATCH_NOT_AUTHORIZED` blocker that omits only
+   `payload.role` and free-form `blocking_condition`; confirm it is retryable,
+   while omitting any request, plan, source, target, or result-SHA identity
+   still fails closed.
    Keep one disposable participant turn active for longer than five
    minutes while canonical turn items continue to change, and confirm the Run
    does not pause; unchanged state must still hit the bounded idle timeout.

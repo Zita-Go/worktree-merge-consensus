@@ -3330,8 +3330,7 @@ fn validate_patch_not_authorized_blocker(
         .and_then(|value| value.get("approved_plan_hash"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !exact_string("role", "PRIMARY")
-        || !exact_string("request_hash", request_hash)
+    if !exact_string("request_hash", request_hash)
         || payload
             .get("approved_plan_revision")
             .and_then(Value::as_u64)
@@ -3340,17 +3339,10 @@ fn validate_patch_not_authorized_blocker(
         || !exact_string("approved_reviewer_sha", &state.facts.reviewer_sha)
         || !exact_string("approved_plan_hash", approved_plan_hash)
         || !exact_string("resulting_integration_branch", target)
-        || !payload
-            .get("blocking_condition")
-            .and_then(Value::as_str)
-            .is_some_and(|condition| {
-                condition.contains("PATCH_NOT_AUTHORIZED")
-                    && condition.contains("active primary integration turn")
-            })
     {
         return Err(CoordinatorError::operational(
             "TERMINAL_TURN_RETRY_UNSAFE",
-            "controlled-patch rejection does not carry the exact approved identity and authorization evidence",
+            "controlled-patch rejection does not carry the exact machine-checkable approved identity",
         ));
     }
     let reported_sha = payload

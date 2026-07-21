@@ -337,6 +337,12 @@ daemon snapshots the clean authorized merge SHA, interrupts only that stale
 turn, and requires the same clean SHA afterward before atomically archiving and
 retrying it. Any unknown item, ambiguous execution, target movement, or source
 drift fails closed.
+Version 0.1.28 defines the blocker's authority boundary precisely. Its protocol
+envelope plus direct request hash, approved plan revision and hash, frozen source
+SHAs, target branch, and resulting merge SHA are mandatory. `payload.role` is
+redundant with the persisted pending-send task binding, and
+`blocking_condition` is free-form prose; either may be absent. This does not
+relax canonical item checks, SQLite no-write proof, or repository revalidation.
 Version 0.1.13 renders concrete direct-field payload templates for
 `APPROVED_PLAN` and `APPROVED_RESULT`; the checked-in JSON Schema requires those
 approval identity fields at payload top level rather than accepting a nested
