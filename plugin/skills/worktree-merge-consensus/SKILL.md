@@ -25,6 +25,12 @@ Codex starts the bundled MCP server with `codex-consensus mcp-server`. Do not st
 - `consensus_resume` → `codex-consensus resume <run-id>`
 - `consensus_cancel` → `codex-consensus cancel <run-id>`
 
+The eighth tool, `consensus_apply_patch`, intentionally has no public CLI
+equivalent. It is not an operator or launcher tool. Only a coordinator-authored
+Primary integration prompt may call it with the exact active run ID and request
+hash; its daemon-side policy is described under recovery below. Never call it
+manually from this launcher skill.
+
 Use those CLI commands only for diagnostics or when the user explicitly requests the CLI surface. If no `consensus_*` MCP tools are exposed, run `codex mcp list --json`, `command -v codex-consensus`, and `codex-consensus doctor` when shell access is available. Report whether `worktreeMergeConsensus` is absent, disabled, or unable to start, then stop. A successful CLI doctor does not prove that the plugin MCP tools were loaded. Do not search for a `consensus_doctor` binary or substitute ordinary task/thread tools.
 
 ## Launch
@@ -110,6 +116,18 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   Version 0.1.22 additionally permits only `rg --files -g AGENTS.md` in the
   frozen primary cwd for repository-instruction discovery. Other `rg` forms
   remain denied; subsequent tracked-file reads use the read-only Git allowlist.
+  Version 0.1.23 adds a bwrap-independent controlled patch path for the exact
+  Primary integration request. `consensus_apply_patch` accepts one text-only
+  patch of at most 512 KiB only when the run, request hash, pending Primary
+  turn, clean authorized target branch, both frozen ancestors, and unchanged
+  source refs all match. Git validates the patch without unsafe paths before
+  applying it, and SQLite permits only one successful patch for that request.
+  A `COMMUNICATION_FAILURE` pause whose exact completed Primary response reports
+  `FILE_CHANGE_TOOL_UNAVAILABLE` may retry the same Run only when canonical
+  history, approved identity, bwrap permission evidence, reported merge SHA,
+  clean target branch, both source ancestors, and frozen source refs all match.
+  The existing merge is retained; no replacement Run, branch recreation, or
+  second merge is allowed.
   Network, added-permission, later-phase, mismatched, or side-effectful cases
   remain terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.

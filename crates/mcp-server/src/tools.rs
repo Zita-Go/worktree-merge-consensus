@@ -1,13 +1,14 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-pub const MCP_TOOL_NAMES: [&str; 7] = [
+pub const MCP_TOOL_NAMES: [&str; 8] = [
     "consensus_doctor",
     "consensus_list_threads",
     "consensus_list_worktrees",
     "consensus_start",
     "consensus_status",
     "consensus_resume",
+    "consensus_apply_patch",
     "consensus_cancel",
 ];
 
@@ -104,6 +105,25 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             MCP_TOOL_NAMES[6],
+            "Apply one text-only patch during the exact active primary integration turn.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string", "minLength": 1},
+                    "request_hash": {"type": "string", "minLength": 1},
+                    "patch": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 524288,
+                        "description": "One raw unified text patch for the authorized clean integration branch."
+                    }
+                },
+                "required": ["run_id", "request_hash", "patch"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            MCP_TOOL_NAMES[7],
             "Cancel a consensus run without reverting or deleting Git state.",
             run_id_schema(),
         ),
@@ -133,6 +153,11 @@ pub(crate) fn validate_arguments(name: &str, arguments: Value) -> Result<Value, 
         }
         "consensus_resume" | "consensus_cancel" => {
             let parsed: RunIdArguments = parse(arguments)?;
+            parsed.validate()?;
+            serde_json::to_value(parsed).map_err(|error| error.to_string())
+        }
+        "consensus_apply_patch" => {
+            let parsed: ApplyPatchArguments = parse(arguments)?;
             parsed.validate()?;
             serde_json::to_value(parsed).map_err(|error| error.to_string())
         }
@@ -226,6 +251,26 @@ impl StatusArguments {
 #[serde(deny_unknown_fields)]
 struct RunIdArguments {
     run_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApplyPatchArguments {
+    run_id: String,
+    request_hash: String,
+    patch: String,
+}
+
+impl ApplyPatchArguments {
+    fn validate(&self) -> Result<(), String> {
+        nonempty("run_id", &self.run_id)?;
+        nonempty("request_hash", &self.request_hash)?;
+        nonempty("patch", &self.patch)?;
+        if self.patch.len() > 512 * 1024 {
+            return Err("patch exceeds the 524288 byte limit".into());
+        }
+        Ok(())
+    }
 }
 
 impl RunIdArguments {

@@ -28,6 +28,12 @@ pub trait RunController: Send + Sync {
     ) -> Result<RunState, CoordinatorError>;
     async fn drive_run(&self, run_id: &str) -> Result<RunState, CoordinatorError>;
     async fn prepare_resume_run(&self, run_id: &str) -> Result<RunState, CoordinatorError>;
+    async fn apply_patch(
+        &self,
+        run_id: &str,
+        request_hash: &str,
+        patch: &str,
+    ) -> Result<crate::coordinator::IntegrationPatchResult, CoordinatorError>;
     async fn cancel_run(&self, run_id: &str) -> Result<RunState, CoordinatorError>;
 }
 
@@ -55,6 +61,15 @@ where
 
     async fn prepare_resume_run(&self, run_id: &str) -> Result<RunState, CoordinatorError> {
         Coordinator::prepare_resume(self, run_id).await
+    }
+
+    async fn apply_patch(
+        &self,
+        run_id: &str,
+        request_hash: &str,
+        patch: &str,
+    ) -> Result<crate::coordinator::IntegrationPatchResult, CoordinatorError> {
+        Coordinator::apply_patch(self, run_id, request_hash, patch).await
     }
 
     async fn cancel_run(&self, run_id: &str) -> Result<RunState, CoordinatorError> {
@@ -307,6 +322,22 @@ async fn handle_request(
                 }
             }
         }
+        DaemonRequest::ApplyPatch {
+            run_id,
+            request_hash,
+            patch,
+        } => match controller {
+            Some(controller) => {
+                match controller.apply_patch(&run_id, &request_hash, &patch).await {
+                    Ok(result) => serialize_success(&result),
+                    Err(error) => coordinator_failure(error),
+                }
+            }
+            None => DaemonResponse::failure(
+                "DAEMON_UNAVAILABLE",
+                "daemon has no repository safety controller",
+            ),
+        },
         DaemonRequest::Cancel { run_id } => {
             if let Some(controller) = controller {
                 match controller.cancel_run(&run_id).await {

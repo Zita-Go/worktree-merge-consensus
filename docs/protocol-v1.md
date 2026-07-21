@@ -288,7 +288,17 @@ only when its object has exactly a nonempty `id` and the fixed `type`; any
 additional field remains terminal. Version 0.1.22 allows exactly
 `rg --files -g AGENTS.md` in the frozen primary cwd for repository-instruction
 discovery, keeps every other `rg` form denied, and directs all other tracked-file
-inspection through the existing read-only Git command policy. Version 0.1.13 renders concrete direct-field payload templates for
+inspection through the existing read-only Git command policy. Version 0.1.23
+adds `consensus_apply_patch`, a participant-only capability bound to the exact
+active Primary Run and request hash. It accepts one successful text patch of at
+most 512 KiB only on the clean authorized branch after both frozen commits are
+ancestors, uses Git preflight without unsafe paths, revalidates source refs, and
+records single use in SQLite. An exact completed
+`FILE_CHANGE_TOOL_UNAVAILABLE` turn after a communication pause may be archived
+and replaced only when its approved identity, bwrap permission evidence,
+reported merge SHA, clean target branch, both source ancestors, and frozen refs
+all match. The replacement reuses the existing merge and cannot create a new
+Run or repeat branch creation and merge. Version 0.1.13 renders concrete direct-field payload templates for
 `APPROVED_PLAN` and `APPROVED_RESULT`; the checked-in JSON Schema requires those
 approval identity fields at payload top level rather than accepting a nested
 identity object.

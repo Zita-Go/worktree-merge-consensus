@@ -51,6 +51,15 @@ chaining, wrong-directory commands, and permission escalation.
 Conflict scanning uses Git's actual primary-to-result diff, including large
 text files, rather than the task's file list.
 
+Version 0.1.23 also supports Linux containers whose security policy prevents
+Codex's bwrap-backed file-change helper from starting. The Primary participant
+may use `consensus_apply_patch` only for the exact active Run and request hash,
+after the authorized branch is clean and contains both frozen commits. The
+daemon accepts one successful text-only patch of at most 512 KiB, preflights it
+with Git without unsafe paths, revalidates both source refs, and records the
+single-use result in SQLite. This capability has no public CLI equivalent and
+cannot select a repository, create a branch, start a Run, or publish anything.
+
 Read [the v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
 for the exact boundaries.
@@ -78,8 +87,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.22-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.22-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.23-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.23-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -111,9 +120,11 @@ codex plugin add worktree-merge-consensus@worktree-merge-consensus
 If you downloaded the plugin archive, extract it and register the directory
 that contains `.agents/plugins/marketplace.json`. Restart Codex after plugin
 installation or update, then restart Codex or open a new task. In a Codex task,
-invoke `$worktree-merge-consensus`; the Skill uses seven MCP tools, including
-`consensus_list_worktrees`, only to launch and control the persistent
-coordinator. It does not relay review turns through a third agent.
+invoke `$worktree-merge-consensus`; the plugin exposes eight MCP tools. Seven,
+including `consensus_list_worktrees`, launch and control the persistent
+coordinator. The eighth, `consensus_apply_patch`, is a participant-only,
+request-bound write capability described below. It does not relay review turns
+through a third agent.
 
 Names such as `consensus_doctor` are MCP tool names, not shell executables.
 Codex starts the plugin server as `codex-consensus mcp-server`; the equivalent
@@ -259,6 +270,14 @@ Version 0.1.22 permits exactly `rg --files -g AGENTS.md` in the frozen primary
 cwd for required repository-instruction discovery. Every other `rg` form stays
 denied, and the participant prompt requires subsequent tracked-file inspection
 through the existing read-only Git query allowlist.
+Version 0.1.23 adds the request-bound `consensus_apply_patch` path described
+above. It can also recover the same Run after a communication timeout followed
+by an exact completed `BLOCKED / FILE_CHANGE_TOOL_UNAVAILABLE` response, but
+only when canonical history, approved plan identity, bwrap permission evidence,
+reported merge SHA, the clean authorized target branch, both source ancestors,
+and unchanged frozen refs all agree. Recovery retains the existing merge and
+archives the failed participant turn; it does not recreate the branch, merge a
+second time, or create a replacement Run.
 Version 0.1.13 also
 places concrete, authoritative, direct-field
 payload templates for both approval message types next to the requested output;

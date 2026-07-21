@@ -64,6 +64,14 @@ pub struct StartRequest {
     pub test_commands: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrationPatchResult {
+    pub run_id: String,
+    pub integration_branch: String,
+    pub base_sha: String,
+    pub changed_files: Vec<PathBuf>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoordinatorOptions {
     pub wait_timeout: Duration,
@@ -122,6 +130,29 @@ pub trait RepositorySafety: Send + Sync {
         _target_branch: &str,
     ) -> Result<(), SafetyError> {
         self.verify_frozen(facts)
+    }
+
+    fn verify_integration_patch_ready(
+        &self,
+        _facts: &RunFacts,
+        _target_branch: &str,
+    ) -> Result<String, SafetyError> {
+        Err(SafetyError::new(
+            "PATCH_UNAVAILABLE",
+            "repository safety provider does not support controlled integration patches",
+        ))
+    }
+
+    fn apply_integration_patch(
+        &self,
+        _facts: &RunFacts,
+        _target_branch: &str,
+        _patch: &str,
+    ) -> Result<(String, Vec<PathBuf>), SafetyError> {
+        Err(SafetyError::new(
+            "PATCH_UNAVAILABLE",
+            "repository safety provider does not support controlled integration patches",
+        ))
     }
 
     fn verify_integration(
@@ -240,6 +271,56 @@ impl RepositorySafety for GitRepositorySafety {
         self.inspector
             .verify_source_refs_unchanged(&facts.primary_worktree, facts)?;
         Ok(())
+    }
+
+    fn verify_integration_patch_ready(
+        &self,
+        facts: &RunFacts,
+        target_branch: &str,
+    ) -> Result<String, SafetyError> {
+        let primary = self.inspect_frozen_worktree(&facts.primary_worktree, "primary")?;
+        let reviewer = self.inspect_frozen_worktree(&facts.reviewer_worktree, "reviewer")?;
+        verify_reviewer_frozen(facts, &reviewer)?;
+        if primary.worktree != facts.primary_worktree
+            || primary.common_dir != facts.git_common_dir
+            || !primary.clean
+        {
+            return Err(SafetyError::new(
+                "DIRTY_WORKTREE",
+                "controlled patch requires the exact clean frozen primary worktree",
+            ));
+        }
+        let target_ref = format!("refs/heads/{target_branch}");
+        if primary
+            .source_ref
+            .as_ref()
+            .is_none_or(|source| source.name != target_ref || source.target_sha != primary.head_sha)
+        {
+            return Err(SafetyError::new(
+                "UNEXPECTED_INTEGRATION_BRANCH",
+                "controlled patch is not on the exact authorized integration branch",
+            ));
+        }
+        let integration = self
+            .inspector
+            .inspect_integration(&facts.primary_worktree, facts)?;
+        verify_integration_result(facts, &integration, target_branch, &primary.head_sha)?;
+        Ok(primary.head_sha)
+    }
+
+    fn apply_integration_patch(
+        &self,
+        facts: &RunFacts,
+        target_branch: &str,
+        patch: &str,
+    ) -> Result<(String, Vec<PathBuf>), SafetyError> {
+        let base_sha = self.verify_integration_patch_ready(facts, target_branch)?;
+        let changed_files =
+            self.inspector
+                .apply_checked_text_patch(&facts.primary_worktree, &base_sha, patch)?;
+        self.inspector
+            .verify_source_refs_unchanged(&facts.primary_worktree, facts)?;
+        Ok((base_sha, changed_files))
     }
 
     fn verify_integration(
@@ -378,6 +459,7 @@ pub struct Coordinator<A, R> {
     safety: Arc<R>,
     options: CoordinatorOptions,
     driver_lock: Arc<Mutex<()>>,
+    patch_lock: Arc<Mutex<()>>,
 }
 
 impl<A, R> Clone for Coordinator<A, R> {
@@ -388,6 +470,7 @@ impl<A, R> Clone for Coordinator<A, R> {
             safety: Arc::clone(&self.safety),
             options: self.options.clone(),
             driver_lock: Arc::clone(&self.driver_lock),
+            patch_lock: Arc::clone(&self.patch_lock),
         }
     }
 }
@@ -409,7 +492,70 @@ where
             safety,
             options,
             driver_lock: Arc::new(Mutex::new(())),
+            patch_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    pub async fn apply_patch(
+        &self,
+        run_id: &str,
+        request_hash: &str,
+        patch: &str,
+    ) -> Result<IntegrationPatchResult, CoordinatorError> {
+        let _guard = self.patch_lock.lock().await;
+        let state = self.required_run(run_id)?;
+        if state.status != RunStatus::Running
+            || state.phase != Phase::Integrate
+            || state.next_action != NextAction::RequestPrimaryIntegration
+            || state.integration_branch.is_some()
+            || state.integration_sha.is_some()
+            || state.current_integration_payload.is_some()
+        {
+            return Err(CoordinatorError::operational(
+                "PATCH_NOT_AUTHORIZED",
+                "controlled patch is limited to the active primary integration turn before a result is reported",
+            ));
+        }
+        let pending = self.store.pending_send(run_id)?.ok_or_else(|| {
+            CoordinatorError::operational(
+                "PATCH_NOT_AUTHORIZED",
+                "controlled patch requires an exact persisted primary integration turn",
+            )
+        })?;
+        if request_hash.trim().is_empty()
+            || pending.message_hash != request_hash
+            || pending.role != "PRIMARY"
+            || pending.phase != "INTEGRATE"
+            || pending.round != state.round
+            || pending.thread_id.as_deref() != Some(state.facts.primary_thread_id.as_str())
+            || pending.turn_id.as_deref().is_none_or(str::is_empty)
+        {
+            return Err(CoordinatorError::operational(
+                "PATCH_NOT_AUTHORIZED",
+                "controlled patch identity does not match the exact active primary integration request",
+            ));
+        }
+        if self.store.successful_patch_recorded(run_id, request_hash)? {
+            return Err(CoordinatorError::operational(
+                "PATCH_ALREADY_APPLIED",
+                "the active primary integration request already used its one successful controlled patch",
+            ));
+        }
+        let target = state.target_integration_branch.as_deref().ok_or_else(|| {
+            CoordinatorError::operational("INVALID_STATE", "target integration branch is missing")
+        })?;
+        let (base_sha, changed_files) =
+            self.safety
+                .apply_integration_patch(&state.facts, target, patch)?;
+        let patch_hash = canonical_json_hash(&json!({"patch": patch}));
+        self.store
+            .record_successful_patch(run_id, request_hash, &patch_hash)?;
+        Ok(IntegrationPatchResult {
+            run_id: run_id.to_owned(),
+            integration_branch: target.to_owned(),
+            base_sha,
+            changed_files,
+        })
     }
 
     pub async fn start(
@@ -551,7 +697,21 @@ where
             self.revalidate_current_repository(&state).await?;
         }
         if retry_terminal_turn {
-            self.prepare_terminal_turn_retry(&state).await?;
+            if let Some(retry) = self
+                .inspect_completed_file_change_tool_unavailable_retry(&state)
+                .await?
+            {
+                self.store
+                    .reset_completed_integration_tool_failure_turn_for_retry(
+                        run_id,
+                        &retry.message_hash,
+                        &retry.thread_id,
+                        &retry.turn_id,
+                        &retry.observed_status,
+                    )?;
+            } else {
+                self.prepare_terminal_turn_retry(&state).await?;
+            }
         }
         if let Some(action) = retry_forbidden_operation_action {
             let retry = self
@@ -727,6 +887,97 @@ where
             status,
         )?;
         Ok(())
+    }
+
+    async fn inspect_completed_file_change_tool_unavailable_retry(
+        &self,
+        state: &RunState,
+    ) -> Result<Option<RetryableCompletedTurn>, CoordinatorError> {
+        if state.status != RunStatus::PausedUserAction
+            || state.reason_code.as_deref() != Some("COMMUNICATION_FAILURE")
+            || state.phase != Phase::Integrate
+            || state.next_action != NextAction::RequestPrimaryIntegration
+            || state.integration_branch.is_some()
+            || state.integration_sha.is_some()
+            || state.current_integration_payload.is_some()
+        {
+            return Ok(None);
+        }
+        let run_id = state.facts.run_id.to_string();
+        let Some(pending) = self.store.pending_send(&run_id)? else {
+            return Ok(None);
+        };
+        let (Some(thread_id), Some(turn_id)) =
+            (pending.thread_id.as_deref(), pending.turn_id.as_deref())
+        else {
+            return Ok(None);
+        };
+        if pending.role != "PRIMARY"
+            || pending.phase != "INTEGRATE"
+            || pending.round != state.round
+            || thread_id != state.facts.primary_thread_id
+        {
+            return Ok(None);
+        }
+
+        let detail = self.read_thread_with_retry(thread_id).await?;
+        self.verify_thread_identity(state, Role::Primary, &detail)?;
+        let turn = find_turn(&detail, turn_id).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "completed file-change blocker is absent from canonical task history",
+            )
+        })?;
+        let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "completed file-change blocker has no canonical status",
+            )
+        })?;
+        if status != "completed" {
+            return Ok(None);
+        }
+        if !turn_contains_request_hash(turn, &pending.message_hash) {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "completed file-change blocker lacks its deterministic request marker",
+            ));
+        }
+        if let Some(blocker) = terminal_turn_retry_blocker(turn) {
+            return Err(CoordinatorError::operational(
+                "TERMINAL_TURN_RETRY_UNSAFE",
+                format!("completed file-change blocker cannot be retried: {blocker}"),
+            ));
+        }
+
+        let raw_response = final_agent_json(turn)?;
+        let message = validate_message(raw_response).map_err(|error| {
+            CoordinatorError::operational("INVALID_RESPONSE", error.to_string())
+        })?;
+        if message.envelope.reason_code.as_deref() != Some("FILE_CHANGE_TOOL_UNAVAILABLE") {
+            return Ok(None);
+        }
+        let reported_sha =
+            validate_file_change_tool_unavailable_blocker(state, &pending.message_hash, &message)?;
+        let target = state.target_integration_branch.as_deref().ok_or_else(|| {
+            CoordinatorError::operational("INVALID_STATE", "target integration branch is missing")
+        })?;
+        let authoritative_sha = self
+            .safety
+            .verify_integration_patch_ready(&state.facts, target)?;
+        if authoritative_sha != reported_sha {
+            return Err(CoordinatorError::operational(
+                "TERMINAL_TURN_RETRY_UNSAFE",
+                "reported clean integration HEAD does not match the authoritative target branch",
+            ));
+        }
+
+        Ok(Some(RetryableCompletedTurn {
+            message_hash: pending.message_hash,
+            thread_id: thread_id.to_owned(),
+            turn_id: turn_id.to_owned(),
+            observed_status: status.to_owned(),
+        }))
     }
 
     async fn inspect_completed_read_only_model_response_retry(
@@ -1267,7 +1518,16 @@ where
         }
         match action {
             NextAction::RequestPrimaryIntegration => {
-                verify_integration_command_items(state, turn)?;
+                let pending = self
+                    .store
+                    .pending_send(&state.facts.run_id.to_string())?
+                    .ok_or_else(|| {
+                        CoordinatorError::operational(
+                            "HISTORY_UNAVAILABLE",
+                            "integration response has no exact pending request identity",
+                        )
+                    })?;
+                verify_integration_execution_items(state, turn, &pending.message_hash)?;
             }
             NextAction::RequestPrimaryVerification => {
                 let authoritative = authoritative_test_evidence(state, turn, turn_id)?;
@@ -1746,9 +2006,10 @@ fn command_execution_items(turn: &Value) -> Result<Vec<&Value>, CoordinatorError
         .collect())
 }
 
-fn verify_integration_command_items(
+fn verify_integration_execution_items(
     state: &RunState,
     turn: &Value,
+    request_hash: &str,
 ) -> Result<(), CoordinatorError> {
     for item in command_execution_items(turn)? {
         let command = item.get("command").and_then(Value::as_str).ok_or_else(|| {
@@ -1768,7 +2029,62 @@ fn verify_integration_command_items(
             ));
         }
     }
+    for item in turn
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("mcpToolCall"))
+    {
+        if let Some(blocker) = integration_patch_mcp_blocker(state, item, request_hash) {
+            return Err(CoordinatorError::operational(
+                "FORBIDDEN_OPERATION",
+                blocker,
+            ));
+        }
+    }
     Ok(())
+}
+
+fn integration_patch_mcp_blocker(
+    state: &RunState,
+    item: &Value,
+    request_hash: &str,
+) -> Option<String> {
+    if item.get("status").and_then(Value::as_str) != Some("completed") {
+        return Some("controlled patch MCP call is not canonically completed".into());
+    }
+    if item.get("pluginId").and_then(Value::as_str)
+        != Some("worktree-merge-consensus@worktree-merge-consensus")
+        || item.get("server").and_then(Value::as_str) != Some("worktreeMergeConsensus")
+        || item.get("tool").and_then(Value::as_str) != Some("consensus_apply_patch")
+    {
+        return Some(
+            "integration turn invoked an MCP tool outside the exact controlled patch capability"
+                .into(),
+        );
+    }
+    if item.get("appContext").is_some_and(|value| !value.is_null()) {
+        return Some("controlled patch MCP call carries external app context".into());
+    }
+    let arguments = item.get("arguments").and_then(Value::as_object);
+    let run_id = state.facts.run_id.to_string();
+    if arguments
+        .and_then(|arguments| arguments.get("run_id"))
+        .and_then(Value::as_str)
+        != Some(run_id.as_str())
+        || arguments
+            .and_then(|arguments| arguments.get("request_hash"))
+            .and_then(Value::as_str)
+            != Some(request_hash)
+        || !arguments
+            .and_then(|arguments| arguments.get("patch"))
+            .and_then(Value::as_str)
+            .is_some_and(|patch| !patch.trim().is_empty())
+    {
+        return Some("controlled patch MCP arguments do not match the active run request".into());
+    }
+    None
 }
 
 fn authoritative_test_evidence(
@@ -2371,6 +2687,83 @@ fn validate_execution_tool_unavailable_blocker(
     Ok(())
 }
 
+fn validate_file_change_tool_unavailable_blocker(
+    state: &RunState,
+    request_hash: &str,
+    message: &ProtocolMessage,
+) -> Result<String, CoordinatorError> {
+    let envelope = &message.envelope;
+    if envelope.message_type != MessageType::Blocked
+        || envelope.phase != consensus_core::protocol::MessagePhase::Integrate
+        || envelope.run_id != state.facts.run_id
+        || envelope.round != state.round
+        || envelope.plan_revision != state.plan_revision
+        || envelope.primary_sha != state.facts.primary_sha
+        || envelope.reviewer_sha != state.facts.reviewer_sha
+        || envelope.integration_branch.is_some()
+        || envelope.integration_sha.is_some()
+        || envelope.reason_code.as_deref() != Some("FILE_CHANGE_TOOL_UNAVAILABLE")
+    {
+        return Err(CoordinatorError::operational(
+            "TERMINAL_TURN_RETRY_UNSAFE",
+            "file-change blocker envelope does not match the frozen integration action",
+        ));
+    }
+    let payload = message.payload.as_object().ok_or_else(|| {
+        CoordinatorError::operational(
+            "TERMINAL_TURN_RETRY_UNSAFE",
+            "file-change blocker payload is not an object",
+        )
+    })?;
+    let exact_string =
+        |key: &str, expected: &str| payload.get(key).and_then(Value::as_str) == Some(expected);
+    let target = state
+        .target_integration_branch
+        .as_deref()
+        .unwrap_or_default();
+    let approved_plan_hash = state
+        .plan_approval_payload
+        .as_ref()
+        .and_then(|value| value.get("approved_plan_hash"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !exact_string("role", "PRIMARY")
+        || !exact_string("request_hash", request_hash)
+        || payload
+            .get("approved_plan_revision")
+            .and_then(Value::as_u64)
+            != state.plan_revision.map(u64::from)
+        || !exact_string("approved_primary_sha", &state.facts.primary_sha)
+        || !exact_string("approved_reviewer_sha", &state.facts.reviewer_sha)
+        || !exact_string("approved_plan_hash", approved_plan_hash)
+        || !exact_string("resulting_integration_branch", target)
+        || !payload
+            .get("blocking_condition")
+            .and_then(Value::as_str)
+            .is_some_and(|condition| {
+                condition.contains("bwrap")
+                    && condition.contains("Permission denied")
+                    && condition.contains("file-change")
+            })
+    {
+        return Err(CoordinatorError::operational(
+            "TERMINAL_TURN_RETRY_UNSAFE",
+            "file-change blocker does not carry the exact approved identity and bwrap failure evidence",
+        ));
+    }
+    let reported_sha = payload
+        .get("resulting_integration_sha")
+        .and_then(Value::as_str)
+        .filter(|sha| sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| {
+            CoordinatorError::operational(
+                "TERMINAL_TURN_RETRY_UNSAFE",
+                "file-change blocker omits a valid resulting integration SHA",
+            )
+        })?;
+    Ok(reported_sha.to_owned())
+}
+
 fn find_turn<'a>(detail: &'a ThreadDetail, turn_id: &str) -> Option<&'a Value> {
     detail
         .turns
@@ -2587,6 +2980,21 @@ mod retry_safety_tests {
         })
     }
 
+    fn integration_state() -> RunState {
+        RunState::new(RunFacts {
+            run_id: uuid::Uuid::parse_str("4b230bd8-d870-4ef4-bf20-05a4c61020af").unwrap(),
+            primary_thread_id: "primary".into(),
+            reviewer_thread_id: "reviewer".into(),
+            primary_worktree: PathBuf::from("/repo/primary"),
+            reviewer_worktree: PathBuf::from("/repo/reviewer"),
+            git_common_dir: PathBuf::from("/repo/.git"),
+            primary_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            reviewer_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            primary_ref: Some("refs/heads/primary".into()),
+            reviewer_ref: Some("refs/heads/reviewer".into()),
+        })
+    }
+
     #[test]
     fn only_exact_local_read_only_consensus_queries_are_retry_safe() {
         for tool in [
@@ -2619,6 +3027,43 @@ mod retry_safety_tests {
         assert_eq!(
             read_only_consensus_mcp_retry_blocker(&foreign).as_deref(),
             Some("MCP tool call is not owned by the consensus plugin")
+        );
+    }
+
+    #[test]
+    fn integration_history_accepts_only_the_exact_request_bound_patch_tool() {
+        let state = integration_state();
+        let request_hash = "request-hash";
+        let mut call = json!({
+            "type": "mcpToolCall",
+            "pluginId": "worktree-merge-consensus@worktree-merge-consensus",
+            "server": "worktreeMergeConsensus",
+            "tool": "consensus_apply_patch",
+            "arguments": {
+                "run_id": state.facts.run_id.to_string(),
+                "request_hash": request_hash,
+                "patch": "diff --git a/src/lib.rs b/src/lib.rs"
+            },
+            "status": "completed",
+            "appContext": null
+        });
+        assert_eq!(
+            integration_patch_mcp_blocker(&state, &call, request_hash),
+            None
+        );
+
+        call["tool"] = json!("consensus_resume");
+        assert!(
+            integration_patch_mcp_blocker(&state, &call, request_hash)
+                .unwrap()
+                .contains("outside")
+        );
+        call["tool"] = json!("consensus_apply_patch");
+        call["arguments"]["request_hash"] = json!("other-request");
+        assert!(
+            integration_patch_mcp_blocker(&state, &call, request_hash)
+                .unwrap()
+                .contains("arguments")
         );
     }
 

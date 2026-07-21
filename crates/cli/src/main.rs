@@ -437,6 +437,18 @@ impl ToolBackend for CliMcpBackend {
                 )
                 .await
             }
+            "consensus_apply_patch" => {
+                let arguments: McpApplyPatchArguments = decode_mcp_arguments(arguments)?;
+                daemon_request_value(
+                    &self.state_dir,
+                    DaemonRequest::ApplyPatch {
+                        run_id: arguments.run_id,
+                        request_hash: arguments.request_hash,
+                        patch: arguments.patch,
+                    },
+                )
+                .await
+            }
             "consensus_cancel" => {
                 let arguments: McpRunIdArguments = decode_mcp_arguments(arguments)?;
                 daemon_request_value(
@@ -472,6 +484,13 @@ struct McpStartArguments {
 #[derive(Deserialize)]
 struct McpWorktreeListArguments {
     repository_path: String,
+}
+
+#[derive(Deserialize)]
+struct McpApplyPatchArguments {
+    run_id: String,
+    request_hash: String,
+    patch: String,
 }
 
 #[derive(Deserialize)]

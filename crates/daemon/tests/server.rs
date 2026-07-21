@@ -13,7 +13,7 @@ use std::{
 use async_trait::async_trait;
 use consensus_core::state::{RunFacts, RunState};
 use consensus_daemon::{
-    coordinator::{CoordinatorError, StartRequest},
+    coordinator::{CoordinatorError, IntegrationPatchResult, StartRequest},
     server::{RunController, ServerConfig, ServerError, run_server, run_server_with_controller},
     store::SqliteRunStore,
     wire::{DaemonClient, DaemonRequest},
@@ -123,6 +123,19 @@ async fn controller_backed_start_returns_immediately_and_dispatches_background_d
     }
     assert_eq!(controller.drives.load(Ordering::SeqCst), 1);
     assert!(store.load_run(RUN_ID).unwrap().is_some());
+    let patch = client
+        .request(DaemonRequest::ApplyPatch {
+            run_id: RUN_ID.into(),
+            request_hash: "request-hash".into(),
+            patch: "diff --git a/src/lib.rs b/src/lib.rs".into(),
+        })
+        .await
+        .unwrap();
+    assert!(patch.ok);
+    assert_eq!(
+        patch.result.unwrap()["integration_branch"],
+        "consensus/test"
+    );
     shutdown_tx.send(()).unwrap();
     server.await.unwrap().unwrap();
 }
@@ -190,6 +203,20 @@ impl RunController for FakeRunController {
 
     async fn prepare_resume_run(&self, run_id: &str) -> Result<RunState, CoordinatorError> {
         Ok(self.store.load_run(run_id)?.unwrap())
+    }
+
+    async fn apply_patch(
+        &self,
+        run_id: &str,
+        _request_hash: &str,
+        _patch: &str,
+    ) -> Result<IntegrationPatchResult, CoordinatorError> {
+        Ok(IntegrationPatchResult {
+            run_id: run_id.to_owned(),
+            integration_branch: "consensus/test".into(),
+            base_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            changed_files: vec![PathBuf::from("src/lib.rs")],
+        })
     }
 
     async fn cancel_run(&self, run_id: &str) -> Result<RunState, CoordinatorError> {

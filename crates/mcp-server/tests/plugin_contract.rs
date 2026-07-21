@@ -79,6 +79,7 @@ fn skill_is_a_launcher_for_the_daemon_not_a_review_relay() {
         "codex mcp list --json",
         "consensus_list_threads",
         "consensus_list_worktrees",
+        "consensus_apply_patch",
         "consensus_start",
         "primary_worktree",
         "reviewer_worktree",

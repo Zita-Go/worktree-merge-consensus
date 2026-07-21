@@ -118,6 +118,11 @@ fn integration_prompt_declares_the_frozen_repository_read_surface() {
         "`git ls-files`",
         "`git diff`",
         "do not invoke sed, cat, find, ls, head, tail",
+        "consensus_apply_patch",
+        "exact request_hash",
+        "do not use the built-in file-change tool",
+        "do not recreate or re-merge",
+        "after one successful patch, no second patch is authorized",
     ] {
         assert!(prompt.contains(required), "missing {required:?}");
     }

@@ -102,9 +102,11 @@ registered worktree paths through CLI or MCP. The daemon still verifies the
 returned task IDs, but every turn uses the frozen explicit worktree even when
 both tasks report the same cwd or a non-Git directory.
 
-The v0.1 plugin contract exposes seven MCP tools, including
-`consensus_list_worktrees`; `consensus_start` requires both task IDs and both
-worktree paths. Plugin and binary versions must come from the same release.
+The v0.1 plugin contract exposes eight MCP tools. Seven are operator tools,
+including `consensus_list_worktrees`; `consensus_start` requires both task IDs
+and both worktree paths. The eighth, `consensus_apply_patch`, is available only
+to an exact active Primary integration request and has no public CLI
+equivalent. Plugin and binary versions must come from the same release.
 After installing or updating the plugin, restart Codex or open a new task. A
 conflicting manually installed `$CODEX_HOME/skills/worktree-merge-consensus`
 is reported as `LEGACY_SKILL_CONFLICT` and is never deleted automatically.

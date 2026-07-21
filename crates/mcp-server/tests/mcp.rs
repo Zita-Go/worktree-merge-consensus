@@ -44,7 +44,7 @@ async fn exchange(input: &str, backend: Arc<dyn ToolBackend>) -> Vec<Value> {
 }
 
 #[tokio::test]
-async fn initializes_and_lists_exactly_the_seven_public_tools() {
+async fn initializes_and_lists_exactly_the_eight_public_tools() {
     let input = concat!(
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
         "\n",
@@ -81,6 +81,7 @@ async fn initializes_and_lists_exactly_the_seven_public_tools() {
             "consensus_start",
             "consensus_status",
             "consensus_resume",
+            "consensus_apply_patch",
             "consensus_cancel",
         ]
     );
@@ -103,7 +104,11 @@ async fn initializes_and_lists_exactly_the_seven_public_tools() {
     );
     assert_eq!(tools[4]["inputSchema"]["required"], json!([]));
     assert_eq!(tools[5]["inputSchema"]["required"], json!(["run_id"]));
-    assert_eq!(tools[6]["inputSchema"]["required"], json!(["run_id"]));
+    assert_eq!(
+        tools[6]["inputSchema"]["required"],
+        json!(["run_id", "request_hash", "patch"])
+    );
+    assert_eq!(tools[7]["inputSchema"]["required"], json!(["run_id"]));
 }
 
 #[tokio::test]
@@ -119,8 +124,8 @@ async fn accepts_codex_paginated_list_and_request_metadata_params() {
 
     let responses = exchange(input, Arc::new(FakeBackend::default())).await;
     assert_eq!(responses.len(), 3);
-    assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 7);
-    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 8);
+    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 8);
     assert_eq!(responses[2]["result"], json!({}));
 }
 

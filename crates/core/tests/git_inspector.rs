@@ -256,6 +256,92 @@ fn integration_result_contains_both_frozen_commits_and_preserves_source_refs() {
 }
 
 #[test]
+fn controlled_text_patch_applies_only_to_the_exact_clean_head() {
+    let (fixture, facts) = integrated_fixture();
+    let inspector = GitInspector::default();
+    let integration = inspector
+        .inspect_integration(fixture.primary(), &facts)
+        .unwrap();
+    let patch = r#"diff --git a/primary.txt b/primary.txt
+--- a/primary.txt
++++ b/primary.txt
+@@ -1 +1,2 @@
+ primary
++compatibility
+diff --git a/new.txt b/new.txt
+new file mode 100644
+--- /dev/null
++++ b/new.txt
+@@ -0,0 +1 @@
++new
+"#;
+
+    let changed = inspector
+        .apply_checked_text_patch(fixture.primary(), &integration.worktree.head_sha, patch)
+        .unwrap();
+
+    assert_eq!(
+        changed,
+        vec![PathBuf::from("new.txt"), PathBuf::from("primary.txt")]
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.primary().join("primary.txt")).unwrap(),
+        "primary\ncompatibility\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.primary().join("new.txt")).unwrap(),
+        "new\n"
+    );
+}
+
+#[test]
+fn controlled_text_patch_rejects_dirty_stale_binary_and_traversal_inputs() {
+    let (fixture, facts) = integrated_fixture();
+    let inspector = GitInspector::default();
+    let integration = inspector
+        .inspect_integration(fixture.primary(), &facts)
+        .unwrap();
+
+    let stale = inspector
+        .apply_checked_text_patch(
+            fixture.primary(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-base\n+changed\n",
+        )
+        .unwrap_err();
+    assert_eq!(stale.code(), "STALE_INTEGRATION_SHA");
+
+    let traversal = inspector
+        .apply_checked_text_patch(
+            fixture.primary(),
+            &integration.worktree.head_sha,
+            "diff --git a/../escape b/../escape\n--- a/../escape\n+++ b/../escape\n@@ -0,0 +1 @@\n+escape\n",
+        )
+        .unwrap_err();
+    assert_eq!(traversal.code(), "PATCH_CHECK_FAILED");
+    assert!(!fixture.primary().parent().unwrap().join("escape").exists());
+
+    let binary = inspector
+        .apply_checked_text_patch(
+            fixture.primary(),
+            &integration.worktree.head_sha,
+            "GIT binary patch\nliteral 0\nHcmV?d00001\n",
+        )
+        .unwrap_err();
+    assert_eq!(binary.code(), "BINARY_PATCH_FORBIDDEN");
+
+    fs::write(fixture.primary().join("dirty.txt"), "dirty\n").unwrap();
+    let dirty = inspector
+        .apply_checked_text_patch(
+            fixture.primary(),
+            &integration.worktree.head_sha,
+            "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-base\n+changed\n",
+        )
+        .unwrap_err();
+    assert_eq!(dirty.code(), "DIRTY_WORKTREE");
+}
+
+#[test]
 fn verification_clone_is_detached_remote_free_and_git_isolated() {
     let (fixture, facts) = integrated_fixture();
     let inspector = GitInspector::default();

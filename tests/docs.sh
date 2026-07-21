@@ -42,6 +42,7 @@ for readme in README.md README.zh-CN.md; do
 
   for marker in \
     consensus_list_worktrees \
+    consensus_apply_patch \
     --primary-worktree \
     --reviewer-worktree \
     LEGACY_SKILL_CONFLICT \

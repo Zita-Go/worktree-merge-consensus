@@ -378,6 +378,35 @@ impl SqliteRunStore {
         Ok(())
     }
 
+    pub fn reset_completed_integration_tool_failure_turn_for_retry(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+        thread_id: &str,
+        turn_id: &str,
+        observed_status: &str,
+    ) -> Result<(), StoreError> {
+        if observed_status != "completed" {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "turn {turn_id} has non-completed integration-tool retry status {observed_status}"
+            )));
+        }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        archive_and_reset_turn(
+            &transaction,
+            run_id,
+            message_hash,
+            thread_id,
+            turn_id,
+            "SENT",
+            observed_status,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn reactivate_blocked_run_with_completed_turn_retry(
         &self,
         blocked_state: &RunState,
@@ -757,6 +786,51 @@ impl SqliteRunStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn successful_patch_recorded(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+    ) -> Result<bool, StoreError> {
+        let connection = self.lock()?;
+        let exists = connection
+            .query_row(
+                "SELECT 1 FROM patch_applications
+                 WHERE run_id = ?1 AND message_hash = ?2
+                 LIMIT 1",
+                params![run_id, message_hash],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        Ok(exists)
+    }
+
+    pub fn record_successful_patch(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+        patch_hash: &str,
+    ) -> Result<(), StoreError> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        ensure_run_exists(&transaction, run_id)?;
+        let changed = transaction.execute(
+            "INSERT INTO patch_applications (
+                run_id, message_hash, patch_hash, applied_at
+             ) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(run_id, message_hash) DO NOTHING",
+            params![run_id, message_hash, patch_hash, now_unix()],
+        )?;
+        if changed == 1 {
+            transaction.commit()?;
+            Ok(())
+        } else {
+            Err(StoreError::IncompatibleState(format!(
+                "run {run_id} already recorded a successful controlled patch for request {message_hash}"
+            )))
+        }
+    }
+
     pub fn release_lock(&self, run_id: &str) -> Result<(), StoreError> {
         self.lock()?
             .execute("DELETE FROM locks WHERE run_id = ?1", [run_id])?;
@@ -867,7 +941,7 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
          );
          CREATE INDEX IF NOT EXISTS turns_pending
             ON turns(run_id, delivery_state, id DESC);
-         CREATE TABLE IF NOT EXISTS turn_attempts (
+             CREATE TABLE IF NOT EXISTS turn_attempts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             turn_record_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
             run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
@@ -877,7 +951,15 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             terminal_status TEXT NOT NULL,
             recorded_at INTEGER NOT NULL,
             UNIQUE(turn_record_id, turn_id)
-         );
+             );
+             CREATE TABLE IF NOT EXISTS patch_applications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+                message_hash TEXT NOT NULL,
+                patch_hash TEXT NOT NULL,
+                applied_at INTEGER NOT NULL,
+                UNIQUE(run_id, message_hash)
+             );
          CREATE INDEX IF NOT EXISTS turn_attempts_run
             ON turn_attempts(run_id, id DESC);
          CREATE TABLE IF NOT EXISTS transitions (

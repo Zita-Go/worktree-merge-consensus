@@ -1419,6 +1419,126 @@ async fn recovered_integration_turn_skips_the_first_action_frozen_head_check() {
 }
 
 #[tokio::test]
+async fn completed_bwrap_file_change_blocker_retries_the_same_run_and_existing_merge() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let normal = conflict_free_replies();
+    let mut replies = normal[..4].to_vec();
+    replies.push(file_change_tool_unavailable_blocker());
+    replies.push(normal[4].clone());
+    replies.push(normal[5].clone());
+    let app = Arc::new(FakeAppServer::deferred(replies, 5, DeferMode::Hold));
+    let safety = Arc::new(InProgressRecoverySafety::default());
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::clone(&safety),
+        CoordinatorOptions {
+            wait_timeout: Duration::from_millis(15),
+            poll_interval: Duration::from_millis(1),
+            communication_attempts: 1,
+        },
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let paused = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+    assert_eq!(paused.reason_code.as_deref(), Some("COMMUNICATION_FAILURE"));
+    assert_eq!(paused.next_action, NextAction::RequestPrimaryIntegration);
+
+    safety
+        .integration_branch_active
+        .store(true, Ordering::SeqCst);
+    app.complete_deferred_turns();
+    let result = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Accepted);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    assert_eq!(app.request_count(), 8);
+    let integration_prompts = app
+        .prompts()
+        .into_iter()
+        .filter(|prompt| prompt_action(prompt) == "REQUEST_PRIMARY_INTEGRATION")
+        .collect::<Vec<_>>();
+    assert_eq!(integration_prompts.len(), 2);
+    assert!(integration_prompts[1].contains("consensus_apply_patch"));
+    assert!(integration_prompts[1].contains("do not recreate or re-merge"));
+}
+
+#[tokio::test]
+async fn controlled_patch_requires_the_exact_active_request_and_succeeds_only_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(FakeAppServer::deferred(
+        conflict_free_replies(),
+        5,
+        DeferMode::Hold,
+    ));
+    let safety = Arc::new(PatchSafety::default());
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::clone(&safety),
+        CoordinatorOptions {
+            wait_timeout: Duration::from_secs(2),
+            poll_interval: Duration::from_millis(1),
+            communication_attempts: 1,
+        },
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let driver = {
+        let coordinator = coordinator.clone();
+        tokio::spawn(async move { coordinator.drive(RUN_ID).await })
+    };
+    for _ in 0..1_000 {
+        if app.request_count() >= 5 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert_eq!(app.request_count(), 5);
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+
+    let wrong = coordinator
+        .apply_patch(RUN_ID, "wrong-request", "diff --git a/a b/a")
+        .await
+        .unwrap_err();
+    assert_eq!(wrong.code(), "PATCH_NOT_AUTHORIZED");
+    let applied = coordinator
+        .apply_patch(
+            RUN_ID,
+            &pending.message_hash,
+            "diff --git a/src/lib.rs b/src/lib.rs",
+        )
+        .await
+        .unwrap();
+    assert_eq!(applied.integration_branch, "consensus/test-run");
+    assert_eq!(applied.base_sha, INTEGRATION_SHA);
+    assert_eq!(applied.changed_files, vec![PathBuf::from("src/lib.rs")]);
+    assert_eq!(safety.patch_calls.load(Ordering::SeqCst), 1);
+
+    let duplicate = coordinator
+        .apply_patch(
+            RUN_ID,
+            &pending.message_hash,
+            "diff --git a/src/main.rs b/src/main.rs",
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(duplicate.code(), "PATCH_ALREADY_APPLIED");
+    assert_eq!(safety.patch_calls.load(Ordering::SeqCst), 1);
+
+    coordinator.cancel(RUN_ID).await.unwrap();
+    assert_eq!(driver.await.unwrap().unwrap().status, RunStatus::Cancelled);
+}
+
+#[tokio::test]
 async fn recovered_result_fix_turn_allows_head_to_advance_past_previous_result() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -1724,6 +1844,21 @@ impl RepositorySafety for InProgressRecoverySafety {
         Ok(())
     }
 
+    fn verify_integration_patch_ready(
+        &self,
+        _facts: &RunFacts,
+        _target_branch: &str,
+    ) -> Result<String, SafetyError> {
+        if self.integration_branch_active.load(Ordering::SeqCst) {
+            Ok(INTEGRATION_SHA.into())
+        } else {
+            Err(SafetyError::new(
+                "UNEXPECTED_INTEGRATION_BRANCH",
+                "integration branch is not active",
+            ))
+        }
+    }
+
     fn verify_integration(
         &self,
         _facts: &RunFacts,
@@ -1755,6 +1890,58 @@ impl RepositorySafety for InProgressRecoverySafety {
 struct FailAfterStartSafety {
     reason: &'static str,
     frozen_calls: AtomicUsize,
+}
+
+#[derive(Default)]
+struct PatchSafety {
+    patch_calls: AtomicUsize,
+}
+
+impl RepositorySafety for PatchSafety {
+    fn verify_frozen(&self, _facts: &RunFacts) -> Result<(), SafetyError> {
+        Ok(())
+    }
+
+    fn verify_branch_absent(&self, _facts: &RunFacts, _branch: &str) -> Result<(), SafetyError> {
+        Ok(())
+    }
+
+    fn verify_integration_in_progress(
+        &self,
+        _facts: &RunFacts,
+        _target_branch: &str,
+    ) -> Result<(), SafetyError> {
+        Ok(())
+    }
+
+    fn apply_integration_patch(
+        &self,
+        _facts: &RunFacts,
+        _target_branch: &str,
+        _patch: &str,
+    ) -> Result<(String, Vec<PathBuf>), SafetyError> {
+        self.patch_calls.fetch_add(1, Ordering::SeqCst);
+        Ok((INTEGRATION_SHA.into(), vec![PathBuf::from("src/lib.rs")]))
+    }
+
+    fn verify_integration(
+        &self,
+        _facts: &RunFacts,
+        _branch: &str,
+        _sha: &str,
+        _changed_files: &[PathBuf],
+    ) -> Result<(), SafetyError> {
+        Ok(())
+    }
+
+    fn prepare_verification_workspace(
+        &self,
+        _facts: &RunFacts,
+        _integration_sha: &str,
+        destination: &std::path::Path,
+    ) -> Result<PathBuf, SafetyError> {
+        Ok(destination.to_path_buf())
+    }
 }
 
 impl FailAfterStartSafety {
@@ -2095,6 +2282,23 @@ impl AppServer for FakeAppServer {
             reply["payload"]["approved_plan_hash"] =
                 payload["approval"]["approved_plan_hash"].clone();
             reply["payload"]["target_integration_branch"] =
+                payload["target_integration_branch"].clone();
+        }
+        if action == "REQUEST_PRIMARY_INTEGRATION"
+            && reply["message_type"] == "BLOCKED"
+            && reply["reason_code"] == "FILE_CHANGE_TOOL_UNAVAILABLE"
+        {
+            let metadata = prompt_json_block(prompt, "Authoritative turn metadata:");
+            let payload = prompt_json_block(prompt, "Complete current payload");
+            let delivery =
+                prompt_json_block(prompt, "Coordinator delivery identity for crash recovery:");
+            reply["payload"]["request_hash"] = delivery["request_hash"].clone();
+            reply["payload"]["approved_plan_revision"] = metadata["plan_revision"].clone();
+            reply["payload"]["approved_primary_sha"] = metadata["primary_sha"].clone();
+            reply["payload"]["approved_reviewer_sha"] = metadata["reviewer_sha"].clone();
+            reply["payload"]["approved_plan_hash"] =
+                payload["approval"]["approved_plan_hash"].clone();
+            reply["payload"]["resulting_integration_branch"] =
                 payload["target_integration_branch"].clone();
         }
         self.reply_types.lock().unwrap().push(
@@ -2521,6 +2725,30 @@ fn execution_tool_unavailable_blocker() -> Value {
         }),
     );
     blocked["reason_code"] = json!("EXECUTION_TOOL_UNAVAILABLE");
+    blocked
+}
+
+fn file_change_tool_unavailable_blocker() -> Value {
+    let mut blocked = message(
+        "BLOCKED",
+        "INTEGRATE",
+        1,
+        Some(1),
+        None,
+        None,
+        json!({
+            "role": "PRIMARY",
+            "request_hash": "filled-from-prompt",
+            "approved_plan_revision": 1,
+            "approved_primary_sha": PRIMARY_SHA,
+            "approved_reviewer_sha": REVIEWER_SHA,
+            "approved_plan_hash": "filled-from-prompt",
+            "resulting_integration_branch": "consensus/test-run",
+            "resulting_integration_sha": INTEGRATION_SHA,
+            "blocking_condition": "The required file-change tool failed: bwrap Permission denied before any compatibility files were written."
+        }),
+    );
+    blocked["reason_code"] = json!("FILE_CHANGE_TOOL_UNAVAILABLE");
     blocked
 }
 

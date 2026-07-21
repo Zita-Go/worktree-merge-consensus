@@ -55,6 +55,45 @@ fn started_turn_identity_survives_reopen_for_crash_recovery() {
 }
 
 #[test]
+fn one_successful_controlled_patch_is_persisted_per_request() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+
+    assert!(
+        !store
+            .successful_patch_recorded(RUN_ID, "request-hash")
+            .unwrap()
+    );
+    store
+        .record_successful_patch(RUN_ID, "request-hash", "patch-hash")
+        .unwrap();
+    assert!(
+        store
+            .successful_patch_recorded(RUN_ID, "request-hash")
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .record_successful_patch(RUN_ID, "request-hash", "second-patch")
+            .unwrap_err()
+            .code(),
+        "INCOMPATIBLE_STATE"
+    );
+    drop(store);
+
+    assert!(
+        SqliteRunStore::open(path)
+            .unwrap()
+            .successful_patch_recorded(RUN_ID, "request-hash")
+            .unwrap()
+    );
+}
+
+#[test]
 fn terminal_turn_retry_is_archived_and_reset_atomically() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");

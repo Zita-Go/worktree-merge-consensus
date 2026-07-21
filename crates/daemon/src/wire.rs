@@ -25,6 +25,11 @@ pub enum DaemonRequest {
     Resume {
         run_id: String,
     },
+    ApplyPatch {
+        run_id: String,
+        request_hash: String,
+        patch: String,
+    },
     Cancel {
         run_id: String,
     },

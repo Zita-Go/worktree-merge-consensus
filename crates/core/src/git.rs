@@ -2,15 +2,17 @@ use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
     fs,
-    io::Read,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::state::RunFacts;
+
+pub const MAX_INTEGRATION_PATCH_BYTES: usize = 512 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct GitInspector {
@@ -722,6 +724,118 @@ impl GitInspector {
         )
     }
 
+    /// Apply one text-only patch to an exact clean integration HEAD.
+    ///
+    /// This is intentionally narrower than a general Git command surface: the
+    /// patch is supplied on stdin, `--unsafe-paths` is never enabled, and the
+    /// caller must already have established the authorized branch and source
+    /// ancestry.
+    pub fn apply_checked_text_patch(
+        &self,
+        worktree: impl AsRef<Path>,
+        expected_head: &str,
+        patch: &str,
+    ) -> Result<Vec<PathBuf>, GitSafetyError> {
+        validate_sha(expected_head, "pre-patch integration HEAD")?;
+        validate_integration_patch(patch)?;
+
+        let before = self.inspect_worktree(worktree.as_ref())?;
+        if before.head_sha != expected_head {
+            return Err(git_error(
+                "STALE_INTEGRATION_SHA",
+                "integration HEAD changed before the authorized patch was applied",
+            ));
+        }
+        if !before.clean {
+            return Err(git_error(
+                "DIRTY_WORKTREE",
+                "the controlled patch requires a clean integration worktree",
+            ));
+        }
+
+        self.run_git_apply(&before.worktree, patch, true)?;
+        self.run_git_apply(&before.worktree, patch, false)?;
+
+        let tracked = self.git_output(
+            &before.worktree,
+            ["diff", "--name-only", "-z", "--"].map(OsString::from),
+        )?;
+        let untracked = self.git_output(
+            &before.worktree,
+            ["ls-files", "--others", "--exclude-standard", "-z", "--"].map(OsString::from),
+        )?;
+        let mut changed = parse_changed_files(&tracked.stdout)?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        changed.extend(parse_changed_files(&untracked.stdout)?);
+        if changed.is_empty() {
+            return Err(git_error(
+                "PATCH_NO_CHANGES",
+                "the controlled patch did not produce any worktree changes",
+            ));
+        }
+        Ok(changed.into_iter().collect())
+    }
+
+    fn run_git_apply(
+        &self,
+        worktree: &Path,
+        patch: &str,
+        check_only: bool,
+    ) -> Result<(), GitSafetyError> {
+        let mut command = Command::new(&self.git_binary);
+        command
+            .arg("-C")
+            .arg(worktree)
+            .args(["-c", "core.hooksPath=/dev/null", "apply"]);
+        if check_only {
+            command.arg("--check");
+        }
+        command
+            .args(["--whitespace=nowarn", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(|error| {
+            git_error(
+                "PATCH_APPLY_FAILED",
+                format!("could not start controlled git apply: {error}"),
+            )
+        })?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| git_error("PATCH_APPLY_FAILED", "git apply stdin is unavailable"))?
+            .write_all(patch.as_bytes())
+            .map_err(|error| {
+                git_error(
+                    "PATCH_APPLY_FAILED",
+                    format!("could not send the controlled patch to git apply: {error}"),
+                )
+            })?;
+        let output = child.wait_with_output().map_err(|error| {
+            git_error(
+                "PATCH_APPLY_FAILED",
+                format!("could not wait for controlled git apply: {error}"),
+            )
+        })?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(git_error(
+                if check_only {
+                    "PATCH_CHECK_FAILED"
+                } else {
+                    "PATCH_APPLY_FAILED"
+                },
+                format!(
+                    "controlled git apply failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            ))
+        }
+    }
+
     fn read_source_ref(&self, worktree: &Path) -> Result<Option<SourceRef>, GitSafetyError> {
         let output = self.git_output_allow_status(
             worktree,
@@ -906,12 +1020,14 @@ fn validate_read_only_command(args: &[OsString]) -> Result<(), GitSafetyError> {
         ["show-ref", "--verify", "--hash", reference]
         | ["show-ref", "--verify", "--quiet", reference] => reference.starts_with("refs/heads/"),
         ["ls-files", "-u", "-z"] => true,
+        ["ls-files", "--others", "--exclude-standard", "-z", "--"] => true,
         ["merge-base", "--is-ancestor", ancestor, descendant] => {
             is_sha(ancestor) && is_sha(descendant)
         }
         ["diff", "--name-only", "-z", baseline, integration, "--"] => {
             is_sha(baseline) && is_sha(integration)
         }
+        ["diff", "--name-only", "-z", "--"] => true,
         _ => false,
     };
     if allowed {
@@ -922,6 +1038,37 @@ fn validate_read_only_command(args: &[OsString]) -> Result<(), GitSafetyError> {
             "GitInspector refused a command outside its read-only allowlist",
         ))
     }
+}
+
+fn validate_integration_patch(patch: &str) -> Result<(), GitSafetyError> {
+    if patch.trim().is_empty() {
+        return Err(git_error(
+            "INVALID_PATCH",
+            "controlled patch cannot be empty",
+        ));
+    }
+    if patch.len() > MAX_INTEGRATION_PATCH_BYTES {
+        return Err(git_error(
+            "PATCH_TOO_LARGE",
+            format!(
+                "controlled patch exceeds the {} byte limit",
+                MAX_INTEGRATION_PATCH_BYTES
+            ),
+        ));
+    }
+    if patch.as_bytes().contains(&0) {
+        return Err(git_error(
+            "INVALID_PATCH",
+            "controlled patch cannot contain NUL bytes",
+        ));
+    }
+    if patch.contains("GIT binary patch") || patch.contains("Binary files ") {
+        return Err(git_error(
+            "BINARY_PATCH_FORBIDDEN",
+            "controlled patch accepts text changes only",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default)]
