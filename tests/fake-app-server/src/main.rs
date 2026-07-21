@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tungstenite::{Message, accept};
 
+const CONTROLLED_PATCH_APPROVAL_KEY: &str = "plugins.worktree-merge-consensus.mcp_servers.worktreeMergeConsensus.tools.consensus_apply_patch.approval_mode";
+
 #[derive(Debug, Deserialize)]
 struct Config {
     scenario: String,
@@ -159,9 +161,74 @@ fn handle_request(config: &Config, method: &str, params: &Value) -> Result<Value
             mark_thread_resumed(config, thread_id)?;
             Ok(json!({"thread": thread_detail(config, thread_id)?}))
         }
+        "turn/interrupt" => {
+            let thread_id = params
+                .get("threadId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "turn/interrupt threadId is missing".to_owned())?;
+            let turn_id = params
+                .get("turnId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "turn/interrupt turnId is missing".to_owned())?;
+            append_event(config, &format!("interrupt {thread_id} {turn_id}"))?;
+            Ok(json!({}))
+        }
+        "config/read" => Ok(controlled_patch_config(config)),
+        "config/batchWrite" => configure_controlled_patch(config, params),
         "turn/start" => start_turn(config, params),
         _ => Err(format!("unsupported method {method}")),
     }
+}
+
+fn controlled_patch_config(config: &Config) -> Value {
+    json!({
+        "config": {
+            "plugins": {
+                "worktree-merge-consensus": {
+                    "mcp_servers": {
+                        "worktreeMergeConsensus": {
+                            "tools": {
+                                "consensus_apply_patch": {
+                                    "approval_mode": "approve"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "origins": {},
+        "layers": null,
+        "filePath": config.state_directory.join("codex-home/config.toml")
+    })
+}
+
+fn configure_controlled_patch(config: &Config, params: &Value) -> Result<Value, String> {
+    if params.get("reloadUserConfig") != Some(&json!(true))
+        || params.get("edits")
+            != Some(&json!([{
+                "keyPath": CONTROLLED_PATCH_APPROVAL_KEY,
+                "value": "approve",
+                "mergeStrategy": "upsert"
+            }]))
+    {
+        return Err("config/batchWrite did not contain the exact controlled-patch edit".to_owned());
+    }
+    let codex_home = config.state_directory.join("codex-home");
+    fs::create_dir_all(&codex_home).map_err(|error| format!("create fake Codex home: {error}"))?;
+    let file_path = codex_home.join("config.toml");
+    fs::write(
+        &file_path,
+        b"[plugins.worktree-merge-consensus.mcp_servers.worktreeMergeConsensus.tools.consensus_apply_patch]\napproval_mode = \"approve\"\n",
+    )
+    .map_err(|error| format!("write fake Codex config: {error}"))?;
+    append_event(config, "configured controlled patch approval")?;
+    Ok(json!({
+        "status": "ok",
+        "version": "fake-config-v1",
+        "filePath": file_path,
+        "overriddenMetadata": null
+    }))
 }
 
 fn thread_summary(config: &Config, thread_id: &str) -> Value {

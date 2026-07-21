@@ -12,8 +12,8 @@ use std::{
 };
 
 use app_server_client::{
-    AppServer, CodexAppServer, ConnectOptions, ReconnectingCodexAppServer, ThreadDetail,
-    ThreadSummary,
+    AppServer, CONTROLLED_PATCH_APPROVAL_KEY, CONTROLLED_PATCH_APPROVAL_MODE, CodexAppServer,
+    ConnectOptions, ReconnectingCodexAppServer, ThreadDetail, ThreadSummary,
 };
 use args::{Cli, Command, DaemonCommand, RunArgs, ThreadsCommand, WorktreesCommand};
 use async_trait::async_trait;
@@ -91,6 +91,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     };
     match cli.command {
         Command::Doctor(arguments) => doctor(&state_dir, arguments.json).await,
+        Command::Configure(arguments) => configure_codex(arguments.json).await,
         Command::Threads(arguments) => match arguments.command {
             ThreadsCommand::List(output) => list_threads(output.json).await,
         },
@@ -164,6 +165,7 @@ async fn doctor_value(state_dir: &Path, surface: DoctorSurface) -> Result<Value,
         ));
     }
     let app = connect_app_server().await?;
+    let controlled_patch_approval = require_controlled_patch_approval(&app).await?;
     let page = app.list_threads(None, 1).await.map_err(app_server_error)?;
     let config = ServerConfig::new(state_dir);
     SqliteRunStore::open(&config.database_path)
@@ -188,10 +190,56 @@ async fn doctor_value(state_dir: &Path, surface: DoctorSurface) -> Result<Value,
         "daemon_app_server": "reachable",
         "state_dir": state_dir,
         "sampled_threads": page.data.len(),
+        "controlled_patch_approval": {
+            "key": CONTROLLED_PATCH_APPROVAL_KEY,
+            "mode": controlled_patch_approval,
+        },
         "plugin_surface": surface == DoctorSurface::PluginMcp,
         "legacy_skill": legacy_skill,
     });
     Ok(value)
+}
+
+async fn configure_codex(json_output: bool) -> Result<(), CliError> {
+    let app = connect_app_server().await?;
+    let response = app
+        .configure_controlled_patch_approval()
+        .await
+        .map_err(app_server_error)?;
+    let file_path = response
+        .get("filePath")
+        .and_then(Value::as_str)
+        .unwrap_or("the user Codex config");
+    let value = json!({
+        "ok": true,
+        "key": CONTROLLED_PATCH_APPROVAL_KEY,
+        "mode": CONTROLLED_PATCH_APPROVAL_MODE,
+        "file_path": file_path,
+        "reload_user_config": true,
+        "write_status": response.get("status"),
+    });
+    emit_value(&value, json_output, || {
+        format!(
+            "Configured only consensus_apply_patch for automatic approval in {file_path}; loaded tasks were hot-reloaded."
+        )
+    });
+    Ok(())
+}
+
+async fn require_controlled_patch_approval(app: &impl AppServer) -> Result<String, CliError> {
+    let mode = app
+        .controlled_patch_approval_mode()
+        .await
+        .map_err(app_server_error)?;
+    if mode.as_deref() != Some(CONTROLLED_PATCH_APPROVAL_MODE) {
+        return Err(CliError::new(
+            "APPROVAL_CONFIGURATION_REQUIRED",
+            format!(
+                "{CONTROLLED_PATCH_APPROVAL_KEY} must equal {CONTROLLED_PATCH_APPROVAL_MODE}; run `codex-consensus configure` once, then retry the same run"
+            ),
+        ));
+    }
+    Ok(CONTROLLED_PATCH_APPROVAL_MODE.to_owned())
 }
 
 async fn list_threads(json_output: bool) -> Result<(), CliError> {
@@ -270,6 +318,7 @@ async fn start_run_value(state_dir: &Path, arguments: &RunArgs) -> Result<Value,
     }
 
     let app = connect_app_server().await?;
+    require_controlled_patch_approval(&app).await?;
     let mut selector = TerminalTaskSelector::default();
     let tasks = if let (Some(primary), Some(reviewer)) = (
         arguments.primary_thread.as_deref(),

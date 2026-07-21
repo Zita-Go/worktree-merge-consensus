@@ -60,6 +60,15 @@ with Git without unsafe paths, revalidates both source refs, and records the
 single-use result in SQLite. This capability has no public CLI equivalent and
 cannot select a repository, create a branch, start a Run, or publish anything.
 
+Version 0.1.24 configures Codex to approve only that request-bound plugin tool:
+`plugins.worktree-merge-consensus.mcp_servers.worktreeMergeConsensus.tools.consensus_apply_patch.approval_mode = "approve"`.
+Run `codex-consensus configure` once as the same local account that runs Codex.
+It writes the setting through App Server `config/batchWrite`, hot reloads user
+configuration, and verifies the effective value. It does not change command
+approvals, sandboxing, other MCP tools, or any global approval policy.
+`doctor`, new-run start, and controlled-patch recovery fail closed when the
+setting is absent or overridden.
+
 Read [the v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
 for the exact boundaries.
@@ -87,8 +96,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.23-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.23-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.24-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.24-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -115,11 +124,13 @@ this repository as a local marketplace and install its plugin:
 ```bash
 codex plugin marketplace add /absolute/path/to/worktree-merge-consensus
 codex plugin add worktree-merge-consensus@worktree-merge-consensus
+codex-consensus configure
+codex-consensus doctor
 ```
 
 If you downloaded the plugin archive, extract it and register the directory
-that contains `.agents/plugins/marketplace.json`. Restart Codex after plugin
-installation or update, then restart Codex or open a new task. In a Codex task,
+that contains `.agents/plugins/marketplace.json`. Restart Codex or open a new
+task after plugin installation or update. In a Codex task,
 invoke `$worktree-merge-consensus`; the plugin exposes eight MCP tools. Seven,
 including `consensus_list_worktrees`, launch and control the persistent
 coordinator. The eighth, `consensus_apply_patch`, is a participant-only,
@@ -135,6 +146,12 @@ If `codex-consensus doctor` reports `LEGACY_SKILL_CONFLICT`, an older manually
 installed `$CODEX_HOME/skills/worktree-merge-consensus` is shadowing the plugin
 workflow. Back it up or remove it manually, reinstall matching binary/plugin
 versions, and restart Codex or open a new task. The tool never deletes it.
+
+`codex-consensus configure` is the installation flow's only intentional Codex
+configuration write. It sets and verifies the exact per-plugin, per-server,
+per-tool approval key above. If a managed configuration layer overrides that
+value, configuration and startup report `APPROVAL_CONFIGURATION_REQUIRED`
+instead of asking the operator to weaken a broader approval policy.
 
 ## Use the CLI
 
@@ -193,11 +210,11 @@ including any integration branch already created:
 codex-consensus cancel RUN_ID
 ```
 
-The seven public command groups are therefore `codex-consensus doctor`,
-`codex-consensus threads`, `codex-consensus worktrees`, `codex-consensus run`,
-`codex-consensus status`, `codex-consensus resume`, and
-`codex-consensus cancel`. All support stable machine-readable JSON at their
-operational leaf where shown by `--help`.
+The eight public command groups are therefore `codex-consensus configure`,
+`codex-consensus doctor`, `codex-consensus threads`,
+`codex-consensus worktrees`, `codex-consensus run`, `codex-consensus status`,
+`codex-consensus resume`, and `codex-consensus cancel`. All support stable
+machine-readable JSON at their operational leaf where shown by `--help`.
 
 ## Statuses and recovery
 
@@ -278,6 +295,16 @@ reported merge SHA, the clean authorized target branch, both source ancestors,
 and unchanged frozen refs all agree. Recovery retains the existing merge and
 archives the failed participant turn; it does not recreate the branch, merge a
 second time, or create a replacement Run.
+Version 0.1.24 prevents that internal patch call from becoming a user approval
+deadlock by requiring the exact per-tool approval setting described above. If
+an older attempt is already canonically `waitingOnApproval` with one
+`inProgress` `consensus_apply_patch` call, explicit same-Run resume may
+interrupt and replace only that exact Primary integration turn. The daemon
+first verifies the request-bound tool arguments, successful allowlisted command
+history, absence of a recorded successful patch, clean authorized target,
+source ancestry, and unchanged frozen refs. Unknown or multiple tool calls,
+other incomplete items, drift, or any possible write fail closed. A turn that
+completed during the interrupt race is reused rather than duplicated.
 Version 0.1.13 also
 places concrete, authoritative, direct-field
 payload templates for both approval message types next to the requested output;
@@ -320,6 +347,11 @@ persistent log file by default, so CLI output, Codex task history, and
 - `INCOMPATIBLE_CODEX`: confirm `codex --version`, then compare it with
   [the compatibility policy](docs/compatibility.md). Versions below `0.144.1`,
   malformed output, and App Server identity/method/shape mismatches fail closed.
+- `APPROVAL_CONFIGURATION_REQUIRED`: run `codex-consensus configure` as the
+  same account and `CODEX_HOME` used by Codex, then rerun `doctor`. The required
+  value is the exact `consensus_apply_patch` key documented above; do not set a
+  global auto-approval policy. A managed override must be corrected at its
+  controlling layer.
 - `INCOMPATIBLE_STATE`: a prerelease database has a missing or unknown run-state
   schema. Preserve it for audit and use a fresh `--state-dir`; do not edit
   SQLite manually.

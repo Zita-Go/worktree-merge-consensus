@@ -5,7 +5,10 @@ use std::{
     time::Duration,
 };
 
-use app_server_client::{AppEvent, AppServer, AppServerError, ThreadDetail, TurnExecutionPolicy};
+use app_server_client::{
+    AppEvent, AppServer, AppServerError, CONTROLLED_PATCH_APPROVAL_KEY,
+    CONTROLLED_PATCH_APPROVAL_MODE, ThreadDetail, TurnExecutionPolicy,
+};
 use consensus_core::{
     canonical_json_hash,
     git::{
@@ -33,6 +36,7 @@ use crate::policy::{
 use crate::store::{AcceptedTurn, SqliteRunStore, StoreError};
 
 const MAX_DRIVER_STEPS: usize = 128;
+const TURN_INTERRUPT_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct CompletedTurn {
     response: Value,
@@ -569,6 +573,7 @@ where
                 "primary and reviewer task IDs must differ",
             ));
         }
+        self.ensure_controlled_patch_approval().await?;
         let requested_branch = request
             .integration_branch
             .unwrap_or_else(|| format!("consensus/{}", state.facts.run_id));
@@ -675,6 +680,9 @@ where
             .or(retry_forbidden_operation_action)
             .or(retry_completed_response_action)
             .unwrap_or(state.next_action);
+        if effective_action == NextAction::RequestPrimaryIntegration {
+            self.ensure_controlled_patch_approval().await?;
+        }
         if retry_execution_tool_action.is_some() || retry_forbidden_operation_action.is_some() {
             let target = state.target_integration_branch.as_deref().ok_or_else(|| {
                 CoordinatorError::operational(
@@ -820,6 +828,23 @@ where
         Ok(())
     }
 
+    async fn ensure_controlled_patch_approval(&self) -> Result<(), CoordinatorError> {
+        let mode = self
+            .app
+            .controlled_patch_approval_mode()
+            .await
+            .map_err(|error| communication_error("config/read", None, error))?;
+        if mode.as_deref() != Some(CONTROLLED_PATCH_APPROVAL_MODE) {
+            return Err(CoordinatorError::operational(
+                "APPROVAL_CONFIGURATION_REQUIRED",
+                format!(
+                    "{CONTROLLED_PATCH_APPROVAL_KEY} must equal {CONTROLLED_PATCH_APPROVAL_MODE}; run `codex-consensus configure` once, then retry the same run"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     async fn prepare_terminal_turn_retry(&self, state: &RunState) -> Result<(), CoordinatorError> {
         let run_id = state.facts.run_id.to_string();
         let Some(pending) = self.store.pending_send(&run_id)? else {
@@ -870,6 +895,20 @@ where
                 "persisted pending turn lacks its deterministic request marker",
             ));
         }
+        if status == "inProgress"
+            && self
+                .prepare_pending_controlled_patch_approval_retry(
+                    state,
+                    &pending.message_hash,
+                    thread_id,
+                    turn_id,
+                    &detail,
+                    turn,
+                )
+                .await?
+        {
+            return Ok(());
+        }
         if !matches!(status, "failed" | "interrupted") {
             return Ok(());
         }
@@ -887,6 +926,137 @@ where
             status,
         )?;
         Ok(())
+    }
+
+    async fn prepare_pending_controlled_patch_approval_retry(
+        &self,
+        state: &RunState,
+        message_hash: &str,
+        thread_id: &str,
+        turn_id: &str,
+        detail: &ThreadDetail,
+        turn: &Value,
+    ) -> Result<bool, CoordinatorError> {
+        if state.status != RunStatus::PausedUserAction
+            || state.reason_code.as_deref() != Some("COMMUNICATION_FAILURE")
+            || state.phase != Phase::Integrate
+            || state.next_action != NextAction::RequestPrimaryIntegration
+            || thread_id != state.facts.primary_thread_id
+            || !turn
+                .get("items")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|item| item.get("type").and_then(Value::as_str) == Some("mcpToolCall"))
+        {
+            return Ok(false);
+        }
+        if self
+            .store
+            .successful_patch_recorded(&state.facts.run_id.to_string(), message_hash)?
+        {
+            return Err(CoordinatorError::operational(
+                "TERMINAL_TURN_RETRY_UNSAFE",
+                "an in-progress approval turn already has a successful controlled patch record",
+            ));
+        }
+        if let Some(blocker) = pending_controlled_patch_approval_blocker(
+            state,
+            detail,
+            turn,
+            message_hash,
+            &["inProgress"],
+        ) {
+            return Err(CoordinatorError::operational(
+                "TERMINAL_TURN_RETRY_UNSAFE",
+                blocker,
+            ));
+        }
+
+        let interrupt_error = self.app.interrupt_turn(thread_id, turn_id).await.err();
+        let deadline = tokio::time::Instant::now()
+            + std::cmp::min(self.options.wait_timeout, TURN_INTERRUPT_TIMEOUT);
+        loop {
+            let current = self.read_thread_with_retry(thread_id).await?;
+            self.verify_thread_identity(state, Role::Primary, &current)?;
+            let current_turn = find_turn(&current, turn_id).ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "interrupted controlled patch turn disappeared from canonical history",
+                )
+            })?;
+            let status = current_turn
+                .get("status")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    CoordinatorError::operational(
+                        "HISTORY_UNAVAILABLE",
+                        "interrupted controlled patch turn has no canonical status",
+                    )
+                })?;
+            match status {
+                "completed" => return Ok(true),
+                "failed" | "interrupted" => {
+                    if let Some(blocker) = pending_controlled_patch_approval_blocker(
+                        state,
+                        &current,
+                        current_turn,
+                        message_hash,
+                        &["inProgress", "failed", "declined", "interrupted"],
+                    ) {
+                        return Err(CoordinatorError::operational(
+                            "TERMINAL_TURN_RETRY_UNSAFE",
+                            blocker,
+                        ));
+                    }
+                    if self
+                        .store
+                        .successful_patch_recorded(&state.facts.run_id.to_string(), message_hash)?
+                    {
+                        return Err(CoordinatorError::operational(
+                            "TERMINAL_TURN_RETRY_UNSAFE",
+                            "controlled patch completed while its approval turn was interrupted",
+                        ));
+                    }
+                    let target = state.target_integration_branch.as_deref().ok_or_else(|| {
+                        CoordinatorError::operational(
+                            "INVALID_STATE",
+                            "target integration branch is missing",
+                        )
+                    })?;
+                    self.safety
+                        .verify_integration_in_progress(&state.facts, target)?;
+                    self.store.reset_terminal_turn_for_retry(
+                        &state.facts.run_id.to_string(),
+                        message_hash,
+                        thread_id,
+                        turn_id,
+                        status,
+                    )?;
+                    return Ok(true);
+                }
+                "inProgress" => {}
+                other => {
+                    return Err(CoordinatorError::operational(
+                        "TERMINAL_TURN_RETRY_UNSAFE",
+                        format!(
+                            "controlled patch approval turn entered unsupported status {other}"
+                        ),
+                    ));
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let detail = interrupt_error
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "turn remained in progress after interruption".into());
+                return Err(CoordinatorError::operational(
+                    "COMMUNICATION_FAILURE",
+                    detail,
+                ));
+            }
+            tokio::time::sleep(self.options.poll_interval).await;
+        }
     }
 
     async fn inspect_completed_file_change_tool_unavailable_retry(
@@ -2054,6 +2224,14 @@ fn integration_patch_mcp_blocker(
     if item.get("status").and_then(Value::as_str) != Some("completed") {
         return Some("controlled patch MCP call is not canonically completed".into());
     }
+    controlled_patch_mcp_identity_blocker(state, item, request_hash)
+}
+
+fn controlled_patch_mcp_identity_blocker(
+    state: &RunState,
+    item: &Value,
+    request_hash: &str,
+) -> Option<String> {
     if item.get("pluginId").and_then(Value::as_str)
         != Some("worktree-merge-consensus@worktree-merge-consensus")
         || item.get("server").and_then(Value::as_str) != Some("worktreeMergeConsensus")
@@ -2083,6 +2261,102 @@ fn integration_patch_mcp_blocker(
             .is_some_and(|patch| !patch.trim().is_empty())
     {
         return Some("controlled patch MCP arguments do not match the active run request".into());
+    }
+    None
+}
+
+fn pending_controlled_patch_approval_blocker(
+    state: &RunState,
+    detail: &ThreadDetail,
+    turn: &Value,
+    request_hash: &str,
+    allowed_patch_statuses: &[&str],
+) -> Option<String> {
+    let waiting_on_approval = detail
+        .summary
+        .status
+        .get("activeFlags")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|flag| flag.as_str() == Some("waitingOnApproval"));
+    if turn.get("status").and_then(Value::as_str) == Some("inProgress") && !waiting_on_approval {
+        return Some("active controlled patch turn is not canonically waiting on approval".into());
+    }
+    let Some(items) = turn.get("items").and_then(Value::as_array) else {
+        return Some("canonical items are unavailable".into());
+    };
+    if items.is_empty() {
+        return Some("canonical items are empty".into());
+    }
+    let mut patch_calls = 0;
+    for item in items {
+        let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+            return Some("canonical item has no type".into());
+        };
+        match item_type {
+            "userMessage" | "agentMessage" | "reasoning" => {}
+            "contextCompaction" => {
+                if let Some(blocker) = context_compaction_retry_blocker(item) {
+                    return Some(blocker);
+                }
+            }
+            "commandExecution" => {
+                if item.get("status").and_then(Value::as_str) != Some("completed")
+                    || item.get("exitCode").and_then(Value::as_i64) != Some(0)
+                {
+                    return Some(
+                        "integration command is not canonically completed with exit code zero"
+                            .into(),
+                    );
+                }
+                let Some(command) = item.get("command").and_then(Value::as_str) else {
+                    return Some("integration command omits its canonical command".into());
+                };
+                let Some(cwd) = item.get("cwd").and_then(Value::as_str) else {
+                    return Some("integration command omits its canonical cwd".into());
+                };
+                if item
+                    .get("source")
+                    .is_some_and(|source| source.as_str() != Some("agent"))
+                    || decide_command_approval(
+                        state,
+                        &json!({
+                            "cwd": cwd,
+                            "command": command,
+                            "availableDecisions": ["accept"]
+                        }),
+                    ) != ApprovalDecision::Accept
+                {
+                    return Some(
+                        "integration command is outside the frozen execution policy".into(),
+                    );
+                }
+            }
+            "mcpToolCall" => {
+                patch_calls += 1;
+                if !item
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .is_some_and(|status| allowed_patch_statuses.contains(&status))
+                {
+                    return Some("controlled patch MCP call has an unexpected status".into());
+                }
+                if let Some(blocker) =
+                    controlled_patch_mcp_identity_blocker(state, item, request_hash)
+                {
+                    return Some(blocker);
+                }
+            }
+            _ => {
+                return Some(format!(
+                    "canonical item type {item_type} is not allowed in a controlled patch approval retry"
+                ));
+            }
+        }
+    }
+    if patch_calls != 1 {
+        return Some("controlled patch approval retry requires exactly one MCP call".into());
     }
     None
 }

@@ -34,6 +34,7 @@ the evidence below.
 5. Run:
 
    ```bash
+   codex-consensus configure --json
    codex-consensus doctor --json
    codex-consensus worktrees list \
      --repository /gpfs/users/i-zhangguoqiang/workspace/gh_testtest \
@@ -67,6 +68,11 @@ the evidence below.
    disposable test artifact; confirm the same verification turn is recovered
    without rerunning the command and without relaxing exact-SHA/no-remote
    isolation.
+   Also pause one disposable Primary integration turn at the exact internal
+   `consensus_apply_patch` approval boundary, then enable the required per-tool
+   setting and resume the same Run. Confirm the daemon interrupts only the
+   canonical `waitingOnApproval` turn, revalidates the clean target and frozen
+   refs, and retries the same request without recreating the branch or merge.
 8. Verify `accepted_result` records the authoritative tests,
    `source_refs_unchanged: true`, and local-only/no-push/no-PR fields. Verify the
    test cwd is a cleanly materialized clone of the exact integration SHA with a
@@ -96,6 +102,7 @@ Replace `NOT_RECORDED` only with reproducible, redacted evidence.
 | Required tests | `NOT_RECORDED` |
 | Verification clone / command-item evidence | `NOT_RECORDED` |
 | App Server proxy reconnection | `NOT_RECORDED` |
+| Controlled-patch approval configuration/recovery | `NOT_RECORDED` |
 | Restart recovery | `NOT_RECORDED` |
 | Cancellation preservation | `NOT_RECORDED` |
 

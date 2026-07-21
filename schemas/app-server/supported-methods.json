@@ -8,7 +8,10 @@
     "thread/list",
     "thread/read",
     "thread/resume",
-    "turn/start"
+    "turn/start",
+    "turn/interrupt",
+    "config/read",
+    "config/batchWrite"
   ],
   "requiredNotifications": [
     "thread/status/changed",
@@ -29,7 +32,10 @@
       "approvalsReviewer",
       "environments",
       "sandboxPolicy"
-    ]
+    ],
+    "turn/interrupt": ["threadId", "turnId"],
+    "config/read": ["includeLayers"],
+    "config/batchWrite": ["edits", "reloadUserConfig"]
   },
   "initializeCapabilities": {
     "experimentalApi": true

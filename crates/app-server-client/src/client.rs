@@ -34,6 +34,8 @@ use crate::{
 
 const STDERR_TAIL_LINES: usize = 40;
 const PROXY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+pub const CONTROLLED_PATCH_APPROVAL_KEY: &str = "plugins.worktree-merge-consensus.mcp_servers.worktreeMergeConsensus.tools.consensus_apply_patch.approval_mode";
+pub const CONTROLLED_PATCH_APPROVAL_MODE: &str = "approve";
 
 #[derive(Debug, Clone)]
 pub struct ConnectOptions {
@@ -80,6 +82,8 @@ pub trait AppServer: Send + Sync {
         prompt: &str,
         policy: &TurnExecutionPolicy,
     ) -> Result<TurnHandle, AppServerError>;
+    async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), AppServerError>;
+    async fn controlled_patch_approval_mode(&self) -> Result<Option<String>, AppServerError>;
     async fn respond_to_request(&self, id: Value, result: Value) -> Result<(), AppServerError>;
     async fn next_event(&self) -> Option<AppEvent>;
 }
@@ -235,6 +239,38 @@ impl CodexAppServer {
             ))),
             Err(error) => Err(error.into()),
         }
+    }
+
+    pub async fn configure_controlled_patch_approval(&self) -> Result<Value, AppServerError> {
+        let response = self
+            .rpc_request(
+                "config/batchWrite",
+                json!({
+                    "edits": [{
+                        "keyPath": CONTROLLED_PATCH_APPROVAL_KEY,
+                        "value": CONTROLLED_PATCH_APPROVAL_MODE,
+                        "mergeStrategy": "upsert",
+                    }],
+                    "reloadUserConfig": true,
+                }),
+            )
+            .await?;
+        let status = response.get("status").and_then(Value::as_str);
+        let file_path = response.get("filePath").and_then(Value::as_str);
+        if !matches!(status, Some("ok" | "okOverridden"))
+            || !file_path.is_some_and(|path| !path.trim().is_empty())
+        {
+            return Err(invalid(
+                "config/batchWrite result is missing a valid status or filePath",
+            ));
+        }
+        let mode = self.controlled_patch_approval_mode().await?;
+        if mode.as_deref() != Some(CONTROLLED_PATCH_APPROVAL_MODE) {
+            return Err(AppServerError::IncompatibleCodex(format!(
+                "{CONTROLLED_PATCH_APPROVAL_KEY} is not effectively set to {CONTROLLED_PATCH_APPROVAL_MODE} after config/batchWrite"
+            )));
+        }
+        Ok(response)
     }
 }
 
@@ -516,6 +552,29 @@ impl AppServer for ReconnectingCodexAppServer {
         client.start_turn(thread_id, prompt, policy).await
     }
 
+    async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), AppServerError> {
+        let mut client = self.inner.lock().await;
+        if client.transport().is_closed().await {
+            let error = AppServerError::Rpc(RpcError::Closed);
+            self.reconnect_locked(&mut client, "turn/interrupt preflight", &error)
+                .await?;
+        }
+        client.interrupt_turn(thread_id, turn_id).await
+    }
+
+    async fn controlled_patch_approval_mode(&self) -> Result<Option<String>, AppServerError> {
+        let mut client = self.inner.lock().await;
+        match client.controlled_patch_approval_mode().await {
+            Ok(mode) => Ok(mode),
+            Err(error) if reconnectable(&error) => {
+                self.reconnect_locked(&mut client, "config/read", &error)
+                    .await?;
+                client.controlled_patch_approval_mode().await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     async fn respond_to_request(&self, id: Value, result: Value) -> Result<(), AppServerError> {
         self.inner.lock().await.respond_to_request(id, result).await
     }
@@ -641,6 +700,35 @@ impl AppServer for CodexAppServer {
             .ok_or_else(|| invalid("turn/start result is missing turn"))?;
         serde_json::from_value(turn)
             .map_err(|error| invalid(format!("invalid turn/start result: {error}")))
+    }
+
+    async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), AppServerError> {
+        self.rpc_request(
+            "turn/interrupt",
+            json!({"threadId": thread_id, "turnId": turn_id}),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn controlled_patch_approval_mode(&self) -> Result<Option<String>, AppServerError> {
+        let raw = self
+            .rpc_request("config/read", json!({"includeLayers": false}))
+            .await?;
+        let config = raw
+            .get("config")
+            .and_then(Value::as_object)
+            .ok_or_else(|| invalid("config/read result is missing config"))?;
+        Ok(config
+            .get("plugins")
+            .and_then(|value| value.get("worktree-merge-consensus"))
+            .and_then(|value| value.get("mcp_servers"))
+            .and_then(|value| value.get("worktreeMergeConsensus"))
+            .and_then(|value| value.get("tools"))
+            .and_then(|value| value.get("consensus_apply_patch"))
+            .and_then(|value| value.get("approval_mode"))
+            .and_then(Value::as_str)
+            .map(str::to_owned))
     }
 
     async fn next_event(&self) -> Option<AppEvent> {

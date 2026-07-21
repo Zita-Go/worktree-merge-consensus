@@ -282,7 +282,8 @@ as internal participants for which the launcher skill is inapplicable. A
 same-run retry may discard the exact denied legacy `sed -n 1,240p` read of this
 plugin's semver-versioned `SKILL.md`, but that read is never admitted to the
 live integration execution allowlist. `inProgress`, writes, wrong cwd, nested
-shells, and unknown items remain terminal. Version 0.1.21 recognizes the App
+shells, and unknown items remain terminal except for the exact v0.1.24
+controlled-patch approval recovery below. Version 0.1.21 recognizes the App
 Server's internal `contextCompaction` lifecycle marker during retry auditing
 only when its object has exactly a nonempty `id` and the fixed `type`; any
 additional field remains terminal. Version 0.1.22 allows exactly
@@ -298,7 +299,19 @@ records single use in SQLite. An exact completed
 and replaced only when its approved identity, bwrap permission evidence,
 reported merge SHA, clean target branch, both source ancestors, and frozen refs
 all match. The replacement reuses the existing merge and cannot create a new
-Run or repeat branch creation and merge. Version 0.1.13 renders concrete direct-field payload templates for
+Run or repeat branch creation and merge. Version 0.1.24 requires the effective
+per-tool setting
+`plugins.worktree-merge-consensus.mcp_servers.worktreeMergeConsensus.tools.consensus_apply_patch.approval_mode = "approve"`
+before Run start or controlled-patch resume. After explicit same-Run resume, a
+canonically `waitingOnApproval` Primary integration turn may be interrupted and
+retried only when it contains exactly one request-bound `inProgress`
+`consensus_apply_patch` item, every command item completed successfully and
+still passes the integration allowlist, no successful patch record exists, the
+authorized target is clean with both frozen source ancestors, and both source
+refs remain frozen. Unknown or multiple tool calls, other incomplete items,
+mismatched arguments, drift, or possible writes fail closed. If the turn
+completes during the interrupt race, its completed result is reused rather than
+duplicated. Version 0.1.13 renders concrete direct-field payload templates for
 `APPROVED_PLAN` and `APPROVED_RESULT`; the checked-in JSON Schema requires those
 approval identity fields at payload top level rather than accepting a nested
 identity object.

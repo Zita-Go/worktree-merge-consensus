@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use app_server_client::{
-    AppServer, CodexAppServer, TurnExecutionPolicy, transport::JsonRpcTransport,
+    AppServer, CONTROLLED_PATCH_APPROVAL_KEY, CodexAppServer, TurnExecutionPolicy,
+    transport::JsonRpcTransport,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex, split};
@@ -187,6 +188,46 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
             json!({"turn": {"id": "turn-4", "status": "inProgress", "items": []}}),
         )
         .await;
+
+        let config_read = read_request(&mut lines).await;
+        assert_eq!(config_read["method"], "config/read");
+        assert_eq!(config_read["params"], json!({"includeLayers": false}));
+        respond(&mut server_write, &config_read, plugin_config("prompt")).await;
+
+        let config_write = read_request(&mut lines).await;
+        assert_eq!(config_write["method"], "config/batchWrite");
+        assert_eq!(config_write["params"]["reloadUserConfig"], true);
+        assert_eq!(
+            config_write["params"]["edits"],
+            json!([{
+                "keyPath": CONTROLLED_PATCH_APPROVAL_KEY,
+                "value": "approve",
+                "mergeStrategy": "upsert"
+            }])
+        );
+        respond(
+            &mut server_write,
+            &config_write,
+            json!({
+                "status": "ok",
+                "version": "config-v2",
+                "filePath": "/home/test/.codex/config.toml",
+                "overriddenMetadata": null
+            }),
+        )
+        .await;
+
+        let verify_config = read_request(&mut lines).await;
+        assert_eq!(verify_config["method"], "config/read");
+        respond(&mut server_write, &verify_config, plugin_config("approve")).await;
+
+        let interrupt = read_request(&mut lines).await;
+        assert_eq!(interrupt["method"], "turn/interrupt");
+        assert_eq!(
+            interrupt["params"],
+            json!({"threadId": "t-1", "turnId": "turn-4"})
+        );
+        respond(&mut server_write, &interrupt, json!({})).await;
     });
 
     client.initialize().await.unwrap();
@@ -230,6 +271,13 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
         .await
         .unwrap();
     assert_eq!(turn.id, "turn-4");
+    assert_eq!(
+        client.controlled_patch_approval_mode().await.unwrap(),
+        Some("prompt".into())
+    );
+    let configured = client.configure_controlled_patch_approval().await.unwrap();
+    assert_eq!(configured["status"], "ok");
+    client.interrupt_turn("t-1", "turn-4").await.unwrap();
     server.await.unwrap();
 }
 
@@ -312,6 +360,28 @@ fn thread_with_turns() -> Value {
         "status": {"type": "idle"},
         "source": "appServer",
         "turns": [{"id": "turn-1", "status": "completed", "items": []}]
+    })
+}
+
+fn plugin_config(mode: &str) -> Value {
+    json!({
+        "config": {
+            "plugins": {
+                "worktree-merge-consensus": {
+                    "mcp_servers": {
+                        "worktreeMergeConsensus": {
+                            "tools": {
+                                "consensus_apply_patch": {
+                                    "approval_mode": mode
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "origins": {},
+        "layers": null
     })
 }
 

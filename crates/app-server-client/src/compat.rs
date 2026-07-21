@@ -8,6 +8,9 @@ pub const REQUIRED_METHODS: &[&str] = &[
     "thread/read",
     "thread/resume",
     "turn/start",
+    "turn/interrupt",
+    "config/read",
+    "config/batchWrite",
 ];
 
 const METHOD_FIXTURE: &str = include_str!("../../../schemas/app-server/supported-methods.json");

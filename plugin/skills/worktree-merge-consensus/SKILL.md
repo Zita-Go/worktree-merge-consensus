@@ -25,6 +25,11 @@ Codex starts the bundled MCP server with `codex-consensus mcp-server`. Do not st
 - `consensus_resume` → `codex-consensus resume <run-id>`
 - `consensus_cancel` → `codex-consensus cancel <run-id>`
 
+`codex-consensus configure` is a one-time installation command, not an MCP
+tool. It writes and verifies only
+`plugins.worktree-merge-consensus.mcp_servers.worktreeMergeConsensus.tools.consensus_apply_patch.approval_mode = "approve"`.
+Do not replace it with a global approval change.
+
 The eighth tool, `consensus_apply_patch`, intentionally has no public CLI
 equivalent. It is not an operator or launcher tool. Only a coordinator-authored
 Primary integration prompt may call it with the exact active run ID and request
@@ -35,7 +40,7 @@ Use those CLI commands only for diagnostics or when the user explicitly requests
 
 ## Launch
 
-1. Call `consensus_doctor`. Stop and report its exact error if the binary, plugin surface, Codex App Server, Git, private state, or daemon is unavailable or incompatible. For `LEGACY_SKILL_CONFLICT`, do not delete anything; give the returned migration guidance.
+1. Call `consensus_doctor`. Stop and report its exact error if the binary, plugin surface, Codex App Server, Git, private state, or daemon is unavailable or incompatible. For `LEGACY_SKILL_CONFLICT`, do not delete anything; give the returned migration guidance. For `APPROVAL_CONFIGURATION_REQUIRED`, tell the user to run the one-time `codex-consensus configure` installation command as the same account and `CODEX_HOME` used by Codex, then stop. Never relax global or command approvals.
 2. Call `consensus_list_threads`. Present all visible tasks and assign two different task IDs as primary and reviewer. A task cwd is display metadata only: do not filter tasks by cwd or infer a source worktree from it.
 3. Obtain an absolute `repository_path` to any worktree in the intended repository. Call `consensus_list_worktrees` with that path.
 4. Present the registered entries with path, source ref or detached state, full HEAD SHA, and clean state. Assign two different, available, clean worktrees as primary and reviewer sources.
@@ -111,8 +116,9 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   plugin's semver-versioned `SKILL.md`; that read never enters the live command
   allowlist. Version 0.1.21 treats App Server's internal `contextCompaction`
   lifecycle marker as retry-safe only when it contains exactly a nonempty `id`
-  and the fixed `type`. Extra fields, `inProgress`, writes, wrong cwd, and
-  unknown items remain terminal.
+  and the fixed `type`. Extra fields, writes, wrong cwd, and unknown items
+  remain terminal; `inProgress` remains terminal except for the exact
+  v0.1.24 controlled-patch approval recovery below.
   Version 0.1.22 additionally permits only `rg --files -g AGENTS.md` in the
   frozen primary cwd for repository-instruction discovery. Other `rg` forms
   remain denied; subsequent tracked-file reads use the read-only Git allowlist.
@@ -128,6 +134,16 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   clean target branch, both source ancestors, and frozen source refs all match.
   The existing merge is retained; no replacement Run, branch recreation, or
   second merge is allowed.
+  Version 0.1.24 requires the exact per-tool `approval_mode = "approve"`
+  setting above before starting a Run or resuming controlled patch work. After
+  explicit same-Run resume, a canonically `waitingOnApproval` Primary turn may
+  be interrupted and retried only when it contains exactly one request-bound
+  `inProgress` `consensus_apply_patch` call, all command items completed
+  successfully and still pass the allowlist, no patch was recorded, the
+  authorized target remains clean with both source ancestors, and frozen refs
+  are unchanged. Unknown, multiple, or mismatched calls, other incomplete
+  items, drift, or possible writes fail closed. If the turn completed during
+  the interrupt race, its completed result is reused instead of duplicated.
   Network, added-permission, later-phase, mismatched, or side-effectful cases
   remain terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.

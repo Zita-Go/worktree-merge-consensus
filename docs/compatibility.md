@@ -33,7 +33,10 @@ and requires these JSON-RPC methods:
 - `thread/list`
 - `thread/read`
 - `thread/resume`
+- `turn/interrupt`
 - `turn/start`
+- `config/read`
+- `config/batchWrite`
 
 It consumes `thread/status/changed`, `turn/started`, and `turn/completed`
 notifications. Task reads include turns. Coordinator prompts require exactly
@@ -67,6 +70,16 @@ App Server requires that opt-in before accepting the pinned
 `turn/start.environments` selection. Each turn selects environment `local` with
 the authorized absolute cwd instead of disabling execution environments or
 inheriting an arbitrary sticky environment.
+Version 0.1.24 also reads the effective Codex configuration and requires the
+exact key
+`plugins.worktree-merge-consensus.mcp_servers.worktreeMergeConsensus.tools.consensus_apply_patch.approval_mode`
+to equal `"approve"`. `codex-consensus configure` writes only that key through
+`config/batchWrite` with `reloadUserConfig: true`, then verifies it through
+`config/read`. It does not modify command approvals, sandbox policy, other MCP
+tools, or a global approval setting. `doctor`, run start, and controlled-patch
+resume fail with `APPROVAL_CONFIGURATION_REQUIRED` when the effective value is
+absent or overridden. The coordinator uses `turn/interrupt` only for the exact
+v0.1.24 pending controlled-patch approval recovery described by the protocol.
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
 fixed task ID. `thread/read` can return persisted history for a `notLoaded`
 task, but it does not load that task for model execution; starting a turn after
@@ -110,6 +123,9 @@ equivalent. Plugin and binary versions must come from the same release.
 After installing or updating the plugin, restart Codex or open a new task. A
 conflicting manually installed `$CODEX_HOME/skills/worktree-merge-consensus`
 is reported as `LEGACY_SKILL_CONFLICT` and is never deleted automatically.
+The same-account installation must also run `codex-consensus configure` once;
+a broad or global auto-approval configuration is neither required nor accepted
+as a substitute for the exact tool key.
 
 `doctor` validates a fresh App Server protocol connection and asks the
 coordinator daemon to probe its own connection, but deliberately does not spend

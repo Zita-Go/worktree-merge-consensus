@@ -6,7 +6,8 @@ pub mod transport;
 pub mod types;
 
 pub use client::{
-    AppServer, AppServerError, CodexAppServer, ConnectOptions, ReconnectingCodexAppServer,
+    AppServer, AppServerError, CONTROLLED_PATCH_APPROVAL_KEY, CONTROLLED_PATCH_APPROVAL_MODE,
+    CodexAppServer, ConnectOptions, ReconnectingCodexAppServer,
 };
 pub use types::{
     AppEvent, InitializeInfo, ThreadDetail, ThreadPage, ThreadSummary, TurnExecutionPolicy,

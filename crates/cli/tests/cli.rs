@@ -10,6 +10,7 @@ fn help_lists_public_commands_but_not_internal_modes() {
         .assert()
         .success()
         .stdout(predicate::str::contains("doctor"))
+        .stdout(predicate::str::contains("configure"))
         .stdout(predicate::str::contains("threads"))
         .stdout(predicate::str::contains("worktrees"))
         .stdout(predicate::str::contains("run"))

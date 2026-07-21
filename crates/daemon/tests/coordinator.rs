@@ -226,6 +226,29 @@ async fn task_cwd_is_metadata_and_bound_worktrees_drive_turns() {
 }
 
 #[tokio::test]
+async fn start_requires_the_exact_controlled_patch_approval_configuration() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app =
+        Arc::new(FakeAppServer::new(conflict_free_replies()).with_approval_mode(Some("prompt")));
+    let coordinator = Coordinator::new(
+        app,
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+
+    let error = coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "APPROVAL_CONFIGURATION_REQUIRED");
+    assert!(error.detail().contains("codex-consensus configure"));
+    assert!(store.load_run(RUN_ID).unwrap().is_none());
+}
+
+#[tokio::test]
 async fn target_branch_is_validated_and_normalized_before_the_run_is_stored() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -1469,6 +1492,62 @@ async fn completed_bwrap_file_change_blocker_retries_the_same_run_and_existing_m
 }
 
 #[tokio::test]
+async fn pending_controlled_patch_approval_is_interrupted_and_retried_on_the_same_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let normal = conflict_free_replies();
+    let mut replies = normal[..5].to_vec();
+    replies.push(normal[4].clone());
+    replies.push(normal[5].clone());
+    let app = Arc::new(FakeAppServer::deferred(
+        replies,
+        5,
+        DeferMode::PatchApproval,
+    ));
+    let safety = Arc::new(InProgressRecoverySafety::default());
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::clone(&safety),
+        CoordinatorOptions {
+            wait_timeout: Duration::from_millis(15),
+            poll_interval: Duration::from_millis(1),
+            communication_attempts: 1,
+        },
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let paused = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+    assert_eq!(paused.reason_code.as_deref(), Some("COMMUNICATION_FAILURE"));
+    assert_eq!(paused.next_action, NextAction::RequestPrimaryIntegration);
+    assert!(
+        !store
+            .successful_patch_recorded(
+                RUN_ID,
+                &store.pending_send(RUN_ID).unwrap().unwrap().message_hash
+            )
+            .unwrap()
+    );
+
+    safety
+        .integration_branch_active
+        .store(true, Ordering::SeqCst);
+    let result = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Accepted);
+    assert_eq!(
+        app.interrupts(),
+        vec![("primary".to_owned(), "turn-5".to_owned())]
+    );
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    assert_eq!(app.request_count(), 8);
+}
+
+#[tokio::test]
 async fn controlled_patch_requires_the_exact_active_request_and_succeeds_only_once() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -1996,6 +2075,8 @@ struct FakeAppServer {
     prompts: Mutex<Vec<String>>,
     policies: Mutex<Vec<TurnExecutionPolicy>>,
     responses: Mutex<Vec<Value>>,
+    interrupts: Mutex<Vec<(String, String)>>,
+    approval_mode: Mutex<Option<String>>,
     deferred: Option<(usize, DeferMode)>,
     deferred_replies: Mutex<HashMap<String, Value>>,
     events: Mutex<VecDeque<AppEvent>>,
@@ -2006,6 +2087,7 @@ struct FakeAppServer {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DeferMode {
     UserInput,
+    PatchApproval,
     ForbiddenCommand,
     FileGrantRoot,
     Hold,
@@ -2042,6 +2124,8 @@ impl FakeAppServer {
             prompts: Mutex::new(Vec::new()),
             policies: Mutex::new(Vec::new()),
             responses: Mutex::new(Vec::new()),
+            interrupts: Mutex::new(Vec::new()),
+            approval_mode: Mutex::new(Some("approve".into())),
             deferred: None,
             deferred_replies: Mutex::new(HashMap::new()),
             events: Mutex::new(VecDeque::new()),
@@ -2058,6 +2142,11 @@ impl FakeAppServer {
 
     fn with_verification_behavior(mut self, behavior: VerificationBehavior) -> Self {
         self.verification_behavior = behavior;
+        self
+    }
+
+    fn with_approval_mode(self, mode: Option<&str>) -> Self {
+        *self.approval_mode.lock().unwrap() = mode.map(str::to_owned);
         self
     }
 
@@ -2089,6 +2178,10 @@ impl FakeAppServer {
 
     fn responses(&self) -> Vec<Value> {
         self.responses.lock().unwrap().clone()
+    }
+
+    fn interrupts(&self) -> Vec<(String, String)> {
+        self.interrupts.lock().unwrap().clone()
     }
 
     fn request_count(&self) -> usize {
@@ -2186,7 +2279,26 @@ impl FakeAppServer {
             .iter()
             .any(|turn| turn.get("status").and_then(Value::as_str) == Some("inProgress"))
         {
-            summary.status = json!({"type": "active", "activeFlags": []});
+            let waiting_on_approval = turns.iter().any(|turn| {
+                turn.get("status").and_then(Value::as_str) == Some("inProgress")
+                    && turn
+                        .get("items")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .any(|item| {
+                            item.get("type").and_then(Value::as_str) == Some("mcpToolCall")
+                                && item.get("status").and_then(Value::as_str) == Some("inProgress")
+                        })
+            });
+            summary.status = json!({
+                "type": "active",
+                "activeFlags": if waiting_on_approval {
+                    vec!["waitingOnApproval"]
+                } else {
+                    Vec::<&str>::new()
+                }
+            });
         }
         ThreadDetail {
             summary,
@@ -2350,6 +2462,25 @@ impl AppServer for FakeAppServer {
                 "exitCode": 0
             }));
         }
+        if deferred_mode == Some(DeferMode::PatchApproval) {
+            let metadata = prompt_json_block(prompt, "Authoritative turn metadata:");
+            let delivery =
+                prompt_json_block(prompt, "Coordinator delivery identity for crash recovery:");
+            turn["items"].as_array_mut().unwrap().push(json!({
+                "id": format!("patch-{turn_id}"),
+                "type": "mcpToolCall",
+                "pluginId": "worktree-merge-consensus@worktree-merge-consensus",
+                "server": "worktreeMergeConsensus",
+                "tool": "consensus_apply_patch",
+                "arguments": {
+                    "run_id": metadata["run_id"],
+                    "request_hash": delivery["request_hash"],
+                    "patch": "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n"
+                },
+                "status": "inProgress",
+                "appContext": null
+            }));
+        }
         if action == "REQUEST_PRIMARY_VERIFICATION" {
             append_verification_command_items(&mut turn, prompt, self.verification_behavior);
         }
@@ -2392,6 +2523,19 @@ impl AppServer for FakeAppServer {
             status: "completed".into(),
             items: Vec::new(),
         })
+    }
+
+    async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), AppServerError> {
+        self.interrupts
+            .lock()
+            .unwrap()
+            .push((thread_id.to_owned(), turn_id.to_owned()));
+        self.set_turn_status(thread_id, turn_id, "interrupted");
+        Ok(())
+    }
+
+    async fn controlled_patch_approval_mode(&self) -> Result<Option<String>, AppServerError> {
+        Ok(self.approval_mode.lock().unwrap().clone())
     }
 
     async fn next_event(&self) -> Option<AppEvent> {

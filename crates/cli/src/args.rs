@@ -46,6 +46,7 @@ impl Cli {
     pub fn json_output(&self) -> bool {
         match &self.command {
             Command::Doctor(arguments) => arguments.json,
+            Command::Configure(arguments) => arguments.json,
             Command::Threads(arguments) => match &arguments.command {
                 ThreadsCommand::List(output) => output.json,
             },
@@ -64,6 +65,8 @@ impl Cli {
 pub enum Command {
     /// Verify local Codex, Git, state, and daemon compatibility.
     Doctor(OutputArgs),
+    /// Configure the single controlled patch tool for unattended participant turns.
+    Configure(OutputArgs),
     /// List locally available Codex tasks.
     Threads(ThreadsArgs),
     /// List registered Git worktrees in one repository.
