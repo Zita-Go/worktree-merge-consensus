@@ -58,8 +58,8 @@ Git 从主修源 SHA 到结果 SHA 的真实差异（包括大型文本文件）
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.21-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.21-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.22-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.22-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 v0.1.0 的 GNU 产物要求 GLIBC 2.39，现已停止推荐；受支持的 Linux 主机请使用
@@ -200,7 +200,9 @@ turn 显式选择同机 `local` 执行环境；空环境数组会禁用命令与
 已被拒绝的、精确读取本插件版本化 `SKILL.md` 的 `sed -n 1,240p` 旧查询，该查询仍不属于实时执行白名单。
 0.1.21 还会识别 Codex App Server 的精确内部 `contextCompaction` 标记，但只有该对象除固定 `type`
 和非空 `id` 外不含任何字段时，恢复审计才将其视为安全；它只是上下文生命周期记录，不是命令、文件修改或工具调用。
-额外字段、`inProgress`、写命令、错误 cwd、未知 item 或其他副作用仍是终态。0.1.13 还会在两类批准请求旁给出带权威值的扁平 payload
+0.1.22 仅在冻结的主修 cwd 中允许精确的 `rg --files -g AGENTS.md`，用于发现仓库指令；其他 `rg` 形式仍被拒绝，
+后续受跟踪文件检查必须使用既有的只读 Git 查询白名单。额外字段、`inProgress`、写命令、错误 cwd、未知 item 或其他副作用仍是终态。
+0.1.13 还会在两类批准请求旁给出带权威值的扁平 payload
 模板，并由 JSON Schema 拒绝仅嵌套在其他对象中的批准身份。待完成的验证 turn 可能在克隆中留下测试产物；恢复时
 可允许该克隆变脏，但仍强制要求持久化路径、精确 detached SHA、独立 Git common directory
 且无 remote。

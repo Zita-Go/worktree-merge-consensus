@@ -78,8 +78,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.21-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.21-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.22-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.22-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -255,6 +255,10 @@ Version 0.1.21 also recognizes Codex App Server's exact internal
 a nonempty `id` and the fixed `type`. This marker records context lifecycle, not
 a command, file change, or tool call. Extra fields, `inProgress`, a write, wrong
 cwd, unknown item, or other side effect remains terminal.
+Version 0.1.22 permits exactly `rg --files -g AGENTS.md` in the frozen primary
+cwd for required repository-instruction discovery. Every other `rg` form stays
+denied, and the participant prompt requires subsequent tracked-file inspection
+through the existing read-only Git query allowlist.
 Version 0.1.13 also
 places concrete, authoritative, direct-field
 payload templates for both approval message types next to the requested output;

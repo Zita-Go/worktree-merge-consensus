@@ -107,6 +107,9 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   lifecycle marker as retry-safe only when it contains exactly a nonempty `id`
   and the fixed `type`. Extra fields, `inProgress`, writes, wrong cwd, and
   unknown items remain terminal.
+  Version 0.1.22 additionally permits only `rg --files -g AGENTS.md` in the
+  frozen primary cwd for repository-instruction discovery. Other `rg` forms
+  remain denied; subsequent tracked-file reads use the read-only Git allowlist.
   Network, added-permission, later-phase, mismatched, or side-effectful cases
   remain terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.

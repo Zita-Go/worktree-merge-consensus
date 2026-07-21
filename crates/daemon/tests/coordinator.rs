@@ -785,6 +785,19 @@ async fn interrupted_forbidden_operation_with_terminal_read_only_queries_retries
         "primary",
         "turn-5",
         json!({
+            "id": "instruction-discovery-turn-5",
+            "type": "commandExecution",
+            "command": "/bin/bash -lc 'rg --files -g AGENTS.md'",
+            "cwd": "/repo/primary",
+            "status": "completed",
+            "exitCode": 0,
+            "source": "agent"
+        }),
+    );
+    app.append_turn_item(
+        "primary",
+        "turn-5",
+        json!({
             "id": "read-only-command-turn-5",
             "type": "commandExecution",
             "command": "/bin/bash -lc 'git rev-parse HEAD'",

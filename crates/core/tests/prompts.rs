@@ -93,6 +93,37 @@ fn prompt_declares_role_binding_and_binding_mismatch_protocol() {
 }
 
 #[test]
+fn integration_prompt_declares_the_frozen_repository_read_surface() {
+    let mut state = RunState::new(facts());
+    state.next_action = NextAction::RequestPrimaryIntegration;
+
+    let prompt = build_turn_prompt(
+        Role::Primary,
+        NextAction::RequestPrimaryIntegration,
+        &state,
+        &json!({
+            "primary_contract": {"goal": "preserve primary"},
+            "reviewer_contract": {"goal": "preserve reviewer"},
+            "approved_plan": {"revision": 1},
+            "coverage_matrix": [],
+            "approval": {"approved_plan_revision": 1},
+            "target_integration_branch": "consensus/test-run"
+        }),
+    )
+    .unwrap();
+
+    for required in [
+        "`rg --files -g AGENTS.md`",
+        "`git show REV:path`",
+        "`git ls-files`",
+        "`git diff`",
+        "do not invoke sed, cat, find, ls, head, tail",
+    ] {
+        assert!(prompt.contains(required), "missing {required:?}");
+    }
+}
+
+#[test]
 fn plan_verdict_prompt_contains_both_contracts_plan_and_coverage() {
     let mut state = plan_state();
     state

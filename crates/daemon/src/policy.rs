@@ -75,7 +75,12 @@ pub(crate) fn command_approval_denial(state: &RunState, params: &Value) -> Optio
         return Some("command contains shell control syntax");
     }
     match state.next_action {
-        NextAction::RequestPrimaryIntegration if is_allowed_git_command(state, command) => None,
+        NextAction::RequestPrimaryIntegration
+            if is_allowed_git_command(state, command)
+                || is_allowed_instruction_discovery(command) =>
+        {
+            None
+        }
         NextAction::RequestPrimaryVerification
             if state
                 .required_test_commands
@@ -121,6 +126,7 @@ pub(crate) fn is_retry_safe_read_only_integration_command(
     !command.is_empty()
         && !contains_shell_control(command)
         && (is_allowed_read_only_git_command(state, command)
+            || is_allowed_instruction_discovery(command)
             || is_retry_safe_stale_launcher_skill_read(command))
 }
 
@@ -229,6 +235,20 @@ fn is_allowed_read_only_git_command(state: &RunState, command: &str) -> bool {
         return false;
     };
     is_allowed_read_only_git_invocation(state, subcommand, rest)
+}
+
+fn is_allowed_instruction_discovery(command: &str) -> bool {
+    let Ok(tokens) = shell_words::split(command) else {
+        return false;
+    };
+    matches!(
+        tokens
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice(),
+        ["rg", "--files", "-g", "AGENTS.md"]
+    )
 }
 
 fn is_retry_safe_stale_launcher_skill_read(command: &str) -> bool {
@@ -516,6 +536,66 @@ mod tests {
             "/bin/bash -lc \"bash -lc 'git show-ref --verify refs/heads/consensus/test-run'\"",
             "git switch -c consensus/test-run aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ] {
+            assert!(!is_retry_safe_read_only_integration_command(
+                &state,
+                "/repo/primary",
+                command
+            ));
+        }
+    }
+
+    #[test]
+    fn instruction_discovery_is_exactly_scoped_and_read_only() {
+        let state = integration_state();
+
+        for command in [
+            "rg --files -g AGENTS.md",
+            "/bin/bash -lc 'rg --files -g AGENTS.md'",
+        ] {
+            assert_eq!(
+                decide_command_approval(
+                    &state,
+                    &json!({
+                        "cwd": "/repo/primary",
+                        "command": command,
+                        "availableDecisions": ["accept"]
+                    })
+                ),
+                ApprovalDecision::Accept
+            );
+            assert!(is_retry_safe_read_only_integration_command(
+                &state,
+                "/repo/primary",
+                command
+            ));
+        }
+
+        assert_eq!(
+            decide_command_approval(
+                &state,
+                &json!({
+                    "cwd": "/repo/reviewer",
+                    "command": "rg --files -g AGENTS.md"
+                })
+            ),
+            ApprovalDecision::Cancel
+        );
+        for command in [
+            "rg --files",
+            "rg --files -g '*.md'",
+            "rg --files -g AGENTS.md /tmp",
+            "rg --files --hidden -g AGENTS.md",
+            "find . -name AGENTS.md",
+            "rg --files -g AGENTS.md && git status",
+        ] {
+            assert_eq!(
+                decide_command_approval(
+                    &state,
+                    &json!({"cwd": "/repo/primary", "command": command})
+                ),
+                ApprovalDecision::Cancel,
+                "{command} must fail closed"
+            );
             assert!(!is_retry_safe_read_only_integration_command(
                 &state,
                 "/repo/primary",

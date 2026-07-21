@@ -285,7 +285,10 @@ live integration execution allowlist. `inProgress`, writes, wrong cwd, nested
 shells, and unknown items remain terminal. Version 0.1.21 recognizes the App
 Server's internal `contextCompaction` lifecycle marker during retry auditing
 only when its object has exactly a nonempty `id` and the fixed `type`; any
-additional field remains terminal. Version 0.1.13 renders concrete direct-field payload templates for
+additional field remains terminal. Version 0.1.22 allows exactly
+`rg --files -g AGENTS.md` in the frozen primary cwd for repository-instruction
+discovery, keeps every other `rg` form denied, and directs all other tracked-file
+inspection through the existing read-only Git command policy. Version 0.1.13 renders concrete direct-field payload templates for
 `APPROVED_PLAN` and `APPROVED_RESULT`; the checked-in JSON Schema requires those
 approval identity fields at payload top level rather than accepting a nested
 identity object.
