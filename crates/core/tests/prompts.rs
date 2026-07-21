@@ -38,6 +38,7 @@ fn every_prompt_is_self_contained_and_declares_strict_output() {
         "Worktree Merge Consensus Protocol v1",
         "Text outside that one JSON object is invalid",
         "including BLOCKED, must copy phase",
+        "Do not call `worktreeMergeConsensus`",
     ] {
         assert!(prompt.contains(required), "missing {required:?}");
     }

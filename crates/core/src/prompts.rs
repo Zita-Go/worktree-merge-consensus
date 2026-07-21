@@ -88,6 +88,7 @@ Safety policy:
 - If that source does not contain the implementation represented by this task's conversation history, return BLOCKED with reason_code SOURCE_BINDING_MISMATCH and evidence. Do not search for or switch to another source directory.
 - Never push, open a pull request, modify either source ref, merge into an existing branch, reset, rebase, delete branches, or clean worktrees.
 - Do not request user input, network access, broader filesystem access, or sandbox escalation. Return BLOCKED with evidence if the complete payload is insufficient.
+- Do not call `worktreeMergeConsensus` or any `consensus_*` tool from this task turn. The coordinator already supplied the frozen identity and complete payload.
 - No integration branch may be created before exact APPROVED_PLAN authorization.
 - Approval is valid only for the exact run, source SHAs, plan revision, round, branch, and integration SHA in the envelope.
 - Contract and plan test commands must be direct non-Git commands. Never declare `git diff --check` or any other Git executable as a test. Shell control operators and dynamic shell or interpreter launchers are also forbidden.

@@ -78,8 +78,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.10-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.10-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.11-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.11-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -214,8 +214,11 @@ plan declares a forbidden Git test, the run pauses with `INVALID_TEST_COMMAND`.
 An explicit resume revalidates both frozen sources, archives the completed
 pre-integration read-only turn, and requests one corrected response only when
 canonical history contains no file change, incomplete command, or unknown item.
-Version 0.1.10 can also recover the equivalent legacy `BLOCKED` state produced
-by 0.1.9 while atomically reacquiring the repository lock. Do not use `resume`
+The only retry-safe MCP history is a completed query to this plugin's exact
+`consensus_list_threads`, `consensus_list_worktrees`, or `consensus_status`
+tool; mutating, external, and unknown MCP calls fail closed. Version 0.1.10 and
+later can also recover the equivalent legacy `BLOCKED` state produced by 0.1.9
+while atomically reacquiring the repository lock. Do not use `resume`
 for any other `BLOCKED` run or for a `CANCELLED` run. A pending verification turn
 may leave test artifacts in its clone; recovery permits that clone to be dirty
 only while still requiring the persisted path, exact detached SHA, independent

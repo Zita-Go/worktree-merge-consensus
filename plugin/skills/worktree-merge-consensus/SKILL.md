@@ -55,9 +55,12 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   tests cannot invoke Git. After explicit user authorization, call
   `consensus_resume` on the same run. The coordinator revalidates both frozen
   sources and replaces the exact completed pre-integration read-only turn only
-  when canonical history has no file change, incomplete command, or unknown
-  item. Version 0.1.10 may also recover this reason from the legacy `BLOCKED`
-  state created by 0.1.9; do not treat any other `BLOCKED` state as resumable.
+  when canonical history has no file change, incomplete command, mutating or
+  external MCP call, or unknown item. Completed calls to this plugin's exact
+  `consensus_list_threads`, `consensus_list_worktrees`, and `consensus_status`
+  queries are retry-safe. Version 0.1.10 and later may also recover this reason
+  from the legacy `BLOCKED` state created by 0.1.9; do not treat any other
+  `BLOCKED` state as resumable.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
 Read [references/protocol.md](references/protocol.md) when explaining lifecycle states, acceptance evidence, or recovery behavior.

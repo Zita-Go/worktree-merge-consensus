@@ -58,8 +58,8 @@ Git 从主修源 SHA 到结果 SHA 的真实差异（包括大型文本文件）
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.10-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.10-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.11-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.11-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 v0.1.0 的 GNU 产物要求 GLIBC 2.39，现已停止推荐；受支持的 Linux 主机请使用
@@ -177,7 +177,9 @@ MCP 请求会重新连接 daemon，并以幂等方式恢复可继续的工作。
 协调器才会创建一次替代 turn；旧尝试仍保留在 SQLite 审计记录中。如果 contract 或 plan
 声明了被禁止的 Git 测试，运行会以 `INVALID_TEST_COMMAND` 暂停。显式执行 `resume` 后，
 协调器会重新验证两个冻结源，并且只有在规范历史不存在文件修改、未完成命令或未知 item
-时，才归档已完成的 pre-integration 只读 turn 并请求一次修正响应。0.1.10 也能恢复 0.1.9
+时，才归档已完成的 pre-integration 只读 turn 并请求一次修正响应。MCP 历史中只允许本插件
+已完成的 `consensus_list_threads`、`consensus_list_worktrees` 或 `consensus_status` 查询；任何
+写操作、外部 App 或未知 MCP 调用都会失败关闭。0.1.10 及更高版本也能恢复 0.1.9
 产生的同类旧 `BLOCKED` 状态，并在同一事务中重新获取仓库锁。不要对其他 `BLOCKED` 或
 任何 `CANCELLED` 运行调用 `resume`。待完成的验证 turn 可能在克隆中留下测试产物；恢复时
 可允许该克隆变脏，但仍强制要求持久化路径、精确 detached SHA、独立 Git common directory

@@ -1706,6 +1706,11 @@ fn completed_read_only_turn_retry_blocker(turn: &Value) -> Option<String> {
                     return Some("command execution omits its canonical command".into());
                 }
             }
+            "mcpToolCall" => {
+                if let Some(blocker) = read_only_consensus_mcp_retry_blocker(item) {
+                    return Some(blocker);
+                }
+            }
             _ => {
                 return Some(format!(
                     "canonical item type {item_type} is not allowed in a read-only response retry"
@@ -1714,6 +1719,31 @@ fn completed_read_only_turn_retry_blocker(turn: &Value) -> Option<String> {
         }
     }
     (!has_agent_message).then(|| "canonical turn has no agent response".into())
+}
+
+fn read_only_consensus_mcp_retry_blocker(item: &Value) -> Option<String> {
+    if item.get("status").and_then(Value::as_str) != Some("completed") {
+        return Some("MCP tool call is not canonically completed".into());
+    }
+    if item.get("pluginId").and_then(Value::as_str)
+        != Some("worktree-merge-consensus@worktree-merge-consensus")
+        || item.get("server").and_then(Value::as_str) != Some("worktreeMergeConsensus")
+    {
+        return Some("MCP tool call is not owned by the consensus plugin".into());
+    }
+    if item.get("appContext").is_some_and(|value| !value.is_null()) {
+        return Some("MCP tool call carries external app context".into());
+    }
+    if !item.get("arguments").is_some_and(Value::is_object) {
+        return Some("MCP tool call omits canonical object arguments".into());
+    }
+    match item.get("tool").and_then(Value::as_str) {
+        Some("consensus_list_threads" | "consensus_list_worktrees" | "consensus_status") => None,
+        Some(tool) => Some(format!(
+            "consensus MCP tool {tool} is not a read-only retry-safe query"
+        )),
+        None => Some("MCP tool call omits its canonical tool name".into()),
+    }
 }
 
 fn is_test_declaration_action(action: NextAction) -> bool {
@@ -1977,5 +2007,57 @@ fn verify_reviewer_frozen(
             "SOURCE_DRIFT",
             "reviewer source ref identity changed after freeze",
         )),
+    }
+}
+
+#[cfg(test)]
+mod retry_safety_tests {
+    use super::*;
+
+    fn consensus_call(tool: &str) -> Value {
+        json!({
+            "type": "mcpToolCall",
+            "pluginId": "worktree-merge-consensus@worktree-merge-consensus",
+            "server": "worktreeMergeConsensus",
+            "tool": tool,
+            "arguments": {},
+            "status": "completed",
+            "appContext": null
+        })
+    }
+
+    #[test]
+    fn only_exact_local_read_only_consensus_queries_are_retry_safe() {
+        for tool in [
+            "consensus_list_threads",
+            "consensus_list_worktrees",
+            "consensus_status",
+        ] {
+            assert_eq!(
+                read_only_consensus_mcp_retry_blocker(&consensus_call(tool)),
+                None
+            );
+        }
+
+        let mut mutating = consensus_call("consensus_resume");
+        assert!(
+            read_only_consensus_mcp_retry_blocker(&mutating)
+                .unwrap()
+                .contains("not a read-only")
+        );
+
+        mutating["tool"] = json!("consensus_list_worktrees");
+        mutating["appContext"] = json!({"connectorId": "external"});
+        assert_eq!(
+            read_only_consensus_mcp_retry_blocker(&mutating).as_deref(),
+            Some("MCP tool call carries external app context")
+        );
+
+        let mut foreign = consensus_call("consensus_list_worktrees");
+        foreign["pluginId"] = json!("other-plugin@marketplace");
+        assert_eq!(
+            read_only_consensus_mcp_retry_blocker(&foreign).as_deref(),
+            Some("MCP tool call is not owned by the consensus plugin")
+        );
     }
 }

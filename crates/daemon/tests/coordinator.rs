@@ -848,12 +848,14 @@ async fn invalid_declared_git_test_can_resume_the_same_legacy_blocked_run() {
         "reviewer",
         "turn-2",
         json!({
-            "id": "read-only-turn-2",
-            "type": "commandExecution",
-            "command": "cargo metadata --no-deps",
-            "cwd": "/repo/reviewer",
+            "id": "read-only-mcp-turn-2",
+            "type": "mcpToolCall",
+            "pluginId": "worktree-merge-consensus@worktree-merge-consensus",
+            "server": "worktreeMergeConsensus",
+            "tool": "consensus_list_worktrees",
+            "arguments": {"repository_path": "/repo/reviewer"},
             "status": "completed",
-            "exitCode": 0
+            "appContext": null
         }),
     );
     let mut legacy_blocked = paused;
@@ -879,6 +881,7 @@ async fn invalid_declared_git_test_can_resume_the_same_legacy_blocked_run() {
         .collect::<Vec<_>>();
     assert_eq!(reviewer_prompts.len(), 2);
     assert!(reviewer_prompts[1].contains("direct non-Git commands"));
+    assert!(reviewer_prompts[1].contains("Do not call `worktreeMergeConsensus`"));
 }
 
 #[tokio::test]
@@ -916,6 +919,53 @@ async fn invalid_test_response_retry_rejects_file_change_history() {
 
     assert_eq!(error.code(), "MODEL_RESPONSE_RETRY_UNSAFE");
     assert_eq!(app.request_count(), 2);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+    assert_eq!(
+        store.load_run(RUN_ID).unwrap().unwrap().status,
+        RunStatus::PausedUserAction
+    );
+}
+
+#[tokio::test]
+async fn invalid_test_response_retry_rejects_mutating_consensus_mcp_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let mut replies = conflict_free_replies();
+    let mut invalid_reviewer_contract = replies[1].clone();
+    invalid_reviewer_contract["payload"]["contract"]["tests"] = json!(["git diff --check"]);
+    replies.insert(1, invalid_reviewer_contract);
+    let app = Arc::new(FakeAppServer::new(replies));
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let paused = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+    app.append_turn_item(
+        "reviewer",
+        "turn-2",
+        json!({
+            "id": "mutating-mcp-turn-2",
+            "type": "mcpToolCall",
+            "pluginId": "worktree-merge-consensus@worktree-merge-consensus",
+            "server": "worktreeMergeConsensus",
+            "tool": "consensus_start",
+            "arguments": {},
+            "status": "completed",
+            "appContext": null
+        }),
+    );
+
+    let error = coordinator.resume(RUN_ID).await.unwrap_err();
+
+    assert_eq!(error.code(), "MODEL_RESPONSE_RETRY_UNSAFE");
+    assert!(error.detail().contains("consensus_start"));
     assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
     assert_eq!(
         store.load_run(RUN_ID).unwrap().unwrap().status,

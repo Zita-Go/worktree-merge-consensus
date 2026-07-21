@@ -233,12 +233,15 @@ pre-integration model-output error. New runs pause while preserving their exact
 action. On explicit resume, the coordinator revalidates the frozen sources and
 reads the exact completed turn from canonical history. It may archive and
 replace that turn only when the original action used the read-only execution
-policy and every item is a message, reasoning, or completed command execution;
-file changes, incomplete commands, missing history, and unknown items fail
-closed. The replacement prompt explicitly forbids Git test commands. For the
-legacy terminal state emitted by version 0.1.9, version 0.1.10 restores the same
-run and reacquires its repository lock in the same SQLite transaction that
-archives the old attempt. Other `BLOCKED` states remain terminal.
+policy and every item is a message, reasoning, completed command execution, or
+a completed query to this plugin's exact `consensus_list_threads`,
+`consensus_list_worktrees`, or `consensus_status` tool. Mutating, external, and
+unknown MCP calls, file changes, incomplete commands, missing history, and
+unknown items fail closed. The replacement prompt explicitly forbids Git test
+commands and recursive `consensus_*` calls. For the legacy terminal state
+emitted by version 0.1.9, version 0.1.10 and later restore the same run and
+reacquire its repository lock in the same SQLite transaction that archives the
+old attempt. Other `BLOCKED` states remain terminal.
 
 ## Git postconditions
 
