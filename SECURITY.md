@@ -37,7 +37,10 @@ secrets, and local filesystem identities.
   remote-free clone of the exact integration SHA; its Git common directory is
   independent of the source repository. It may run only exact frozen test
   commands. Forbidden publication, destructive Git, shell chaining, dynamic
-  command launchers, and permission escalation are cancelled. Every turn
+  command launchers, and permission escalation are cancelled. The command gate
+  removes at most one App Server-generated known-shell wrapper before checking
+  the exact inner command; nested shells, subcommand callbacks, and non-local
+  environments remain denied. Every turn
   explicitly disables inherited sticky execution environments.
 - Both source refs and SHAs are frozen and revalidated. Integration may occur
   only on a unique new local branch.

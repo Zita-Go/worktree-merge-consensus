@@ -699,6 +699,13 @@ async fn forbidden_integration_command_is_cancelled_and_blocks_the_run() {
     assert_eq!(result.status, RunStatus::Blocked);
     assert_eq!(result.reason_code.as_deref(), Some("FORBIDDEN_OPERATION"));
     assert_eq!(app.responses(), vec![json!({"decision": "cancel"})]);
+    let diagnostic = result.last_error.as_ref().unwrap();
+    assert!(
+        diagnostic
+            .detail
+            .contains("outside the frozen integration or verification allowlist")
+    );
+    assert!(!diagnostic.detail.contains("git push"));
 }
 
 #[tokio::test]
@@ -2129,10 +2136,12 @@ fn append_verification_command_items(
         .iter()
         .enumerate()
     {
+        let command = command.as_str().unwrap();
+        let app_server_command = format!("/bin/bash -lc {}", shell_words::quote(command));
         items.push(json!({
             "id": format!("test-command-{}", index + 1),
             "type": "commandExecution",
-            "command": command,
+            "command": app_server_command,
             "commandActions": [],
             "cwd": cwd,
             "status": "completed",

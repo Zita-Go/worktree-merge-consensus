@@ -25,7 +25,10 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use crate::policy::{ApprovalDecision, decide_command_approval, validate_test_command};
+use crate::policy::{
+    ApprovalDecision, command_approval_denial, decide_command_approval,
+    normalize_app_server_command, validate_test_command,
+};
 use crate::store::{AcceptedTurn, SqliteRunStore, StoreError};
 
 const MAX_DRIVER_STEPS: usize = 128;
@@ -1434,9 +1437,13 @@ where
                     .await
                     .map_err(|error| communication_error("server/request-response", None, error))?;
                 if decision == ApprovalDecision::Cancel {
+                    let denial = command_approval_denial(state, &event.params)
+                        .unwrap_or("command approval failed closed");
                     return Err(CoordinatorError::operational(
                         "FORBIDDEN_OPERATION",
-                        "the task requested a command outside the frozen integration execution policy",
+                        format!(
+                            "the task requested a command outside the frozen integration execution policy: {denial}"
+                        ),
                     ));
                 }
                 Ok(true)
@@ -1782,7 +1789,12 @@ fn authoritative_test_evidence(
     for required in &state.required_test_commands {
         let matches = items
             .iter()
-            .filter(|item| item.get("command").and_then(Value::as_str) == Some(required.as_str()))
+            .filter(|item| {
+                item.get("command")
+                    .and_then(Value::as_str)
+                    .and_then(normalize_app_server_command)
+                    .is_some_and(|command| command == *required)
+            })
             .copied()
             .collect::<Vec<_>>();
         if matches.len() != 1 {

@@ -208,7 +208,11 @@ offline, uses approval policy `untrusted`, and accepts only exact frozen tests.
 App Server may attach a `proposedExecpolicyAmendment` to a one-time command
 approval. The coordinator ignores that proposal and returns plain `accept`; it
 never applies or persists the amendment. Additional filesystem, network, and
-network-policy requests are still cancelled.
+network-policy requests are still cancelled. A unified-exec approval reports
+one shell-joined wrapper such as `/bin/bash -lc '<script>'`; the coordinator
+removes exactly one known-shell `-c` or `-lc` wrapper and applies the same
+allowlist to the inner script. Nested dynamic launchers, non-null subcommand
+`approvalId` callbacks, and non-`local` execution environments are cancelled.
 Publication, destructive Git operations, shell chaining, wrong-directory
 execution, and added permission requests are cancelled at the App Server
 request boundary.

@@ -78,8 +78,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.15-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.15-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.16-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.16-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -235,7 +235,12 @@ additional-permission requests are still cancelled. It can also resume the
 same run after an exact first-integration `BLOCKED / FORBIDDEN_OPERATION` only
 when the denied turn is canonically `failed` or `interrupted`, has no
 side-effect-capable item, both worktrees and refs remain frozen and clean, and
-the target branch is absent. Version 0.1.13 also places concrete, authoritative, direct-field
+the target branch is absent. Version 0.1.16 recognizes the App Server's one
+canonical known-shell `-c` or `-lc` wrapper, removes that wrapper exactly once,
+and applies the unchanged Git or frozen-test allowlist to the inner command.
+Nested shell launchers, subcommand approval callbacks, non-local execution
+environments, and added permissions still fail closed. Version 0.1.13 also
+places concrete, authoritative, direct-field
 payload templates for both approval message types next to the requested output;
 the JSON Schema rejects approval identities supplied only in nested objects. A pending verification turn
 may leave test artifacts in its clone; recovery permits that clone to be dirty

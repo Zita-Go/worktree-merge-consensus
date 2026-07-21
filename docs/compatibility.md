@@ -80,7 +80,12 @@ offline primary verification with only the isolated clone writable. The
 App Server may include a `proposedExecpolicyAmendment` in an approval request;
 the coordinator's plain one-time `accept` does not apply that proposal. The
 proposal therefore does not by itself fail the command gate, while actual
-additional filesystem or network permissions still fail closed. The
+additional filesystem or network permissions still fail closed. App Server
+reports a unified-exec command as a shell-joined argument vector, normally one
+known shell followed by `-c` or `-lc` and the model's script. The coordinator
+removes exactly that one wrapper before applying its existing allowlist to the
+inner command. Nested launchers, non-null subcommand `approvalId` values, and
+non-`local` execution environments remain denied. The
 integration profile disables temporary-directory writes; the verification
 profile permits temporary build artifacts but has no source Git-common root.
 These fields are part of the checked-in `supported-methods` fixture and are

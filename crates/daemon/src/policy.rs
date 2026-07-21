@@ -8,13 +8,33 @@ pub(crate) enum ApprovalDecision {
 }
 
 pub(crate) fn decide_command_approval(state: &RunState, params: &Value) -> ApprovalDecision {
+    if command_approval_denial(state, params).is_some() {
+        ApprovalDecision::Cancel
+    } else {
+        ApprovalDecision::Accept
+    }
+}
+
+pub(crate) fn command_approval_denial(state: &RunState, params: &Value) -> Option<&'static str> {
     let expected_cwd = match state.next_action {
         NextAction::RequestPrimaryIntegration => Some(&state.facts.primary_worktree),
         NextAction::RequestPrimaryVerification => state.verification_worktree.as_ref(),
         _ => None,
     };
     if params.get("cwd").and_then(Value::as_str) != expected_cwd.and_then(|path| path.to_str()) {
-        return ApprovalDecision::Cancel;
+        return Some("command cwd does not match the bound execution worktree");
+    }
+    if params
+        .get("approvalId")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Some("subcommand approval callbacks are outside the frozen command policy");
+    }
+    if params
+        .get("environmentId")
+        .is_some_and(|value| !value.is_null() && value.as_str() != Some("local"))
+    {
+        return Some("command targets a non-local execution environment");
     }
     // App Server may suggest an execpolicy amendment for an otherwise ordinary
     // one-time approval. Returning `accept` does not apply that suggestion, so
@@ -27,7 +47,7 @@ pub(crate) fn decide_command_approval(state: &RunState, params: &Value) -> Appro
     .iter()
     .any(|field| params.get(*field).is_some_and(|value| !value.is_null()))
     {
-        return ApprovalDecision::Cancel;
+        return Some("command requests additional filesystem or network permissions");
     }
     if params.get("availableDecisions").is_some_and(|value| {
         !value.is_null()
@@ -37,32 +57,51 @@ pub(crate) fn decide_command_approval(state: &RunState, params: &Value) -> Appro
                     .any(|decision| decision.as_str() == Some("accept"))
             })
     }) {
-        return ApprovalDecision::Cancel;
+        return Some("one-time command acceptance is unavailable");
     }
     let Some(command) = params
         .get("command")
         .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|command| !command.is_empty())
+        .and_then(normalize_app_server_command)
     else {
-        return ApprovalDecision::Cancel;
+        return Some("command is absent or has an unsupported shell representation");
     };
+    let command = command.trim();
+    if command.is_empty() {
+        return Some("command is empty");
+    }
     if contains_shell_control(command) {
-        return ApprovalDecision::Cancel;
+        return Some("command contains shell control syntax");
     }
     match state.next_action {
-        NextAction::RequestPrimaryIntegration if is_allowed_git_command(state, command) => {
-            ApprovalDecision::Accept
-        }
+        NextAction::RequestPrimaryIntegration if is_allowed_git_command(state, command) => None,
         NextAction::RequestPrimaryVerification
             if state
                 .required_test_commands
                 .iter()
                 .any(|required| required.trim() == command && validate_test_command(required)) =>
         {
-            ApprovalDecision::Accept
+            None
         }
-        _ => ApprovalDecision::Cancel,
+        _ => Some("command is outside the frozen integration or verification allowlist"),
+    }
+}
+
+pub(crate) fn normalize_app_server_command(command: &str) -> Option<String> {
+    if command.trim().is_empty() {
+        return None;
+    }
+    let tokens = shell_words::split(command).ok()?;
+    match tokens.as_slice() {
+        [shell, flag, script]
+            if matches!(
+                executable_name(shell),
+                "sh" | "bash" | "dash" | "zsh" | "fish"
+            ) && matches!(flag.as_str(), "-c" | "-lc") =>
+        {
+            (!script.trim().is_empty()).then(|| script.clone())
+        }
+        _ => Some(command.to_owned()),
     }
 }
 
@@ -192,7 +231,10 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::{ApprovalDecision, decide_command_approval, validate_test_command};
+    use super::{
+        ApprovalDecision, decide_command_approval, normalize_app_server_command,
+        validate_test_command,
+    };
 
     const PRIMARY_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const REVIEWER_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -263,6 +305,53 @@ mod tests {
     }
 
     #[test]
+    fn one_known_app_server_shell_wrapper_is_normalized_before_policy_checks() {
+        let state = integration_state();
+        let wrapped = "/bin/bash -lc 'git rev-parse HEAD'";
+
+        assert_eq!(
+            normalize_app_server_command(wrapped).as_deref(),
+            Some("git rev-parse HEAD")
+        );
+        assert_eq!(
+            decide_command_approval(
+                &state,
+                &json!({
+                    "approvalId": null,
+                    "environmentId": "local",
+                    "cwd": "/repo/primary",
+                    "command": wrapped,
+                    "proposedExecpolicyAmendment": ["git", "rev-parse", "HEAD"],
+                    "availableDecisions": ["accept", "acceptForSession", "decline", "cancel"]
+                })
+            ),
+            ApprovalDecision::Accept
+        );
+
+        for command in [
+            "/bin/bash -lc 'git rev-parse HEAD && git push origin HEAD'",
+            "/bin/bash -lc 'sh -c \"git rev-parse HEAD\"'",
+            "/bin/bash -lc '/bin/bash -lc \"git rev-parse HEAD\"'",
+            "/bin/ksh -lc 'git rev-parse HEAD'",
+        ] {
+            assert_eq!(
+                decide_command_approval(
+                    &state,
+                    &json!({
+                        "approvalId": null,
+                        "environmentId": "local",
+                        "cwd": "/repo/primary",
+                        "command": command,
+                        "availableDecisions": ["accept"]
+                    })
+                ),
+                ApprovalDecision::Cancel,
+                "{command} must fail closed"
+            );
+        }
+    }
+
+    #[test]
     fn verification_approves_only_exact_frozen_tests_in_the_isolated_clone() {
         let mut state = integration_state();
         state.next_action = NextAction::RequestPrimaryVerification;
@@ -272,8 +361,10 @@ mod tests {
             decide_command_approval(
                 &state,
                 &json!({
+                    "approvalId": null,
+                    "environmentId": "local",
                     "cwd": "/state/verification/run",
-                    "command": "cargo test --workspace"
+                    "command": "/bin/bash -lc 'cargo test --workspace'"
                 })
             ),
             ApprovalDecision::Accept
@@ -343,6 +434,30 @@ mod tests {
                     "cwd": "/repo/primary",
                     "command": "cargo test --workspace",
                     "availableDecisions": ["decline", "cancel"]
+                })
+            ),
+            ApprovalDecision::Cancel
+        );
+        assert_eq!(
+            decide_command_approval(
+                &state,
+                &json!({
+                    "approvalId": "subcommand-callback",
+                    "environmentId": "local",
+                    "cwd": "/repo/primary",
+                    "command": "/bin/bash -lc 'git rev-parse HEAD'"
+                })
+            ),
+            ApprovalDecision::Cancel
+        );
+        assert_eq!(
+            decide_command_approval(
+                &state,
+                &json!({
+                    "approvalId": null,
+                    "environmentId": "remote-container",
+                    "cwd": "/repo/primary",
+                    "command": "/bin/bash -lc 'git rev-parse HEAD'"
                 })
             ),
             ApprovalDecision::Cancel

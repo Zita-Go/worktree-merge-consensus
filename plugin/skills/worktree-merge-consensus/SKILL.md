@@ -86,6 +86,10 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   unchanged and clean, and the target branch absent. An App Server
   `proposedExecpolicyAmendment` does not itself request more access when the
   coordinator returns one-time `accept`; the amendment is never applied.
+  Version 0.1.16 also recognizes the App Server's one known-shell `-c` or `-lc`
+  wrapper, removes it exactly once, and applies the existing command policy to
+  the inner script. Nested shell launchers, non-null subcommand approval IDs,
+  non-local environments, and added permissions remain forbidden.
   Network, added-permission, later-phase, mismatched, or side-effectful cases
   remain terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
