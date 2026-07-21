@@ -78,8 +78,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.17-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.17-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.18-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.18-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or

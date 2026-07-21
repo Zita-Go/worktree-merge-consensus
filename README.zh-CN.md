@@ -58,8 +58,8 @@ Git 从主修源 SHA 到结果 SHA 的真实差异（包括大型文本文件）
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.17-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.17-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.1.18-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.1.18-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 v0.1.0 的 GNU 产物要求 GLIBC 2.39，现已停止推荐；受支持的 Linux 主机请使用

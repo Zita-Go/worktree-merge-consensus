@@ -288,6 +288,7 @@ fn daemon_crash_restart_recovers_without_a_duplicate_turn() {
     let fixture = AcceptanceFixture::new("crash_restart", false);
     let (run_id, daemon) = fixture.start();
     fixture.wait_for_action("REQUEST_PRIMARY_INTEGRATION", 1);
+    fixture.wait_for_pending_turn();
 
     daemon.kill();
     fixture.release_deferred("complete");
