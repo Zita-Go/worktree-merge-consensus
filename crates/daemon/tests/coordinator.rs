@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use consensus_core::{
     canonical_json_hash,
     git::GitInspector,
-    state::{NextAction, RunFacts, RunState, RunStatus},
+    state::{NextAction, Phase, Role, RunDiagnostic, RunFacts, RunState, RunStatus},
 };
 use consensus_daemon::{
     coordinator::{
@@ -1124,6 +1124,142 @@ async fn coordinator_evidence_does_not_require_participant_command_items() {
         app.executed_commands(),
         vec![vec!["cargo", "test", "--workspace"]]
     );
+}
+
+#[tokio::test]
+async fn exact_legacy_history_migrates_only_the_pending_verification_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::deferred(marker_replies(), 6, DeferMode::Hold).with_marker_protocol(),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        legacy_migration_options(),
+    );
+    let seed = seed_legacy_unattended_verification_history(
+        &coordinator,
+        &app,
+        &store,
+        ["ready", "cargo-unavailable", "ready"],
+        None,
+    )
+    .await;
+
+    let resumed = coordinator.prepare_resume(RUN_ID).await.unwrap();
+
+    assert_eq!(resumed.facts.run_id, seed.blocked.facts.run_id);
+    assert_eq!(resumed.integration_branch, seed.blocked.integration_branch);
+    assert_eq!(resumed.integration_sha, seed.blocked.integration_sha);
+    assert_eq!(resumed.status, RunStatus::Running);
+    assert_eq!(resumed.phase, Phase::Verify);
+    assert_eq!(resumed.next_action, NextAction::RequestPrimaryVerification);
+    assert!(
+        store
+            .successful_patch_recorded(RUN_ID, &seed.integration_request_hash)
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .archived_turn_ids(RUN_ID, &seed.verification_request_hash)
+            .unwrap(),
+        vec![
+            "turn-6",
+            "legacy-verification-2",
+            "legacy-verification-3",
+            "legacy-verification-4",
+        ]
+    );
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    assert!(pending.thread_id.is_none());
+    assert!(pending.turn_id.is_none());
+    assert_eq!(app.request_count(), 6);
+    assert!(app.executed_commands().is_empty());
+}
+
+#[tokio::test]
+async fn unattended_migration_rejects_a_final_turn_with_side_effects() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::deferred(marker_replies(), 6, DeferMode::Hold).with_marker_protocol(),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        legacy_migration_options(),
+    );
+    let seed = seed_legacy_unattended_verification_history(
+        &coordinator,
+        &app,
+        &store,
+        ["ready", "cargo-unavailable", "ready"],
+        Some(json!({
+            "id": "legacy-participant-command",
+            "type": "commandExecution",
+            "command": "cargo test --workspace",
+            "cwd": "/state/verification/run",
+            "status": "completed",
+            "exitCode": 0
+        })),
+    )
+    .await;
+
+    let error = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
+
+    assert_eq!(error.code(), "MODEL_RESPONSE_RETRY_UNSAFE");
+    assert!(error.detail().contains("forbidden after any test command"));
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), seed.blocked);
+    assert_eq!(
+        store
+            .archived_turn_ids(RUN_ID, &seed.verification_request_hash)
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(app.request_count(), 6);
+    assert!(app.executed_commands().is_empty());
+}
+
+#[tokio::test]
+async fn unattended_migration_rejects_a_different_archived_signal_sequence() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::deferred(marker_replies(), 6, DeferMode::Hold).with_marker_protocol(),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        legacy_migration_options(),
+    );
+    let seed = seed_legacy_unattended_verification_history(
+        &coordinator,
+        &app,
+        &store,
+        ["ready", "ready", "ready"],
+        None,
+    )
+    .await;
+
+    let error = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
+
+    assert_eq!(error.code(), "MODEL_RESPONSE_RETRY_UNSAFE");
+    assert!(error.detail().contains("limited to one retry"));
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), seed.blocked);
+    assert_eq!(
+        store
+            .archived_turn_ids(RUN_ID, &seed.verification_request_hash)
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(app.request_count(), 6);
+    assert!(app.executed_commands().is_empty());
 }
 
 #[tokio::test]
@@ -3889,6 +4025,174 @@ fn fast_options() -> CoordinatorOptions {
         poll_interval: Duration::from_millis(1),
         communication_attempts: 2,
     }
+}
+
+fn legacy_migration_options() -> CoordinatorOptions {
+    CoordinatorOptions {
+        wait_timeout: Duration::from_millis(15),
+        poll_interval: Duration::from_millis(1),
+        communication_attempts: 1,
+    }
+}
+
+struct LegacyMigrationSeed {
+    blocked: RunState,
+    verification_request_hash: String,
+    integration_request_hash: String,
+}
+
+async fn seed_legacy_unattended_verification_history(
+    coordinator: &Coordinator<FakeAppServer, RecordingSafety>,
+    app: &FakeAppServer,
+    store: &SqliteRunStore,
+    archived_signals: [&str; 3],
+    final_item: Option<Value>,
+) -> LegacyMigrationSeed {
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let paused = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+    assert_eq!(paused.phase, Phase::Verify);
+    assert_eq!(paused.next_action, NextAction::RequestPrimaryVerification);
+    assert_eq!(paused.reason_code.as_deref(), Some("COMMUNICATION_FAILURE"));
+
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    let request_hash = pending.message_hash.clone();
+    assert_eq!(pending.thread_id.as_deref(), Some("primary"));
+    assert_eq!(pending.turn_id.as_deref(), Some("turn-6"));
+    let prompt = legacy_request_prompt(&request_hash);
+
+    app.set_turn_status("primary", "turn-6", "completed");
+    app.append_turn_item(
+        "primary",
+        "turn-6",
+        legacy_agent_item("turn-6", archived_signals[0]),
+    );
+    let mut active = paused;
+    active.resume().unwrap();
+    store.save_state(&active).unwrap();
+    store
+        .reset_completed_read_only_turn_for_retry(
+            RUN_ID,
+            &request_hash,
+            "primary",
+            "turn-6",
+            "completed",
+        )
+        .unwrap();
+
+    store
+        .record_turn_started(RUN_ID, &request_hash, "primary", "legacy-verification-2")
+        .unwrap();
+    app.inject_completed_turn(
+        "primary",
+        "legacy-verification-2",
+        &prompt,
+        legacy_verification_reply(archived_signals[1]),
+    );
+    store
+        .reset_completed_read_only_turn_for_retry(
+            RUN_ID,
+            &request_hash,
+            "primary",
+            "legacy-verification-2",
+            "completed",
+        )
+        .unwrap();
+
+    store
+        .record_turn_started(RUN_ID, &request_hash, "primary", "legacy-verification-3")
+        .unwrap();
+    app.inject_completed_turn(
+        "primary",
+        "legacy-verification-3",
+        &prompt,
+        legacy_verification_reply(archived_signals[2]),
+    );
+    let mut compatibility_blocked = active;
+    record_missing_verification_diagnostic(&mut compatibility_blocked);
+    compatibility_blocked.block("TEST_FAILURE");
+    store.save_state(&compatibility_blocked).unwrap();
+    let mut compatibility_resumed = compatibility_blocked.clone();
+    compatibility_resumed
+        .retry_blocked_verification_without_execution()
+        .unwrap();
+    store
+        .reactivate_blocked_run_with_verification_evidence_retry(
+            &compatibility_blocked,
+            &compatibility_resumed,
+            &request_hash,
+            "primary",
+            "legacy-verification-3",
+            "completed",
+        )
+        .unwrap();
+
+    store
+        .record_turn_started(RUN_ID, &request_hash, "primary", "legacy-verification-4")
+        .unwrap();
+    app.inject_completed_turn(
+        "primary",
+        "legacy-verification-4",
+        &prompt,
+        legacy_verification_reply("ready"),
+    );
+    if let Some(item) = final_item {
+        app.insert_turn_item_before_agent("primary", "legacy-verification-4", item);
+    }
+    let integration_request_hash = "successful-integration-request".to_owned();
+    store
+        .record_successful_patch(RUN_ID, &integration_request_hash, "successful-patch-hash")
+        .unwrap();
+    let mut blocked = compatibility_resumed;
+    record_missing_verification_diagnostic(&mut blocked);
+    blocked.block("TEST_FAILURE");
+    store.save_state(&blocked).unwrap();
+
+    LegacyMigrationSeed {
+        blocked,
+        verification_request_hash: request_hash,
+        integration_request_hash,
+    }
+}
+
+fn legacy_request_prompt(request_hash: &str) -> String {
+    format!("Legacy verification request.\n{{\"request_hash\":\"{request_hash}\"}}")
+}
+
+fn legacy_verification_reply(signal: &str) -> Value {
+    match signal {
+        "ready" => json!(
+            "<consensus-result>VERIFICATION_READY</consensus-result>\n\nLegacy verification completed."
+        ),
+        "cargo-unavailable" => json!(
+            "<consensus-result>BLOCKED:CARGO_UNAVAILABLE</consensus-result>\n\nCargo was unavailable."
+        ),
+        other => panic!("unsupported legacy verification signal {other}"),
+    }
+}
+
+fn legacy_agent_item(turn_id: &str, signal: &str) -> Value {
+    json!({
+        "id": format!("assistant-{turn_id}"),
+        "type": "agentMessage",
+        "text": reply_text(&legacy_verification_reply(signal)),
+        "phase": "final_answer"
+    })
+}
+
+fn record_missing_verification_diagnostic(state: &mut RunState) {
+    state.record_error(RunDiagnostic {
+        code: "TEST_FAILURE".into(),
+        detail: "verification must execute each frozen command exactly once and no other command"
+            .into(),
+        operation: None,
+        action: NextAction::RequestPrimaryVerification,
+        role: Some(Role::Primary),
+        thread_id: Some("primary".into()),
+    });
 }
 
 fn start_request() -> StartRequest {
