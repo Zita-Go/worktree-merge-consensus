@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use app_server_client::{
-    AppServer, CONTROLLED_PATCH_APPROVAL_KEY, CodexAppServer, TurnExecutionPolicy,
+    AppServer, CONTROLLED_PATCH_APPROVAL_KEY, CodexAppServer, CommandExecRequest,
+    TurnExecutionPolicy,
     transport::JsonRpcTransport,
 };
 use serde_json::{Value, json};
@@ -116,7 +117,7 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
         );
         assert_eq!(
             turn["params"]["sandboxPolicy"],
-            json!({"type": "readOnly", "networkAccess": false})
+            json!({"type": "dangerFullAccess"})
         );
         respond(
             &mut server_write,
@@ -139,13 +140,7 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
         );
         assert_eq!(
             integration_turn["params"]["sandboxPolicy"],
-            json!({
-                "type": "workspaceWrite",
-                "writableRoots": ["/repo/primary", "/repo/.git"],
-                "networkAccess": false,
-                "excludeSlashTmp": true,
-                "excludeTmpdirEnvVar": true
-            })
+            json!({"type": "dangerFullAccess"})
         );
         respond(
             &mut server_write,
@@ -174,18 +169,35 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
         );
         assert_eq!(
             verification_turn["params"]["sandboxPolicy"],
-            json!({
-                "type": "workspaceWrite",
-                "writableRoots": ["/state/verification/run"],
-                "networkAccess": false,
-                "excludeSlashTmp": false,
-                "excludeTmpdirEnvVar": false
-            })
+            json!({"type": "dangerFullAccess"})
         );
         respond(
             &mut server_write,
             &verification_turn,
             json!({"turn": {"id": "turn-4", "status": "inProgress", "items": []}}),
+        )
+        .await;
+
+        let exec = read_request(&mut lines).await;
+        assert_eq!(exec["method"], "command/exec");
+        assert_eq!(
+            exec["params"],
+            json!({
+                "command": ["cargo", "test", "--locked"],
+                "cwd": "/state/verification/run",
+                "timeoutMs": 1_800_000,
+                "outputBytesCap": 65_536,
+                "sandboxPolicy": {"type": "dangerFullAccess"}
+            })
+        );
+        respond(
+            &mut server_write,
+            &exec,
+            json!({
+                "exitCode": 7,
+                "stdout": "partial stdout",
+                "stderr": "test failed"
+            }),
         )
         .await;
 
@@ -271,6 +283,18 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
         .await
         .unwrap();
     assert_eq!(turn.id, "turn-4");
+    let exec = client
+        .execute_command(&CommandExecRequest {
+            command: vec!["cargo".into(), "test".into(), "--locked".into()],
+            cwd: PathBuf::from("/state/verification/run"),
+            timeout_ms: 1_800_000,
+            output_bytes_cap: 65_536,
+        })
+        .await
+        .unwrap();
+    assert_eq!(exec.exit_code, 7);
+    assert_eq!(exec.stdout, "partial stdout");
+    assert_eq!(exec.stderr, "test failed");
     assert_eq!(
         client.controlled_patch_approval_mode().await.unwrap(),
         Some("prompt".into())
@@ -346,6 +370,59 @@ async fn missing_required_method_is_reported_as_incompatible_codex() {
     assert!(error.to_string().contains("INCOMPATIBLE_CODEX"));
     assert!(error.to_string().contains("turn/start"));
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn execute_command_rejects_invalid_requests_before_sending() {
+    let (client_side, _server_side) = duplex(16 * 1024);
+    let (client_read, client_write) = split(client_side);
+    let client = CodexAppServer::from_transport(JsonRpcTransport::new(client_read, client_write));
+
+    let error = client
+        .execute_command(&CommandExecRequest {
+            command: vec![],
+            cwd: PathBuf::from("/state/verification/run"),
+            timeout_ms: 1_800_000,
+            output_bytes_cap: 65_536,
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("command argv must not be empty"));
+
+    let error = client
+        .execute_command(&CommandExecRequest {
+            command: vec!["cargo".into()],
+            cwd: PathBuf::from("relative/path"),
+            timeout_ms: 1_800_000,
+            output_bytes_cap: 65_536,
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("command cwd must be an absolute path"));
+
+    let error = client
+        .execute_command(&CommandExecRequest {
+            command: vec!["cargo".into()],
+            cwd: PathBuf::from("/state/verification/run"),
+            timeout_ms: 0,
+            output_bytes_cap: 65_536,
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("command timeout must be greater than zero"));
+
+    let error = client
+        .execute_command(&CommandExecRequest {
+            command: vec!["cargo".into()],
+            cwd: PathBuf::from("/state/verification/run"),
+            timeout_ms: 1_800_000,
+            output_bytes_cap: 0,
+        })
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("command output_bytes_cap must be greater than zero"));
 }
 
 fn thread_with_turns() -> Value {

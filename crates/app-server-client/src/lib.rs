@@ -10,6 +10,6 @@ pub use client::{
     CodexAppServer, ConnectOptions, ReconnectingCodexAppServer,
 };
 pub use types::{
-    AppEvent, InitializeInfo, ThreadDetail, ThreadPage, ThreadSummary, TurnExecutionPolicy,
-    TurnHandle,
+    AppEvent, CommandExecRequest, CommandExecResult, InitializeInfo, ThreadDetail, ThreadPage,
+    ThreadSummary, TurnExecutionPolicy, TurnHandle,
 };

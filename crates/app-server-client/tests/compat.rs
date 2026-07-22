@@ -93,12 +93,11 @@ fn prerelease_of_minimum_version_is_rejected() {
 }
 
 #[test]
-fn pinned_fixture_distinguishes_integration_and_verification_write_roots() {
+fn pinned_fixture_keeps_open_ended_version_gate_and_command_execution_shape() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../schemas/app-server/supported-methods.json"
     ))
     .unwrap();
-    let profiles = &fixture["turnPolicyProfiles"];
 
     assert_eq!(fixture["minimumVersion"], "0.144.1");
     assert!(fixture.get("maximumVersionExclusive").is_none());
@@ -115,14 +114,6 @@ fn pinned_fixture_distinguishes_integration_and_verification_write_roots() {
             "participantResponseProtocol": "worktree-merge-consensus/v2",
             "failClosed": true
         })
-    );
-    assert_eq!(
-        profiles["primaryIntegrationWorkspaceWrite"]["writableRootRoles"],
-        serde_json::json!(["primaryWorktree", "sourceGitCommonDirectory"])
-    );
-    assert_eq!(
-        profiles["primaryVerificationWorkspaceWrite"]["writableRootRoles"],
-        serde_json::json!(["isolatedVerificationClone"])
     );
     assert_eq!(
         fixture["commandExecutionEvidenceShape"]["successfulExitCode"],

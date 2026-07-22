@@ -27,8 +27,8 @@ use crate::{
     compat::{check_compatibility, parse_managed_user_agent},
     transport::{JsonRpcTransport, RpcError},
     types::{
-        AppEvent, InitializeInfo, ThreadDetail, ThreadPage, ThreadSummary, TurnExecutionPolicy,
-        TurnHandle,
+        AppEvent, CommandExecRequest, CommandExecResult, InitializeInfo, ThreadDetail,
+        ThreadPage, ThreadSummary, TurnExecutionPolicy, TurnHandle,
     },
 };
 
@@ -58,6 +58,8 @@ impl Default for ConnectOptions {
 pub enum AppServerError {
     #[error(transparent)]
     Rpc(#[from] RpcError),
+    #[error("invalid App Server request: {0}")]
+    InvalidRequest(String),
     #[error("invalid App Server response: {0}")]
     InvalidResponse(String),
     #[error("Codex process failed: {0}")]
@@ -82,6 +84,15 @@ pub trait AppServer: Send + Sync {
         prompt: &str,
         policy: &TurnExecutionPolicy,
     ) -> Result<TurnHandle, AppServerError>;
+    async fn execute_command(
+        &self,
+        request: &CommandExecRequest,
+    ) -> Result<CommandExecResult, AppServerError> {
+        let _ = request;
+        Err(AppServerError::InvalidRequest(
+            "command execution is not implemented by this AppServer".to_owned(),
+        ))
+    }
     async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), AppServerError>;
     async fn controlled_patch_approval_mode(&self) -> Result<Option<String>, AppServerError>;
     async fn respond_to_request(&self, id: Value, result: Value) -> Result<(), AppServerError>;
@@ -552,6 +563,19 @@ impl AppServer for ReconnectingCodexAppServer {
         client.start_turn(thread_id, prompt, policy).await
     }
 
+    async fn execute_command(
+        &self,
+        request: &CommandExecRequest,
+    ) -> Result<CommandExecResult, AppServerError> {
+        let mut client = self.inner.lock().await;
+        if client.transport().is_closed().await {
+            let error = AppServerError::Rpc(RpcError::Closed);
+            self.reconnect_locked(&mut client, "command/exec preflight", &error)
+                .await?;
+        }
+        client.execute_command(request).await
+    }
+
     async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), AppServerError> {
         let mut client = self.inner.lock().await;
         if client.transport().is_closed().await {
@@ -702,6 +726,27 @@ impl AppServer for CodexAppServer {
             .map_err(|error| invalid(format!("invalid turn/start result: {error}")))
     }
 
+    async fn execute_command(
+        &self,
+        request: &CommandExecRequest,
+    ) -> Result<CommandExecResult, AppServerError> {
+        validate_command_exec_request(request)?;
+        let raw = self
+            .rpc_request(
+                "command/exec",
+                json!({
+                    "command": request.command,
+                    "cwd": request.cwd,
+                    "timeoutMs": request.timeout_ms,
+                    "outputBytesCap": request.output_bytes_cap,
+                    "sandboxPolicy": danger_full_access_sandbox_policy(),
+                }),
+            )
+            .await?;
+        serde_json::from_value(raw)
+            .map_err(|error| invalid(format!("invalid command/exec result: {error}")))
+    }
+
     async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), AppServerError> {
         self.rpc_request(
             "turn/interrupt",
@@ -759,7 +804,7 @@ fn turn_policy_params(
                 json!(cwd),
                 json!([cwd]),
                 json!("never"),
-                json!({"type": "readOnly", "networkAccess": false}),
+                danger_full_access_sandbox_policy(),
             ))
         }
         TurnExecutionPolicy::PrimaryIntegration {
@@ -767,18 +812,12 @@ fn turn_policy_params(
             git_common_dir,
         } => {
             let cwd = absolute(cwd, "integration cwd")?;
-            let git_common_dir = absolute(git_common_dir, "Git common directory")?;
+            let _git_common_dir = absolute(git_common_dir, "Git common directory")?;
             Ok((
                 json!(cwd),
                 json!([cwd]),
                 json!("never"),
-                json!({
-                    "type": "workspaceWrite",
-                    "writableRoots": [cwd, git_common_dir],
-                    "networkAccess": false,
-                    "excludeSlashTmp": true,
-                    "excludeTmpdirEnvVar": true,
-                }),
+                danger_full_access_sandbox_policy(),
             ))
         }
         TurnExecutionPolicy::PrimaryVerification { cwd } => {
@@ -787,16 +826,32 @@ fn turn_policy_params(
                 json!(cwd),
                 json!([cwd]),
                 json!("never"),
-                json!({
-                    "type": "workspaceWrite",
-                    "writableRoots": [cwd],
-                    "networkAccess": false,
-                    "excludeSlashTmp": false,
-                    "excludeTmpdirEnvVar": false,
-                }),
+                danger_full_access_sandbox_policy(),
             ))
         }
     }
+}
+
+fn validate_command_exec_request(request: &CommandExecRequest) -> Result<(), AppServerError> {
+    if request.command.is_empty() {
+        return Err(invalid_request("command argv must not be empty"));
+    }
+    if !request.cwd.is_absolute() {
+        return Err(invalid_request("command cwd must be an absolute path"));
+    }
+    if request.timeout_ms == 0 {
+        return Err(invalid_request("command timeout must be greater than zero"));
+    }
+    if request.output_bytes_cap == 0 {
+        return Err(invalid_request(
+            "command output_bytes_cap must be greater than zero",
+        ));
+    }
+    Ok(())
+}
+
+fn danger_full_access_sandbox_policy() -> Value {
+    json!({"type": "dangerFullAccess"})
 }
 
 fn validate_initialize_shape(info: &InitializeInfo) -> Result<(), AppServerError> {
@@ -865,6 +920,10 @@ fn optional_string(value: &Value, key: &str) -> Result<Option<String>, AppServer
 
 fn invalid(detail: impl Into<String>) -> AppServerError {
     AppServerError::InvalidResponse(detail.into())
+}
+
+fn invalid_request(detail: impl Into<String>) -> AppServerError {
+    AppServerError::InvalidRequest(detail.into())
 }
 
 async fn drain_stderr(stderr: tokio::process::ChildStderr, tail: Arc<Mutex<VecDeque<String>>>) {

@@ -33,6 +33,22 @@ pub enum TurnExecutionPolicy {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandExecRequest {
+    pub command: Vec<String>,
+    pub cwd: PathBuf,
+    pub timeout_ms: u64,
+    pub output_bytes_cap: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandExecResult {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadSummary {
