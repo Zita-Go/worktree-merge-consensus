@@ -32,8 +32,7 @@ use tokio::sync::Mutex;
 
 use crate::policy::{
     ApprovalDecision, command_approval_denial, decide_command_approval,
-    is_retry_safe_read_only_integration_command, normalize_app_server_command,
-    validate_test_command,
+    is_retry_safe_read_only_integration_command, validate_test_command,
 };
 use crate::store::{
     AcceptedTurn, SqliteRunStore, StoreError, VerificationCommandClaim,

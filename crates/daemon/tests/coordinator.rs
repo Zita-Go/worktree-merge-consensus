@@ -295,9 +295,10 @@ async fn coordinator_owned_verification_executes_marker_only_commands_in_order()
         vec![
             vec!["cargo", "fmt", "--all", "--", "--check"],
             vec!["cargo", "test", "--locked"],
+            vec!["cargo", "test", "--workspace"],
         ]
     );
-    assert_eq!(accepted.test_evidence.len(), 2);
+    assert_eq!(accepted.test_evidence.len(), 3);
     assert!(
         accepted
             .test_evidence
@@ -371,10 +372,11 @@ async fn coordinator_owned_verification_runs_after_nonzero_and_routes_bounded_di
     assert_eq!(accepted.status, RunStatus::Accepted);
     assert_eq!(accepted.round, 2);
     assert_eq!(
-        &app.executed_commands()[..2],
+        &app.executed_commands()[..3],
         &[
             vec!["cargo", "fmt", "--all", "--", "--check"],
             vec!["cargo", "test", "--locked"],
+            vec!["cargo", "test", "--workspace"],
         ]
     );
     let corrective_prompt = app
@@ -2928,9 +2930,14 @@ enum VerificationBehavior {
     FailedExecutionThenPass,
     CargoUnavailable,
     MissingExecution,
+    // Retained for Task 4's legacy verification migration fixtures.
+    #[allow(dead_code)]
     MissingExecutionThenPass,
+    #[allow(dead_code)]
     MissingThenCargoUnavailableThenPass,
+    #[allow(dead_code)]
     MissingThenCargoUnavailableThenMissing,
+    #[allow(dead_code)]
     MissingThenCargoUnavailableThenMissingThenPass,
     RewriteIntegrationEvidence,
 }
@@ -3776,6 +3783,8 @@ fn verification_reply(prompt: &str, behavior: VerificationBehavior) -> Value {
     )
 }
 
+// Retained for Task 4's legacy verification migration fixtures.
+#[allow(dead_code)]
 fn append_verification_command_items(
     turn: &mut Value,
     prompt: &str,
