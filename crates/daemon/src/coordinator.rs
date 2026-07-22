@@ -8,7 +8,7 @@ use std::{
 
 use app_server_client::{
     AppEvent, AppServer, AppServerError, CONTROLLED_PATCH_APPROVAL_KEY,
-    CONTROLLED_PATCH_APPROVAL_MODE, ThreadDetail, TurnExecutionPolicy,
+    CONTROLLED_PATCH_APPROVAL_MODE, CommandExecRequest, ThreadDetail, TurnExecutionPolicy,
 };
 use consensus_core::{
     canonical_json_hash,
@@ -35,11 +35,15 @@ use crate::policy::{
     is_retry_safe_read_only_integration_command, normalize_app_server_command,
     validate_test_command,
 };
-use crate::store::{AcceptedTurn, SqliteRunStore, StoreError};
+use crate::store::{
+    AcceptedTurn, SqliteRunStore, StoreError, VerificationCommandClaim,
+    VerificationCommandRecord,
+};
 
 const MAX_DRIVER_STEPS: usize = 128;
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(1_800);
 const TURN_INTERRUPT_TIMEOUT: Duration = Duration::from_secs(10);
+const VERIFICATION_COMMAND_OUTPUT_CAP_BYTES: usize = 65_536;
 const MAX_VERIFICATION_FAILURE_OUTPUT_BYTES: usize = 16_384;
 const VERIFICATION_OUTPUT_TRUNCATION_MARKER: &str = "[earlier output truncated]\n";
 
@@ -2281,7 +2285,24 @@ where
             .wait_for_turn_response(state, &thread_id, &turn_id)
             .await?;
         let mut message = self.normalize_model_response(state, action, &completed.response)?;
-        self.verify_message_evidence(state, action, &mut message, &completed.turn, &turn_id)?;
+        let authoritative_verification = if action == NextAction::RequestPrimaryVerification
+            && message.envelope.message_type == MessageType::IntegrationReady
+        {
+            verify_marker_only_verification_turn(&completed.turn)?;
+            Some(
+                self.execute_frozen_verification(state, &request_hash, &turn_id)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        self.verify_message_evidence(
+            state,
+            action,
+            &mut message,
+            &completed.turn,
+            authoritative_verification,
+        )?;
         let response = serde_json::to_value(&message).map_err(|error| {
             CoordinatorError::operational("SERIALIZATION_FAILURE", error.to_string())
         })?;
@@ -2292,6 +2313,87 @@ where
             .accept_response_and_advance(&run_id, &response_hash, &next)?;
         *state = next;
         Ok(())
+    }
+
+    async fn execute_frozen_verification(
+        &self,
+        state: &RunState,
+        request_hash: &str,
+        turn_id: &str,
+    ) -> Result<AuthoritativeVerification, CoordinatorError> {
+        let run_id = state.facts.run_id.to_string();
+        let verification_cwd = state.verification_worktree.as_ref().ok_or_else(|| {
+            CoordinatorError::operational(
+                "INVALID_STATE",
+                "verification workspace is not persisted",
+            )
+        })?;
+        let timeout_ms = u64::try_from(self.options.wait_timeout.as_millis()).map_err(|_| {
+            CoordinatorError::operational("INVALID_STATE", "verification timeout exceeds u64")
+        })?;
+        let mut evidence = Vec::with_capacity(state.required_test_commands.len());
+        let mut failures = Vec::new();
+
+        for (index, command) in state.required_test_commands.iter().enumerate() {
+            if !validate_test_command(command) {
+                return Err(CoordinatorError::operational(
+                    "INVALID_TEST_COMMAND",
+                    format!("frozen test command violates the execution policy: {command}"),
+                ));
+            }
+            let argv = shell_words::split(command).map_err(|_| {
+                CoordinatorError::operational(
+                    "INVALID_TEST_COMMAND",
+                    "frozen test command is not parseable",
+                )
+            })?;
+            if argv.is_empty() {
+                return Err(CoordinatorError::operational(
+                    "INVALID_TEST_COMMAND",
+                    "frozen test command has no executable",
+                ));
+            }
+            let command_index = u32::try_from(index).map_err(|_| {
+                CoordinatorError::operational(
+                    "INVALID_STATE",
+                    "verification command index exceeds u32",
+                )
+            })?;
+            let claim = self.store.begin_verification_command(
+                &run_id,
+                request_hash,
+                turn_id,
+                command_index,
+                command,
+                verification_cwd,
+            )?;
+            let record = match claim {
+                VerificationCommandClaim::Reuse(record) => record,
+                VerificationCommandClaim::Execute(_) => {
+                    let result = self
+                        .app
+                        .execute_command(&CommandExecRequest {
+                            command: argv,
+                            cwd: verification_cwd.to_owned(),
+                            timeout_ms,
+                            output_bytes_cap: VERIFICATION_COMMAND_OUTPUT_CAP_BYTES,
+                        })
+                        .await
+                        .map_err(|error| communication_error("command/exec", None, error))?;
+                    self.store.complete_verification_command(
+                        &run_id,
+                        request_hash,
+                        command_index,
+                        result.exit_code,
+                        &result.stdout,
+                        &result.stderr,
+                    )?
+                }
+            };
+            append_verification_record(&record, &mut evidence, &mut failures)?;
+        }
+
+        Ok(AuthoritativeVerification { evidence, failures })
     }
 
     async fn revalidate_and_accept(&self, state: &mut RunState) -> Result<(), CoordinatorError> {
@@ -2668,7 +2770,7 @@ where
         action: NextAction,
         message: &mut ProtocolMessage,
         turn: &Value,
-        turn_id: &str,
+        authoritative_verification: Option<AuthoritativeVerification>,
     ) -> Result<(), CoordinatorError> {
         if matches!(
             message.envelope.message_type,
@@ -2717,7 +2819,12 @@ where
                 )?;
             }
             NextAction::RequestPrimaryVerification => {
-                let authoritative = authoritative_test_evidence(state, turn, turn_id)?;
+                let authoritative = authoritative_verification.ok_or_else(|| {
+                    CoordinatorError::operational(
+                        "INVALID_STATE",
+                        "coordinator verification evidence is absent",
+                    )
+                })?;
                 let mut canonical = current_integration_payload(state)?.clone();
                 let canonical = canonical.as_object_mut().ok_or_else(|| {
                     CoordinatorError::operational(
@@ -3824,100 +3931,91 @@ fn recoverable_integration_turn_blocker(
     None
 }
 
-fn authoritative_test_evidence(
-    state: &RunState,
-    turn: &Value,
-    turn_id: &str,
-) -> Result<AuthoritativeVerification, CoordinatorError> {
-    let expected_cwd = state.verification_worktree.as_ref().ok_or_else(|| {
-        CoordinatorError::operational("INVALID_STATE", "verification workspace is not persisted")
+fn verify_marker_only_verification_turn(turn: &Value) -> Result<(), CoordinatorError> {
+    let items = turn.get("items").and_then(Value::as_array).ok_or_else(|| {
+        CoordinatorError::operational(
+            "HISTORY_UNAVAILABLE",
+            "completed verification turn has no canonical items",
+        )
     })?;
-    let items = command_execution_items(turn)?;
-    if items.len() != state.required_test_commands.len() {
-        return Err(CoordinatorError::operational(
-            "TEST_FAILURE",
-            "verification must execute each frozen command exactly once and no other command",
-        ));
-    }
-    let mut evidence = Vec::with_capacity(items.len());
-    let mut failures = Vec::new();
-    for required in &state.required_test_commands {
-        let matches = items
-            .iter()
-            .filter(|item| {
-                item.get("command")
-                    .and_then(Value::as_str)
-                    .and_then(normalize_app_server_command)
-                    .is_some_and(|command| command == *required)
-            })
-            .copied()
-            .collect::<Vec<_>>();
-        if matches.len() != 1 {
-            return Err(CoordinatorError::operational(
-                "TEST_FAILURE",
-                format!("frozen test was not executed exactly once: {required}"),
-            ));
-        }
-        let item = matches[0];
-        let item_id = item
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.trim().is_empty())
-            .ok_or_else(|| {
-                CoordinatorError::operational("INVALID_RESPONSE", "commandExecution item omits id")
-            })?;
-        if item.get("cwd").and_then(Value::as_str) != expected_cwd.to_str() {
-            return Err(CoordinatorError::operational(
-                "FORBIDDEN_OPERATION",
-                format!("test executed outside the isolated clone: {required}"),
-            ));
-        }
-        if item.get("status").and_then(Value::as_str) != Some("completed") {
-            return Err(CoordinatorError::operational(
-                "TEST_FAILURE",
-                format!("frozen test did not reach completed status: {required}"),
-            ));
-        }
-        let exit_code = item
-            .get("exitCode")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| {
-                CoordinatorError::operational(
-                    "TEST_FAILURE",
-                    format!("completed frozen test omits its exit code: {required}"),
-                )
-            })?;
-        if item
-            .get("source")
-            .and_then(Value::as_str)
-            .is_some_and(|source| source != "agent")
-        {
-            return Err(CoordinatorError::operational(
+    for item in items {
+        let item_type = item.get("type").and_then(Value::as_str).ok_or_else(|| {
+            CoordinatorError::operational(
                 "INVALID_RESPONSE",
-                "test commandExecution source is not the agent turn",
-            ));
+                "canonical verification item has no type",
+            )
+        })?;
+        match item_type {
+            "userMessage" | "reasoning" | "agentMessage" => {}
+            "contextCompaction" => {
+                if let Some(blocker) = context_compaction_retry_blocker(item) {
+                    return Err(CoordinatorError::operational("INVALID_RESPONSE", blocker));
+                }
+            }
+            "commandExecution" | "fileChange" | "mcpToolCall" | "dynamicToolCall" => {
+                return Err(CoordinatorError::operational(
+                    "FORBIDDEN_OPERATION",
+                    format!(
+                        "marker-only verification turn contains side-effect-capable item {item_type}"
+                    ),
+                ));
+            }
+            _ => {
+                return Err(CoordinatorError::operational(
+                    "INVALID_RESPONSE",
+                    format!("canonical verification item type {item_type} is not allowed"),
+                ));
+            }
         }
-        if exit_code != 0 {
-            failures.push(json!({
-                "command": required,
-                "exit_code": exit_code,
-                "item_id": item_id,
-                "output": bounded_verification_output(
-                    item.get("aggregatedOutput")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default(),
-                ),
-            }));
-        }
-        evidence.push(TestEvidence {
-            command: required.clone(),
-            exit_code,
-            turn_id: turn_id.to_owned(),
-            item_id: item_id.to_owned(),
-            cwd: expected_cwd.clone(),
-        });
     }
-    Ok(AuthoritativeVerification { evidence, failures })
+    Ok(())
+}
+
+fn append_verification_record(
+    record: &VerificationCommandRecord,
+    evidence: &mut Vec<TestEvidence>,
+    failures: &mut Vec<Value>,
+) -> Result<(), CoordinatorError> {
+    let exit_code = record.exit_code.ok_or_else(|| {
+        CoordinatorError::operational(
+            "INVALID_STATE",
+            format!("completed verification command {} has no exit code", record.item_id),
+        )
+    })?;
+    let stdout = record.stdout.as_deref().ok_or_else(|| {
+        CoordinatorError::operational(
+            "INVALID_STATE",
+            format!("completed verification command {} has no stdout", record.item_id),
+        )
+    })?;
+    let stderr = record.stderr.as_deref().ok_or_else(|| {
+        CoordinatorError::operational(
+            "INVALID_STATE",
+            format!("completed verification command {} has no stderr", record.item_id),
+        )
+    })?;
+    if exit_code != 0 {
+        let separator = if stdout.is_empty() || stderr.is_empty() {
+            ""
+        } else {
+            "\n"
+        };
+        let combined = format!("{stdout}{separator}{stderr}");
+        failures.push(json!({
+            "command": record.command,
+            "exit_code": exit_code,
+            "item_id": record.item_id,
+            "output": bounded_verification_output(&combined),
+        }));
+    }
+    evidence.push(TestEvidence {
+        command: record.command.clone(),
+        exit_code: i64::from(exit_code),
+        turn_id: record.turn_id.clone(),
+        item_id: record.item_id.clone(),
+        cwd: record.cwd.clone(),
+    });
+    Ok(())
 }
 
 fn bounded_verification_output(output: &str) -> String {

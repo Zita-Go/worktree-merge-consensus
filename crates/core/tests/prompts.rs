@@ -206,7 +206,7 @@ fn result_verdict_prompt_uses_a_minimal_marker_and_code_side_identity() {
 }
 
 #[test]
-fn verification_prompt_requires_command_items_before_the_marker() {
+fn verification_prompt_requires_marker_only_coordinator_handoff() {
     let mut state = plan_state();
     let plan = json!({"steps": ["merge", "verify"]});
     let plan_hash = canonical_json_hash(&plan);
@@ -232,12 +232,10 @@ fn verification_prompt_requires_command_items_before_the_marker() {
     .unwrap();
 
     for required in [
-        "Invoke the command-execution tool once for each required_test_commands entry",
-        "using each exact command as one standalone tool call",
-        "Always invoke the first command instead of inferring that its executable is unavailable",
-        "Continue through every remaining entry even when an earlier command exits nonzero",
-        "VERIFICATION_READY means the evidence set is complete",
-        "A final answer without all command items is invalid evidence",
+        "This is a marker-only handoff to coordinator-owned verification",
+        "Do not run Shell, Git, file, MCP, or patch tools in this turn",
+        "Return VERIFICATION_READY when ready",
+        "the coordinator will run every frozen command in the exact isolated clone and derive all evidence",
         "<consensus-result>VERIFICATION_READY</consensus-result>",
     ] {
         assert!(prompt.contains(required), "missing {required:?}");

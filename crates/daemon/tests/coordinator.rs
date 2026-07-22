@@ -11,8 +11,8 @@ use std::{
 };
 
 use app_server_client::{
-    AppEvent, AppServer, AppServerError, InitializeInfo, ThreadDetail, ThreadPage, ThreadSummary,
-    TurnExecutionPolicy, TurnHandle,
+    AppEvent, AppServer, AppServerError, CommandExecRequest, CommandExecResult, InitializeInfo,
+    ThreadDetail, ThreadPage, ThreadSummary, TurnExecutionPolicy, TurnHandle,
 };
 use async_trait::async_trait;
 use consensus_core::{
@@ -260,6 +260,162 @@ async fn marker_v2_keeps_plan_and_review_prose_free_form() {
         prompt.contains("worktree-merge-consensus/v2")
             && prompt.contains("Do not return the legacy v1 protocol envelope")
     }));
+}
+
+#[tokio::test]
+async fn coordinator_owned_verification_executes_marker_only_commands_in_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(FakeAppServer::new(marker_replies()).with_marker_protocol());
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(
+            fixture_run(),
+            StartRequest {
+                integration_branch: Some("consensus/test-run".into()),
+                test_commands: vec![
+                    "cargo fmt --all -- --check".into(),
+                    "cargo test --locked".into(),
+                ],
+            },
+        )
+        .await
+        .unwrap();
+
+    let accepted = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(accepted.status, RunStatus::Accepted);
+    assert_eq!(
+        app.executed_commands(),
+        vec![
+            vec!["cargo", "fmt", "--all", "--", "--check"],
+            vec!["cargo", "test", "--locked"],
+        ]
+    );
+    assert_eq!(accepted.test_evidence.len(), 2);
+    assert!(
+        accepted
+            .test_evidence
+            .iter()
+            .all(|item| item.item_id.starts_with("coordinator-command/"))
+    );
+    assert!(app.executed_command_requests().iter().all(|request| {
+        request.cwd == accepted.test_evidence[0].cwd
+            && request.timeout_ms == 1_000
+            && request.output_bytes_cap == 65_536
+    }));
+    let verification_turn = app
+        .detail("primary")
+        .turns
+        .into_iter()
+        .find(|turn| {
+            turn["items"][0]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|prompt| {
+                    prompt_action(prompt) == "REQUEST_PRIMARY_VERIFICATION"
+                })
+        })
+        .unwrap();
+    assert!(verification_turn["items"].as_array().unwrap().iter().all(|item| {
+        matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("userMessage" | "agentMessage")
+        )
+    }));
+}
+
+#[tokio::test]
+async fn coordinator_owned_verification_runs_after_nonzero_and_routes_bounded_diagnostics() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let mut replies = marker_replies();
+    replies.insert(
+        5,
+        json!(
+            "<consensus-result>INTEGRATION_READY</consensus-result>\n\nThe reported verification failure is corrected."
+        ),
+    );
+    let app = Arc::new(
+        FakeAppServer::new(replies)
+            .with_marker_protocol()
+            .with_verification_behavior(VerificationBehavior::FailedExecutionThenPass),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(
+            fixture_run(),
+            StartRequest {
+                integration_branch: Some("consensus/test-run".into()),
+                test_commands: vec![
+                    "cargo fmt --all -- --check".into(),
+                    "cargo test --locked".into(),
+                ],
+            },
+        )
+        .await
+        .unwrap();
+
+    let accepted = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(accepted.facts.run_id.to_string(), RUN_ID);
+    assert_eq!(accepted.status, RunStatus::Accepted);
+    assert_eq!(accepted.round, 2);
+    assert_eq!(
+        &app.executed_commands()[..2],
+        &[
+            vec!["cargo", "fmt", "--all", "--", "--check"],
+            vec!["cargo", "test", "--locked"],
+        ]
+    );
+    let corrective_prompt = app
+        .prompts()
+        .into_iter()
+        .filter(|prompt| prompt_action(prompt) == "REQUEST_PRIMARY_INTEGRATION")
+        .nth(1)
+        .unwrap();
+    let corrective_payload = prompt_json_block(&corrective_prompt, "Complete current payload");
+    let diagnostic = corrective_payload["result_feedback"]["failed_tests"][0]["output"]
+        .as_str()
+        .unwrap();
+    assert!(diagnostic.starts_with("[earlier output truncated]\n"));
+    assert!(diagnostic.len() <= 16_384);
+}
+
+#[tokio::test]
+async fn marker_only_verification_rejects_participant_side_effects_before_execution() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::new(marker_replies())
+            .with_marker_protocol()
+            .with_verification_item("commandExecution"),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let blocked = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(blocked.status, RunStatus::Blocked);
+    assert_eq!(blocked.reason_code.as_deref(), Some("FORBIDDEN_OPERATION"));
+    assert!(app.executed_commands().is_empty());
 }
 
 #[tokio::test]
@@ -787,7 +943,7 @@ async fn failed_required_test_routes_machine_feedback_to_a_corrective_integratio
 }
 
 #[tokio::test]
-async fn live_item_events_supply_authoritative_tests_when_thread_history_omits_commands() {
+async fn live_item_events_keep_marker_turns_free_of_participant_commands() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
     let mut replies = conflict_free_replies();
@@ -841,10 +997,10 @@ async fn live_item_events_supply_authoritative_tests_when_thread_history_omits_c
         )
         .unwrap()
         .unwrap();
-    assert!(evidence.completed_items.iter().any(|item| {
-        item.get("type").and_then(Value::as_str) == Some("commandExecution")
-            && item.get("exitCode").and_then(Value::as_i64) == Some(1)
+    assert!(evidence.completed_items.iter().all(|item| {
+        item.get("type").and_then(Value::as_str) != Some("commandExecution")
     }));
+    assert_eq!(app.executed_commands().len(), 2);
     let corrective_prompt = app
         .prompts()
         .into_iter()
@@ -904,7 +1060,7 @@ async fn legacy_self_report_shape_is_ignored_when_authoritative_tests_pass() {
 }
 
 #[tokio::test]
-async fn self_reported_success_without_command_execution_is_rejected() {
+async fn coordinator_evidence_does_not_require_participant_command_items() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
     let app = Arc::new(
@@ -924,278 +1080,9 @@ async fn self_reported_success_without_command_execution_is_rejected() {
 
     let result = coordinator.drive(RUN_ID).await.unwrap();
 
-    assert_eq!(result.status, RunStatus::Blocked);
-    assert_eq!(result.reason_code.as_deref(), Some("TEST_FAILURE"));
-    assert!(
-        app.request_order()
-            .iter()
-            .all(|action| !action.ends_with("REQUEST_REVIEWER_RESULT_VERDICT"))
-    );
-}
-
-#[tokio::test]
-async fn verification_without_execution_retries_once_and_accepts_the_same_integration() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
-    let app = Arc::new(
-        FakeAppServer::new(conflict_free_replies())
-            .with_verification_behavior(VerificationBehavior::MissingExecutionThenPass),
-    );
-    let coordinator = Coordinator::new(
-        Arc::clone(&app),
-        store.clone(),
-        Arc::new(RecordingSafety::default()),
-        fast_options(),
-    );
-    coordinator
-        .start(fixture_run(), start_request())
-        .await
-        .unwrap();
-
-    let blocked = coordinator.drive(RUN_ID).await.unwrap();
-    assert_eq!(blocked.status, RunStatus::Blocked);
-    assert_eq!(blocked.reason_code.as_deref(), Some("TEST_FAILURE"));
-    let integration_sha = blocked.integration_sha.clone();
-
-    let accepted = coordinator.resume(RUN_ID).await.unwrap();
-
-    assert_eq!(accepted.status, RunStatus::Accepted);
-    assert_eq!(accepted.integration_sha, integration_sha);
-    assert_eq!(
-        app.request_order()
-            .iter()
-            .filter(|action| action.ends_with("REQUEST_PRIMARY_VERIFICATION"))
-            .count(),
-        2
-    );
-    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
-    let verification_prompts = app
-        .prompts()
-        .into_iter()
-        .filter(|prompt| prompt_action(prompt) == "REQUEST_PRIMARY_VERIFICATION")
-        .collect::<Vec<_>>();
-    assert!(verification_prompts.iter().all(|prompt| {
-        prompt.contains(
-            "Continue through every remaining entry even when an earlier command exits nonzero",
-        ) && prompt.contains("VERIFICATION_READY means the evidence set is complete")
-    }));
-}
-
-#[tokio::test]
-async fn verification_without_execution_retry_is_bounded_to_one_attempt() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
-    let app = Arc::new(
-        FakeAppServer::new(conflict_free_replies())
-            .with_verification_behavior(VerificationBehavior::MissingExecution),
-    );
-    let coordinator = Coordinator::new(
-        Arc::clone(&app),
-        store.clone(),
-        Arc::new(RecordingSafety::default()),
-        fast_options(),
-    );
-    coordinator
-        .start(fixture_run(), start_request())
-        .await
-        .unwrap();
-    assert_eq!(
-        coordinator
-            .drive(RUN_ID)
-            .await
-            .unwrap()
-            .reason_code
-            .as_deref(),
-        Some("TEST_FAILURE")
-    );
-    assert_eq!(
-        coordinator
-            .resume(RUN_ID)
-            .await
-            .unwrap()
-            .reason_code
-            .as_deref(),
-        Some("TEST_FAILURE")
-    );
-
-    let error = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
-
-    assert_eq!(error.code(), "MODEL_RESPONSE_RETRY_UNSAFE");
-    assert!(error.detail().contains("limited to one retry"));
-    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
-}
-
-#[tokio::test]
-async fn cargo_environment_recovery_can_follow_the_single_empty_verification_retry() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
-    let app = Arc::new(
-        FakeAppServer::new(marker_replies())
-            .with_marker_protocol()
-            .with_verification_behavior(VerificationBehavior::MissingThenCargoUnavailableThenPass),
-    );
-    let coordinator = Coordinator::new(
-        Arc::clone(&app),
-        store.clone(),
-        Arc::new(RecordingSafety::default()),
-        fast_options(),
-    );
-    coordinator
-        .start(fixture_run(), start_request())
-        .await
-        .unwrap();
-
-    let missing = coordinator.drive(RUN_ID).await.unwrap();
-    assert_eq!(missing.reason_code.as_deref(), Some("TEST_FAILURE"));
-
-    let unavailable = coordinator.resume(RUN_ID).await.unwrap();
-    assert_eq!(unavailable.status, RunStatus::Blocked);
-    assert_eq!(
-        unavailable.reason_code.as_deref(),
-        Some("CARGO_UNAVAILABLE")
-    );
-
-    let accepted = coordinator.resume(RUN_ID).await.unwrap();
-    assert_eq!(accepted.status, RunStatus::Accepted);
-    assert_eq!(accepted.integration_sha.as_deref(), Some(INTEGRATION_SHA));
-    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 2);
-    assert_eq!(
-        app.request_order()
-            .iter()
-            .filter(|action| action.ends_with("REQUEST_PRIMARY_VERIFICATION"))
-            .count(),
-        3
-    );
-}
-
-#[tokio::test]
-async fn one_event_evidence_retry_can_follow_empty_and_cargo_recovery() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
-    let app = Arc::new(
-        FakeAppServer::new(marker_replies())
-            .with_marker_protocol()
-            .with_verification_behavior(
-                VerificationBehavior::MissingThenCargoUnavailableThenMissingThenPass,
-            ),
-    );
-    let coordinator = Coordinator::new(
-        Arc::clone(&app),
-        store.clone(),
-        Arc::new(RecordingSafety::default()),
-        fast_options(),
-    );
-    coordinator
-        .start(fixture_run(), start_request())
-        .await
-        .unwrap();
-
-    assert_eq!(
-        coordinator
-            .drive(RUN_ID)
-            .await
-            .unwrap()
-            .reason_code
-            .as_deref(),
-        Some("TEST_FAILURE")
-    );
-    assert_eq!(
-        coordinator
-            .resume(RUN_ID)
-            .await
-            .unwrap()
-            .reason_code
-            .as_deref(),
-        Some("CARGO_UNAVAILABLE")
-    );
-    assert_eq!(
-        coordinator
-            .resume(RUN_ID)
-            .await
-            .unwrap()
-            .reason_code
-            .as_deref(),
-        Some("TEST_FAILURE")
-    );
-
-    let accepted = coordinator.resume(RUN_ID).await.unwrap();
-
-    assert_eq!(accepted.status, RunStatus::Accepted);
-    assert_eq!(accepted.integration_sha.as_deref(), Some(INTEGRATION_SHA));
-    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 3);
-    assert_eq!(
-        app.request_order()
-            .iter()
-            .filter(|action| action.ends_with("REQUEST_PRIMARY_VERIFICATION"))
-            .count(),
-        4
-    );
-}
-
-#[tokio::test]
-async fn event_evidence_compatibility_retry_is_bounded_to_one_attempt() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
-    let app = Arc::new(
-        FakeAppServer::new(marker_replies())
-            .with_marker_protocol()
-            .with_verification_behavior(
-                VerificationBehavior::MissingThenCargoUnavailableThenMissing,
-            ),
-    );
-    let coordinator = Coordinator::new(
-        Arc::clone(&app),
-        store.clone(),
-        Arc::new(RecordingSafety::default()),
-        fast_options(),
-    );
-    coordinator
-        .start(fixture_run(), start_request())
-        .await
-        .unwrap();
-
-    assert_eq!(
-        coordinator
-            .drive(RUN_ID)
-            .await
-            .unwrap()
-            .reason_code
-            .as_deref(),
-        Some("TEST_FAILURE")
-    );
-    assert_eq!(
-        coordinator
-            .resume(RUN_ID)
-            .await
-            .unwrap()
-            .reason_code
-            .as_deref(),
-        Some("CARGO_UNAVAILABLE")
-    );
-    assert_eq!(
-        coordinator
-            .resume(RUN_ID)
-            .await
-            .unwrap()
-            .reason_code
-            .as_deref(),
-        Some("TEST_FAILURE")
-    );
-    assert_eq!(
-        coordinator
-            .resume(RUN_ID)
-            .await
-            .unwrap()
-            .reason_code
-            .as_deref(),
-        Some("TEST_FAILURE")
-    );
-
-    let error = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
-
-    assert_eq!(error.code(), "MODEL_RESPONSE_RETRY_UNSAFE");
-    assert!(error.detail().contains("limited to one retry"));
-    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 3);
+    assert_eq!(result.status, RunStatus::Accepted);
+    assert_eq!(result.test_evidence.len(), 1);
+    assert_eq!(app.executed_commands(), vec![vec!["cargo", "test", "--workspace"]]);
 }
 
 #[tokio::test]
@@ -1241,51 +1128,6 @@ async fn cargo_environment_recovery_is_bounded_to_one_attempt() {
     assert_eq!(error.code(), "MODEL_RESPONSE_RETRY_UNSAFE");
     assert!(error.detail().contains("limited to one retry"));
     assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
-}
-
-#[tokio::test]
-async fn verification_retry_refuses_a_turn_that_executed_any_command() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
-    let app = Arc::new(
-        FakeAppServer::new(conflict_free_replies())
-            .with_verification_behavior(VerificationBehavior::MissingExecution),
-    );
-    let coordinator = Coordinator::new(
-        Arc::clone(&app),
-        store.clone(),
-        Arc::new(RecordingSafety::default()),
-        fast_options(),
-    );
-    coordinator
-        .start(fixture_run(), start_request())
-        .await
-        .unwrap();
-    let blocked = coordinator.drive(RUN_ID).await.unwrap();
-    let turn_id = format!("turn-{}", app.request_count());
-    app.append_turn_item(
-        "primary",
-        &turn_id,
-        json!({
-            "id": "unexpected-test-command",
-            "type": "commandExecution",
-            "command": "/bin/bash -lc 'cargo test --workspace'",
-            "cwd": blocked.verification_worktree,
-            "status": "completed",
-            "exitCode": 0,
-            "source": "agent"
-        }),
-    );
-
-    let error = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
-
-    assert_eq!(error.code(), "MODEL_RESPONSE_RETRY_UNSAFE");
-    assert!(
-        error
-            .detail()
-            .contains("forbidden after any test command was executed")
-    );
-    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
 }
 
 #[tokio::test]
@@ -3056,7 +2898,10 @@ struct FakeAppServer {
     deferred: Option<(usize, DeferMode)>,
     deferred_replies: Mutex<HashMap<String, Value>>,
     events: Mutex<VecDeque<AppEvent>>,
+    executed_commands: Mutex<Vec<CommandExecRequest>>,
+    verification_command_counts: Mutex<HashMap<usize, usize>>,
     verification_behavior: VerificationBehavior,
+    verification_item_type: Option<&'static str>,
     marker_protocol: bool,
     event_only_turn_items: bool,
     start_error: Option<String>,
@@ -3113,7 +2958,10 @@ impl FakeAppServer {
             deferred: None,
             deferred_replies: Mutex::new(HashMap::new()),
             events: Mutex::new(VecDeque::new()),
+            executed_commands: Mutex::new(Vec::new()),
+            verification_command_counts: Mutex::new(HashMap::new()),
             verification_behavior: VerificationBehavior::Pass,
+            verification_item_type: None,
             marker_protocol: false,
             event_only_turn_items: false,
             start_error: None,
@@ -3133,6 +2981,11 @@ impl FakeAppServer {
 
     fn with_marker_protocol(mut self) -> Self {
         self.marker_protocol = true;
+        self
+    }
+
+    fn with_verification_item(mut self, item_type: &'static str) -> Self {
+        self.verification_item_type = Some(item_type);
         self
     }
 
@@ -3182,6 +3035,58 @@ impl FakeAppServer {
 
     fn request_count(&self) -> usize {
         self.requests.lock().unwrap().len()
+    }
+
+    fn executed_commands(&self) -> Vec<Vec<String>> {
+        self.executed_command_requests()
+            .iter()
+            .map(|request| request.command.clone())
+            .collect()
+    }
+
+    fn executed_command_requests(&self) -> Vec<CommandExecRequest> {
+        self.executed_commands.lock().unwrap().clone()
+    }
+
+    fn verification_behavior_for_request(
+        &self,
+        verification_request_number: usize,
+    ) -> VerificationBehavior {
+        match self.verification_behavior {
+            VerificationBehavior::MissingExecutionThenPass
+                if verification_request_number == 1 =>
+            {
+                VerificationBehavior::MissingExecution
+            }
+            VerificationBehavior::MissingExecutionThenPass => VerificationBehavior::Pass,
+            VerificationBehavior::FailedExecutionThenPass
+                if verification_request_number == 1 =>
+            {
+                VerificationBehavior::FailedExecution
+            }
+            VerificationBehavior::FailedExecutionThenPass => VerificationBehavior::Pass,
+            VerificationBehavior::MissingThenCargoUnavailableThenPass => {
+                match verification_request_number {
+                    1 => VerificationBehavior::MissingExecution,
+                    2 => VerificationBehavior::CargoUnavailable,
+                    _ => VerificationBehavior::Pass,
+                }
+            }
+            VerificationBehavior::MissingThenCargoUnavailableThenMissingThenPass => {
+                match verification_request_number {
+                    1 | 3 => VerificationBehavior::MissingExecution,
+                    2 => VerificationBehavior::CargoUnavailable,
+                    _ => VerificationBehavior::Pass,
+                }
+            }
+            VerificationBehavior::MissingThenCargoUnavailableThenMissing => {
+                match verification_request_number {
+                    2 => VerificationBehavior::CargoUnavailable,
+                    _ => VerificationBehavior::MissingExecution,
+                }
+            }
+            behavior => behavior,
+        }
     }
 
     fn inject_completed_turn(&self, thread_id: &str, turn_id: &str, prompt: &str, reply: Value) {
@@ -3267,13 +3172,6 @@ impl FakeAppServer {
                     "text": serde_json::to_string(reply).unwrap(),
                     "phase": "final_answer"
                 }));
-                let prompt = turn["items"][0]["content"][0]["text"]
-                    .as_str()
-                    .unwrap()
-                    .to_owned();
-                if prompt_action(&prompt) == "REQUEST_PRIMARY_VERIFICATION" {
-                    append_verification_command_items(turn, &prompt, self.verification_behavior);
-                }
             }
         }
     }
@@ -3485,37 +3383,8 @@ impl AppServer for FakeAppServer {
                 .filter(|request| request.ends_with("REQUEST_PRIMARY_VERIFICATION"))
                 .count()
         };
-        let verification_behavior = match self.verification_behavior {
-            VerificationBehavior::MissingExecutionThenPass if verification_request_number == 1 => {
-                VerificationBehavior::MissingExecution
-            }
-            VerificationBehavior::MissingExecutionThenPass => VerificationBehavior::Pass,
-            VerificationBehavior::FailedExecutionThenPass if verification_request_number == 1 => {
-                VerificationBehavior::FailedExecution
-            }
-            VerificationBehavior::FailedExecutionThenPass => VerificationBehavior::Pass,
-            VerificationBehavior::MissingThenCargoUnavailableThenPass => {
-                match verification_request_number {
-                    1 => VerificationBehavior::MissingExecution,
-                    2 => VerificationBehavior::CargoUnavailable,
-                    _ => VerificationBehavior::Pass,
-                }
-            }
-            VerificationBehavior::MissingThenCargoUnavailableThenMissingThenPass => {
-                match verification_request_number {
-                    1 | 3 => VerificationBehavior::MissingExecution,
-                    2 => VerificationBehavior::CargoUnavailable,
-                    _ => VerificationBehavior::Pass,
-                }
-            }
-            VerificationBehavior::MissingThenCargoUnavailableThenMissing => {
-                match verification_request_number {
-                    2 => VerificationBehavior::CargoUnavailable,
-                    _ => VerificationBehavior::MissingExecution,
-                }
-            }
-            behavior => behavior,
-        };
+        let verification_behavior =
+            self.verification_behavior_for_request(verification_request_number);
         self.prompts.lock().unwrap().push(prompt.to_owned());
         self.policies.lock().unwrap().push(policy.clone());
         let mut reply = if action == "REQUEST_PRIMARY_VERIFICATION" {
@@ -3640,7 +3509,15 @@ impl AppServer for FakeAppServer {
             }));
         }
         if action == "REQUEST_PRIMARY_VERIFICATION" {
-            append_verification_command_items(&mut turn, prompt, verification_behavior);
+            if let Some(item_type) = self.verification_item_type {
+                let items = turn["items"].as_array_mut().unwrap();
+                let agent = items.pop().unwrap();
+                items.push(json!({
+                    "id": format!("participant-side-effect-{turn_id}"),
+                    "type": item_type,
+                }));
+                items.push(agent);
+            }
         }
         if action == "REQUEST_PRIMARY_VERIFICATION"
             && self.event_only_turn_items
@@ -3722,6 +3599,38 @@ impl AppServer for FakeAppServer {
             .push((thread_id.to_owned(), turn_id.to_owned()));
         self.set_turn_status(thread_id, turn_id, "interrupted");
         Ok(())
+    }
+
+    async fn execute_command(
+        &self,
+        request: &CommandExecRequest,
+    ) -> Result<CommandExecResult, AppServerError> {
+        let verification_request_number = self
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.ends_with("REQUEST_PRIMARY_VERIFICATION"))
+            .count();
+        let command_index = {
+            let mut counts = self.verification_command_counts.lock().unwrap();
+            let count = counts.entry(verification_request_number).or_default();
+            let index = *count;
+            *count += 1;
+            index
+        };
+        self.executed_commands.lock().unwrap().push(request.clone());
+        let behavior = self.verification_behavior_for_request(verification_request_number);
+        let failed = behavior == VerificationBehavior::FailedExecution && command_index == 0;
+        Ok(CommandExecResult {
+            exit_code: if failed { 1 } else { 0 },
+            stdout: if failed {
+                "a machine-derived compiler diagnostic\n".repeat(1_000)
+            } else {
+                String::new()
+            },
+            stderr: String::new(),
+        })
     }
 
     async fn controlled_patch_approval_mode(&self) -> Result<Option<String>, AppServerError> {
