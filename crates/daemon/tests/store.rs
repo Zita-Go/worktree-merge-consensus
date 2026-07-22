@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use consensus_core::{
     canonical_json_hash,
     protocol::validate_message,
-    state::{NextAction, Role, RunDiagnostic, RunFacts, RunState, RunStatus},
+    state::{NextAction, Phase, Role, RunDiagnostic, RunFacts, RunState, RunStatus},
 };
 use consensus_daemon::store::{SqliteRunStore, VerificationCommandClaim};
 use rusqlite::{Connection, params};
@@ -805,10 +805,19 @@ fn seed_legacy_verification_compatibility_retry(
     store: &SqliteRunStore,
     message_hash: &str,
 ) -> (RunState, RunState) {
-    let mut blocked = fixture_integrated_run();
+    let active = fixture_integrated_run();
+    assert_eq!(active.status, RunStatus::Running);
+    assert_eq!(active.phase, Phase::Verify);
+    assert_eq!(active.next_action, NextAction::RequestPrimaryVerification);
+    store.insert_run(&active).unwrap();
+
+    let mut blocked = active;
     record_missing_verification_diagnostic(&mut blocked);
     blocked.block("TEST_FAILURE");
-    store.insert_run(&blocked).unwrap();
+    assert_eq!(blocked.status, RunStatus::Blocked);
+    assert_eq!(blocked.phase, Phase::Blocked);
+    assert_eq!(blocked.next_action, NextAction::Stop);
+    store.save_state(&blocked).unwrap();
     store
         .record_pending_send(RUN_ID, "PRIMARY", "VERIFY", blocked.round, message_hash)
         .unwrap();
