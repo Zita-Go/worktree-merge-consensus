@@ -332,6 +332,40 @@ fn verification_without_execution_restores_only_the_verification_action() {
 }
 
 #[test]
+fn verification_completion_collision_restores_only_the_inflight_verification_action() {
+    let integration_sha = "cccccccccccccccccccccccccccccccccccccccc";
+    let mut state = fixture_plan_state();
+    let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
+    state.apply_message(approved_plan(&plan_hash)).unwrap();
+    state
+        .apply_message(integration_created(integration_sha))
+        .unwrap();
+    state.verification_worktree = Some(PathBuf::from("/state/verification/run"));
+    state.record_error(RunDiagnostic {
+        code: "DATABASE_ERROR".into(),
+        detail: "database error: UNIQUE constraint failed: turn_event_completions.turn_record_id"
+            .into(),
+        operation: None,
+        action: NextAction::RequestPrimaryVerification,
+        role: Some(Role::Primary),
+        thread_id: Some("primary-thread".into()),
+    });
+    state.block("DATABASE_ERROR");
+
+    let action = state
+        .recover_v025_verification_completion_collision()
+        .unwrap();
+
+    assert_eq!(action, NextAction::RequestPrimaryVerification);
+    assert_eq!(state.status, RunStatus::Running);
+    assert_eq!(state.phase, Phase::Verify);
+    assert_eq!(state.integration_sha.as_deref(), Some(integration_sha));
+    assert!(state.reason_code.is_none());
+    assert!(state.last_error.is_none());
+    assert!(state.test_evidence.is_empty());
+}
+
+#[test]
 fn cargo_environment_blocker_restores_only_the_verification_action() {
     let integration_sha = "cccccccccccccccccccccccccccccccccccccccc";
     let mut state = fixture_plan_state();

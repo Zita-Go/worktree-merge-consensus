@@ -145,6 +145,14 @@ marker turn. Resume archives only that final turn and restores the same frozen
 verification request. It cannot repeat a patch, branch creation, merge, commit,
 or source-ref update, and a second migration is forbidden.
 
+Release 0.2.6 fixes archived event cleanup for that reusable request record.
+If v0.2.5 already restored the request but then blocked on the exact SQLite
+`turn_event_completions.turn_record_id` collision, daemon startup validates the
+unchanged Git result and completed marker-only active turn before removing only
+the stale archived event rows and continuing the same action. This is not a
+second resume or migration and cannot create another patch, merge, commit, or
+verification execution during repair. Any near-match remains blocked.
+
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the
 [legacy v1 protocol](protocol-v1.md).

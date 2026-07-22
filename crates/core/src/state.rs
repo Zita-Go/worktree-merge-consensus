@@ -578,6 +578,62 @@ impl RunState {
         Ok(self.next_action)
     }
 
+    pub fn recover_v025_verification_completion_collision(
+        &mut self,
+    ) -> Result<NextAction, StateError> {
+        if self.status != RunStatus::Blocked
+            || self.phase != Phase::Blocked
+            || self.next_action != NextAction::Stop
+            || self.reason_code.as_deref() != Some("DATABASE_ERROR")
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "only the v0.2.5 verification completion collision can be recovered",
+            ));
+        }
+        let diagnostic = self.last_error.as_ref().ok_or_else(|| {
+            state_error(
+                "INCOMPATIBLE_STATE",
+                "verification completion collision recovery requires its originating diagnostic",
+            )
+        })?;
+        if diagnostic.code != "DATABASE_ERROR"
+            || diagnostic.detail
+                != "database error: UNIQUE constraint failed: turn_event_completions.turn_record_id"
+            || diagnostic.operation.is_some()
+            || diagnostic.action != NextAction::RequestPrimaryVerification
+            || diagnostic.role != Some(Role::Primary)
+            || diagnostic.thread_id.as_deref() != Some(self.facts.primary_thread_id.as_str())
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "database-error recovery is limited to the exact bound v0.2.5 completion collision",
+            ));
+        }
+        if !self.plan_approved
+            || self.integration_branch.is_none()
+            || self.integration_sha.is_none()
+            || self.current_integration_payload.is_none()
+            || self.verification_worktree.is_none()
+            || self.required_test_commands.is_empty()
+            || !self.test_evidence.is_empty()
+            || self.accepted_result.is_some()
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "completion collision recovery requires an unchanged unaccepted integration result",
+            ));
+        }
+
+        self.status = RunStatus::Running;
+        self.phase = Phase::Verify;
+        self.next_action = NextAction::RequestPrimaryVerification;
+        self.reason_code = None;
+        self.last_error = None;
+        self.validate_persisted()?;
+        Ok(self.next_action)
+    }
+
     pub fn retry_blocked_verification_environment_unavailable(
         &mut self,
     ) -> Result<NextAction, StateError> {

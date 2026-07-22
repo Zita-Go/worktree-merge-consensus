@@ -177,6 +177,12 @@ resume only the exact legacy 0.2.4 blocked history on the same Run, branch, and
 integration SHA; it archives one final side-effect-free verification turn and
 cannot repeat a patch, branch creation, merge, commit, or source-ref update.
 
+Version 0.2.6 clears archived App Server event rows before reusing a persisted
+turn record. It also performs one fail-closed startup repair for the exact
+v0.2.5 post-migration completion collision. That repair preserves the active
+turn, Run, integration branch and SHA, source refs, patch record, merge, and
+commit; it neither sends a second resume nor executes a test during repair.
+
 Read [the v2 participant protocol](docs/protocol-v2.md), the
 [legacy v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
@@ -205,8 +211,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.5-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.5-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.6-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.6-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or

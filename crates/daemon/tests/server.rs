@@ -92,6 +92,7 @@ async fn controller_backed_start_returns_immediately_and_dispatches_background_d
         store: store.clone(),
         drives: AtomicUsize::new(0),
         health_checks: AtomicUsize::new(0),
+        startup_recoveries: AtomicUsize::new(0),
     });
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let mut server = tokio::spawn(run_server_with_controller(
@@ -152,6 +153,7 @@ async fn daemon_restart_redispatches_only_recoverable_runs() {
         store: store.clone(),
         drives: AtomicUsize::new(0),
         health_checks: AtomicUsize::new(0),
+        startup_recoveries: AtomicUsize::new(0),
     });
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let mut server = tokio::spawn(run_server_with_controller(
@@ -170,6 +172,7 @@ async fn daemon_restart_redispatches_only_recoverable_runs() {
     }
 
     assert_eq!(controller.drives.load(Ordering::SeqCst), 1);
+    assert_eq!(controller.startup_recoveries.load(Ordering::SeqCst), 1);
     shutdown_tx.send(()).unwrap();
     server.await.unwrap().unwrap();
 }
@@ -178,6 +181,7 @@ struct FakeRunController {
     store: SqliteRunStore,
     drives: AtomicUsize,
     health_checks: AtomicUsize,
+    startup_recoveries: AtomicUsize,
 }
 
 #[async_trait]
@@ -185,6 +189,11 @@ impl RunController for FakeRunController {
     async fn check_app_server(&self) -> Result<(), CoordinatorError> {
         self.health_checks.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+
+    async fn recover_startup_runs(&self) -> Result<Vec<RunState>, CoordinatorError> {
+        self.startup_recoveries.fetch_add(1, Ordering::SeqCst);
+        Ok(Vec::new())
     }
 
     async fn start_run(

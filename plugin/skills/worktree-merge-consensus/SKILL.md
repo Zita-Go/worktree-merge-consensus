@@ -245,6 +245,12 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   successful patch record, merge, commit, and frozen refs. Any different
   history, side effect, drift, prior migration, or changed identity remains
   terminal.
+  If a v0.2.5 Run instead blocks with the exact SQLite diagnostic
+  `UNIQUE constraint failed: turn_event_completions.turn_record_id` after that
+  migration, install matching v0.2.6 binary and plugin artifacts, then restart
+  the daemon once. Do not call `consensus_resume` again. v0.2.6 revalidates and
+  continues the same Run during startup; observe it with `consensus_status`.
+  Every near-match remains blocked without mutation.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
 Read [references/protocol.md](references/protocol.md) when explaining lifecycle states, acceptance evidence, or recovery behavior.

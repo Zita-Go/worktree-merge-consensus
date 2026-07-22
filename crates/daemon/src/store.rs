@@ -73,6 +73,14 @@ pub struct TurnEventEvidence {
     pub completed_items: Vec<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V025VerificationCompletionCollision {
+    pub blocked_state: RunState,
+    pub pending: PendingSend,
+    pub stale_turn_id: String,
+    turn_record_id: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunSummary {
     pub run_id: String,
@@ -1084,6 +1092,84 @@ impl SqliteRunStore {
         Ok(())
     }
 
+    pub fn v025_verification_completion_collision_candidate(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<V025VerificationCompletionCollision>, StoreError> {
+        let connection = self.lock()?;
+        v025_verification_completion_collision_candidate(&connection, run_id)
+    }
+
+    pub fn recover_v025_verification_completion_collision(
+        &self,
+        candidate: &V025VerificationCompletionCollision,
+        recovered_state: &RunState,
+    ) -> Result<(), StoreError> {
+        let mut expected_recovered_state = candidate.blocked_state.clone();
+        if expected_recovered_state
+            .recover_v025_verification_completion_collision()
+            .is_err()
+            || expected_recovered_state != *recovered_state
+        {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "v0.2.5 completion collision recovery state is invalid".into(),
+            ));
+        }
+
+        let run_id = candidate.blocked_state.facts.run_id.to_string();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let current = v025_verification_completion_collision_candidate(&transaction, &run_id)?;
+        if current.as_ref() != Some(candidate) {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "run {run_id} changed while preparing v0.2.5 completion collision recovery"
+            )));
+        }
+
+        let common_dir = recovered_state.facts.git_common_dir.to_string_lossy();
+        match transaction.execute(
+            "INSERT INTO locks (repository_id, run_id, primary_worktree, acquired_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                common_dir.as_ref(),
+                run_id,
+                recovered_state
+                    .facts
+                    .primary_worktree
+                    .to_string_lossy()
+                    .as_ref(),
+                now_unix(),
+            ],
+        ) {
+            Ok(_) => {}
+            Err(error) if is_constraint(&error) => {
+                return Err(StoreError::ActiveRunExists(format!(
+                    "repository {} already has an active run",
+                    recovered_state.facts.git_common_dir.display()
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        transaction.execute(
+            "DELETE FROM turn_event_items
+             WHERE turn_record_id = ?1 AND turn_id = ?2",
+            params![candidate.turn_record_id, candidate.stale_turn_id],
+        )?;
+        let deleted_completion = transaction.execute(
+            "DELETE FROM turn_event_completions
+             WHERE turn_record_id = ?1 AND turn_id = ?2",
+            params![candidate.turn_record_id, candidate.stale_turn_id],
+        )?;
+        if deleted_completion != 1 {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "v0.2.5 completion collision evidence changed during recovery".into(),
+            ));
+        }
+        update_run_row(&transaction, &run_id, recovered_state)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn reactivate_blocked_run_with_interrupted_forbidden_operation_retry(
         &self,
@@ -1623,6 +1709,186 @@ fn active_turn_record_id(
         })
 }
 
+fn v025_verification_completion_collision_candidate(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<Option<V025VerificationCompletionCollision>, StoreError> {
+    let state_json = connection
+        .query_row(
+            "SELECT state_json FROM runs WHERE run_id = ?1",
+            [run_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(state_json) = state_json else {
+        return Ok(None);
+    };
+    let blocked_state = deserialize_state(&state_json)?;
+    let mut recovered_state = blocked_state.clone();
+    if recovered_state
+        .recover_v025_verification_completion_collision()
+        .is_err()
+    {
+        return Ok(None);
+    }
+
+    let mut statement = connection.prepare(
+        "SELECT id, role, phase, round, message_hash, thread_id, turn_id
+         FROM turns
+         WHERE run_id = ?1 AND delivery_state = 'SENT'
+         ORDER BY id ASC",
+    )?;
+    let sent_turns = statement
+        .query_map([run_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, u32>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let [(turn_record_id, role, phase, round, message_hash, Some(thread_id), Some(turn_id))] =
+        sent_turns.as_slice()
+    else {
+        return Ok(None);
+    };
+    if role != "PRIMARY"
+        || phase != "VERIFY"
+        || *round != blocked_state.round
+        || thread_id != &blocked_state.facts.primary_thread_id
+    {
+        return Ok(None);
+    }
+
+    let mut statement = connection.prepare(
+        "SELECT turn_id, terminal_status
+         FROM turn_attempts
+         WHERE turn_record_id = ?1
+         ORDER BY id ASC",
+    )?;
+    let attempts = statement
+        .query_map([turn_record_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected_statuses = [
+        "completed",
+        "completed",
+        "completed-evidence-unavailable",
+        "completed-unattended-verification-migration",
+    ];
+    if attempts.len() != expected_statuses.len()
+        || attempts
+            .iter()
+            .zip(expected_statuses)
+            .any(|((_, status), expected)| status != expected)
+    {
+        return Ok(None);
+    }
+    let stale_turn_id = attempts.last().map(|attempt| attempt.0.clone()).unwrap();
+    if stale_turn_id == *turn_id {
+        return Ok(None);
+    }
+    let migration_count = connection.query_row(
+        "SELECT COUNT(*) FROM turn_attempts
+         WHERE run_id = ?1
+           AND terminal_status = 'completed-unattended-verification-migration'",
+        [run_id],
+        |row| row.get::<_, u64>(0),
+    )?;
+    if migration_count != 1 {
+        return Ok(None);
+    }
+
+    let stale_completion = connection
+        .query_row(
+            "SELECT run_id, thread_id, turn_id, completed_turn_json
+             FROM turn_event_completions
+             WHERE turn_record_id = ?1",
+            [turn_record_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((completion_run_id, completion_thread_id, completion_turn_id, completion_json)) =
+        stale_completion
+    else {
+        return Ok(None);
+    };
+    let completion: Value = serde_json::from_str(&completion_json)?;
+    if completion_run_id != run_id
+        || completion_thread_id != blocked_state.facts.primary_thread_id
+        || completion_turn_id != stale_turn_id
+        || completion.get("id").and_then(Value::as_str) != Some(stale_turn_id.as_str())
+        || completion.get("status").and_then(Value::as_str) != Some("completed")
+    {
+        return Ok(None);
+    }
+
+    let (active_agent_items, active_side_effect_items) = connection.query_row(
+        "SELECT
+            COALESCE(SUM(CASE
+                WHEN turn_id = ?2 AND item_type = 'agentMessage'
+                 AND lifecycle_state = 'COMPLETED' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE
+                WHEN turn_id = ?2 AND item_type IN (
+                    'commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall'
+                ) THEN 1 ELSE 0 END), 0)
+         FROM turn_event_items
+         WHERE turn_record_id = ?1",
+        params![turn_record_id, turn_id],
+        |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)),
+    )?;
+    if active_agent_items == 0 || active_side_effect_items != 0 {
+        return Ok(None);
+    }
+    let command_count = connection.query_row(
+        "SELECT COUNT(*) FROM verification_command_executions
+         WHERE run_id = ?1",
+        [run_id],
+        |row| row.get::<_, u64>(0),
+    )?;
+    let patch_count = connection.query_row(
+        "SELECT COUNT(*) FROM patch_applications WHERE run_id = ?1",
+        [run_id],
+        |row| row.get::<_, u64>(0),
+    )?;
+    let lock_count = connection.query_row(
+        "SELECT COUNT(*) FROM locks WHERE run_id = ?1",
+        [run_id],
+        |row| row.get::<_, u64>(0),
+    )?;
+    if command_count != 0 || patch_count != 1 || lock_count != 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(V025VerificationCompletionCollision {
+        blocked_state,
+        pending: PendingSend {
+            run_id: run_id.to_owned(),
+            role: role.clone(),
+            phase: phase.clone(),
+            round: *round,
+            message_hash: message_hash.clone(),
+            thread_id: Some(thread_id.clone()),
+            turn_id: Some(turn_id.clone()),
+            full_prompt: None,
+        },
+        stale_turn_id,
+        turn_record_id: *turn_record_id,
+    }))
+}
+
 fn archive_and_reset_turn(
     transaction: &Transaction<'_>,
     run_id: &str,
@@ -1661,6 +1927,16 @@ fn archive_and_reset_turn(
             observed_status,
             now_unix(),
         ],
+    )?;
+    transaction.execute(
+        "DELETE FROM turn_event_items
+         WHERE turn_record_id = ?1 AND turn_id = ?2",
+        params![turn_record_id, turn_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM turn_event_completions
+         WHERE turn_record_id = ?1 AND turn_id = ?2",
+        params![turn_record_id, turn_id],
     )?;
     let changed = transaction.execute(
         "UPDATE turns

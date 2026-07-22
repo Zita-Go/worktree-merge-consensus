@@ -21,6 +21,9 @@ pub trait RunController: Send + Sync {
     async fn check_app_server(&self) -> Result<(), CoordinatorError> {
         Ok(())
     }
+    async fn recover_startup_runs(&self) -> Result<Vec<RunState>, CoordinatorError> {
+        Ok(Vec::new())
+    }
     async fn start_run(
         &self,
         state: RunState,
@@ -45,6 +48,10 @@ where
 {
     async fn check_app_server(&self) -> Result<(), CoordinatorError> {
         Coordinator::check_app_server(self).await
+    }
+
+    async fn recover_startup_runs(&self) -> Result<Vec<RunState>, CoordinatorError> {
+        Coordinator::recover_startup_runs(self).await
     }
 
     async fn start_run(
@@ -159,6 +166,9 @@ async fn run_server_inner(
     fs::set_permissions(&config.pid_path, fs::Permissions::from_mode(0o600))?;
 
     if let Some(controller) = &controller {
+        if let Err(error) = controller.recover_startup_runs().await {
+            eprintln!("consensus startup recovery stopped without mutation: {error}");
+        }
         for run in store
             .list_runs()?
             .into_iter()

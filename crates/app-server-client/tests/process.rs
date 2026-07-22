@@ -42,7 +42,11 @@ async fn incompatible_binary_never_starts_daemon_or_proxy() {
     .await
     .unwrap_err();
 
-    assert!(error.to_string().contains("INCOMPATIBLE_CODEX"));
+    let detail = error.to_string();
+    assert!(
+        detail.contains("INCOMPATIBLE_CODEX"),
+        "unexpected incompatibility error: {detail}"
+    );
     let calls = fs::read_to_string(&log).unwrap();
     assert_eq!(calls.lines().count(), 1);
     assert!(calls.contains("--version"));
@@ -94,7 +98,7 @@ async fn cli_managed_app_server_identity_is_accepted_end_to_end() {
         temp.path(),
         &log,
         "0.144.6",
-        "worktree-merge-consensus/0.144.6 (Debian 12.0.0; x86_64) unknown (worktree-merge-consensus; 0.2.5)",
+        "worktree-merge-consensus/0.144.6 (Debian 12.0.0; x86_64) unknown (worktree-merge-consensus; 0.2.6)",
     );
 
     CodexAppServer::connect(ConnectOptions {

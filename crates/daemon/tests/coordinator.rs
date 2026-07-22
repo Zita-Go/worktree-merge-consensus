@@ -1181,6 +1181,110 @@ async fn exact_legacy_history_migrates_only_the_pending_verification_turn() {
 }
 
 #[tokio::test]
+async fn startup_recovery_accepts_only_the_exact_v025_completion_collision() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    let app = Arc::new(
+        FakeAppServer::deferred(marker_replies(), 6, DeferMode::Hold).with_marker_protocol(),
+    );
+    let safety = Arc::new(RecordingSafety::default());
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::clone(&safety),
+        legacy_migration_options(),
+    );
+    let seed = seed_legacy_unattended_verification_history(
+        &coordinator,
+        &app,
+        &store,
+        ["ready", "cargo-unavailable", "ready"],
+        None,
+    )
+    .await;
+    let resumed = coordinator.prepare_resume(RUN_ID).await.unwrap();
+    let current_turn_id = "post-migration-verification";
+    store
+        .record_turn_started(
+            RUN_ID,
+            &seed.verification_request_hash,
+            "primary",
+            current_turn_id,
+        )
+        .unwrap();
+    app.inject_completed_turn(
+        "primary",
+        current_turn_id,
+        &legacy_request_prompt(&seed.verification_request_hash),
+        legacy_verification_reply("ready"),
+    );
+    store
+        .record_turn_item_event(
+            RUN_ID,
+            "primary",
+            current_turn_id,
+            "item/completed",
+            &legacy_agent_item(current_turn_id, "ready"),
+        )
+        .unwrap();
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "INSERT INTO turn_event_completions (
+                turn_record_id, run_id, thread_id, turn_id,
+                completed_turn_json, recorded_at
+             )
+             SELECT id, run_id, 'primary', 'legacy-verification-4', ?3, 1
+             FROM turns WHERE run_id = ?1 AND message_hash = ?2",
+            params![
+                RUN_ID,
+                seed.verification_request_hash,
+                r#"{"id":"legacy-verification-4","status":"completed","items":[]}"#
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    let mut collision = resumed;
+    record_database_completion_collision_diagnostic(&mut collision, "primary");
+    collision.block("DATABASE_ERROR");
+    store.save_state(&collision).unwrap();
+    let integration_checks_before = safety
+        .events()
+        .into_iter()
+        .filter(|event| event == &format!("result:consensus/test-run:{INTEGRATION_SHA}"))
+        .count();
+
+    let recovered = coordinator.recover_startup_runs().await.unwrap();
+
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].status, RunStatus::Running);
+    assert_eq!(recovered[0].phase, Phase::Verify);
+    assert_eq!(
+        recovered[0].next_action,
+        NextAction::RequestPrimaryVerification
+    );
+    assert_eq!(recovered[0].integration_sha, collision.integration_sha);
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), recovered[0]);
+    assert_eq!(
+        store
+            .pending_send(RUN_ID)
+            .unwrap()
+            .unwrap()
+            .turn_id
+            .as_deref(),
+        Some(current_turn_id)
+    );
+    let integration_checks_after = safety
+        .events()
+        .into_iter()
+        .filter(|event| event == &format!("result:consensus/test-run:{INTEGRATION_SHA}"))
+        .count();
+    assert_eq!(integration_checks_after, integration_checks_before + 2);
+    assert!(app.executed_commands().is_empty());
+}
+
+#[tokio::test]
 async fn unattended_migration_rejects_a_final_turn_with_side_effects() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -4468,6 +4572,18 @@ fn record_missing_verification_diagnostic(state: &mut RunState) {
         action: NextAction::RequestPrimaryVerification,
         role: Some(Role::Primary),
         thread_id: Some("primary".into()),
+    });
+}
+
+fn record_database_completion_collision_diagnostic(state: &mut RunState, thread_id: &str) {
+    state.record_error(RunDiagnostic {
+        code: "DATABASE_ERROR".into(),
+        detail: "database error: UNIQUE constraint failed: turn_event_completions.turn_record_id"
+            .into(),
+        operation: None,
+        action: NextAction::RequestPrimaryVerification,
+        role: Some(Role::Primary),
+        thread_id: Some(thread_id.into()),
     });
 }
 

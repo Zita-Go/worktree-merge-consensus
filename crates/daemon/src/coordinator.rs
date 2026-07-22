@@ -659,6 +659,78 @@ where
         Ok(state)
     }
 
+    pub async fn recover_startup_runs(&self) -> Result<Vec<RunState>, CoordinatorError> {
+        let _guard = self.driver_lock.lock().await;
+        let mut recovered = Vec::new();
+        for summary in self.store.list_runs()?.into_iter().filter(|summary| {
+            summary.status == "BLOCKED" && summary.reason_code.as_deref() == Some("DATABASE_ERROR")
+        }) {
+            let Some(candidate) = self
+                .store
+                .v025_verification_completion_collision_candidate(&summary.run_id)?
+            else {
+                continue;
+            };
+            let state = &candidate.blocked_state;
+            self.revalidate_current_repository(state).await?;
+            let thread_id = candidate.pending.thread_id.as_deref().ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "v0.2.5 completion collision has no bound primary task",
+                )
+            })?;
+            let turn_id = candidate.pending.turn_id.as_deref().ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "v0.2.5 completion collision has no bound verification turn",
+                )
+            })?;
+            let detail = self.read_thread_with_retry(thread_id).await?;
+            self.verify_thread_identity(state, Role::Primary, &detail)?;
+            let turn = find_turn(&detail, turn_id).ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "v0.2.5 completion-collision turn is absent from canonical task history",
+                )
+            })?;
+            if turn.get("status").and_then(Value::as_str) != Some("completed")
+                || !turn_contains_request_hash(turn, &candidate.pending.message_hash)
+            {
+                return Err(CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "v0.2.5 completion recovery requires the exact completed request turn",
+                ));
+            }
+            if let Some(blocker) = verification_without_execution_retry_blocker(turn) {
+                return Err(CoordinatorError::operational(
+                    "MODEL_RESPONSE_RETRY_UNSAFE",
+                    format!("v0.2.5 completion-collision turn cannot be recovered: {blocker}"),
+                ));
+            }
+            let response = parse_participant_response(
+                final_agent_text(turn)?.trim(),
+                allowed_participant_signals(NextAction::RequestPrimaryVerification),
+            )
+            .map_err(|error| {
+                CoordinatorError::operational("HISTORY_UNAVAILABLE", error.to_string())
+            })?;
+            if response.signal != ParticipantSignal::VerificationReady {
+                return Err(CoordinatorError::operational(
+                    "MODEL_RESPONSE_RETRY_UNSAFE",
+                    "v0.2.5 completion recovery requires the final VERIFICATION_READY marker",
+                ));
+            }
+
+            self.revalidate_current_repository(state).await?;
+            let mut recovered_state = state.clone();
+            recovered_state.recover_v025_verification_completion_collision()?;
+            self.store
+                .recover_v025_verification_completion_collision(&candidate, &recovered_state)?;
+            recovered.push(recovered_state);
+        }
+        Ok(recovered)
+    }
+
     pub async fn drive(&self, run_id: &str) -> Result<RunState, CoordinatorError> {
         let _guard = self.driver_lock.lock().await;
         for _ in 0..MAX_DRIVER_STEPS {

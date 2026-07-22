@@ -395,6 +395,246 @@ fn unattended_verification_migration_is_atomic_and_bounded_to_one_retry() {
 }
 
 #[test]
+fn unattended_verification_migration_discards_stale_event_rows_before_reusing_turn_record() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    let message_hash = "legacy-verification-request";
+    let (blocked, resumed) = seed_legacy_verification_compatibility_retry(&store, message_hash);
+    let old_item = json!({
+        "id": "old-agent-message",
+        "type": "agentMessage",
+        "text": "<consensus-result>VERIFICATION_READY</consensus-result>",
+        "phase": "final_answer"
+    });
+    store
+        .record_turn_item_event(
+            RUN_ID,
+            "primary-thread",
+            "turn-4",
+            "item/completed",
+            &old_item,
+        )
+        .unwrap();
+    store
+        .record_turn_completed_event(
+            RUN_ID,
+            "primary-thread",
+            "turn-4",
+            &json!({"id": "turn-4", "status": "completed", "items": []}),
+        )
+        .unwrap();
+
+    store
+        .reactivate_blocked_run_with_unattended_verification_retry(
+            &blocked,
+            &resumed,
+            message_hash,
+            "primary-thread",
+            "turn-4",
+            "completed",
+        )
+        .unwrap();
+    store
+        .record_turn_started(RUN_ID, message_hash, "primary-thread", "turn-5")
+        .unwrap();
+    let new_item = json!({
+        "id": "new-agent-message",
+        "type": "agentMessage",
+        "text": "<consensus-result>VERIFICATION_READY</consensus-result>",
+        "phase": "final_answer"
+    });
+    store
+        .record_turn_item_event(
+            RUN_ID,
+            "primary-thread",
+            "turn-5",
+            "item/completed",
+            &new_item,
+        )
+        .unwrap();
+    store
+        .record_turn_completed_event(
+            RUN_ID,
+            "primary-thread",
+            "turn-5",
+            &json!({"id": "turn-5", "status": "completed", "items": []}),
+        )
+        .unwrap();
+
+    let completion_turn_ids = Connection::open(&path)
+        .unwrap()
+        .prepare(
+            "SELECT turn_id FROM turn_event_completions
+             WHERE run_id = ?1 ORDER BY recorded_at, turn_id",
+        )
+        .unwrap()
+        .query_map([RUN_ID], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(completion_turn_ids, vec!["turn-5"]);
+}
+
+#[test]
+fn v025_completion_collision_recovery_is_atomic_and_preserves_the_active_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    let message_hash = "legacy-verification-request";
+    let (blocked, resumed) = seed_legacy_verification_compatibility_retry(&store, message_hash);
+    store
+        .record_successful_patch(RUN_ID, "integration-request", "patch-hash")
+        .unwrap();
+    store
+        .reactivate_blocked_run_with_unattended_verification_retry(
+            &blocked,
+            &resumed,
+            message_hash,
+            "primary-thread",
+            "turn-4",
+            "completed",
+        )
+        .unwrap();
+    store
+        .record_turn_started(RUN_ID, message_hash, "primary-thread", "turn-5")
+        .unwrap();
+    let active_item = json!({
+        "id": "active-agent-message",
+        "type": "agentMessage",
+        "text": "<consensus-result>VERIFICATION_READY</consensus-result>",
+        "phase": "final_answer"
+    });
+    store
+        .record_turn_item_event(
+            RUN_ID,
+            "primary-thread",
+            "turn-5",
+            "item/completed",
+            &active_item,
+        )
+        .unwrap();
+
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "INSERT INTO turn_event_items (
+                turn_record_id, run_id, thread_id, turn_id, item_id, item_type,
+                lifecycle_state, item_json, created_at, updated_at
+             )
+             SELECT id, run_id, 'primary-thread', 'turn-4', 'stale-agent-message',
+                    'agentMessage', 'COMPLETED', ?3, 1, 1
+             FROM turns WHERE run_id = ?1 AND message_hash = ?2",
+            params![
+                RUN_ID,
+                message_hash,
+                serde_json::to_string(&active_item).unwrap()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO turn_event_completions (
+                turn_record_id, run_id, thread_id, turn_id,
+                completed_turn_json, recorded_at
+             )
+             SELECT id, run_id, 'primary-thread', 'turn-4', ?3, 1
+             FROM turns WHERE run_id = ?1 AND message_hash = ?2",
+            params![
+                RUN_ID,
+                message_hash,
+                r#"{"id":"turn-4","status":"completed","items":[]}"#
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut collision = resumed;
+    record_database_completion_collision_diagnostic(&mut collision);
+    collision.block("DATABASE_ERROR");
+    store.save_state(&collision).unwrap();
+
+    let candidate = store
+        .v025_verification_completion_collision_candidate(RUN_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(candidate.blocked_state, collision);
+    assert_eq!(candidate.pending.turn_id.as_deref(), Some("turn-5"));
+    assert_eq!(candidate.stale_turn_id, "turn-4");
+    store
+        .begin_verification_command(
+            RUN_ID,
+            "different-verification-request",
+            "different-turn",
+            0,
+            "cargo test",
+            PathBuf::from("/state/verification/run").as_path(),
+        )
+        .unwrap();
+    assert!(
+        store
+            .v025_verification_completion_collision_candidate(RUN_ID)
+            .unwrap()
+            .is_none()
+    );
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "DELETE FROM verification_command_executions
+             WHERE run_id = ?1 AND message_hash = 'different-verification-request'",
+            [RUN_ID],
+        )
+        .unwrap();
+    let candidate = store
+        .v025_verification_completion_collision_candidate(RUN_ID)
+        .unwrap()
+        .unwrap();
+    let mut recovered = collision.clone();
+    recovered
+        .recover_v025_verification_completion_collision()
+        .unwrap();
+
+    store
+        .recover_v025_verification_completion_collision(&candidate, &recovered)
+        .unwrap();
+
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), recovered);
+    assert_eq!(
+        store
+            .pending_send(RUN_ID)
+            .unwrap()
+            .unwrap()
+            .turn_id
+            .as_deref(),
+        Some("turn-5")
+    );
+    let connection = Connection::open(&path).unwrap();
+    let stale_rows = connection
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM turn_event_items
+                 WHERE run_id = ?1 AND turn_id = 'turn-4'),
+                (SELECT COUNT(*) FROM turn_event_completions
+                 WHERE run_id = ?1 AND turn_id = 'turn-4')",
+            [RUN_ID],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .unwrap();
+    let active_rows = connection
+        .query_row(
+            "SELECT COUNT(*) FROM turn_event_items
+             WHERE run_id = ?1 AND turn_id = 'turn-5'",
+            [RUN_ID],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(stale_rows, (0, 0));
+    assert_eq!(active_rows, 1);
+    assert_eq!(migration_statuses(&path, message_hash).len(), 4);
+    assert_eq!(verification_command_row_count(&path), 0);
+}
+
+#[test]
 fn unattended_verification_migration_is_bounded_once_per_run_across_request_hashes() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");
@@ -1023,6 +1263,18 @@ fn record_missing_verification_diagnostic(state: &mut RunState) {
     state.record_error(RunDiagnostic {
         code: "TEST_FAILURE".into(),
         detail: "verification must execute each frozen command exactly once and no other command"
+            .into(),
+        operation: None,
+        action: NextAction::RequestPrimaryVerification,
+        role: Some(Role::Primary),
+        thread_id: Some("primary-thread".into()),
+    });
+}
+
+fn record_database_completion_collision_diagnostic(state: &mut RunState) {
+    state.record_error(RunDiagnostic {
+        code: "DATABASE_ERROR".into(),
+        detail: "database error: UNIQUE constraint failed: turn_event_completions.turn_record_id"
             .into(),
         operation: None,
         action: NextAction::RequestPrimaryVerification,

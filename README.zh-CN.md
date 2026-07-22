@@ -118,6 +118,10 @@ App Server `command/exec` 完成的协调器自有验证。结构化命令结果
 重启行为。一次有界迁移只能恢复具有精确旧版 0.2.4 阻塞历史的同一 Run、分支和集成 SHA；它
 只归档最后一个无副作用验证 turn，不会重复补丁、建分支、merge、commit 或更新源引用。
 
+0.2.6 会在复用持久化 turn 记录前清理已归档的 App Server 事件行，并只对精确匹配的 0.2.5
+迁移后完成事件唯一键碰撞执行一次故障关闭式启动修复。修复保留当前 turn、Run、集成分支与 SHA、
+源引用、补丁记录、merge 和 commit；修复本身不会发送第二次 resume，也不会执行测试。
+
 精确边界见 [v2 参与任务协议](docs/protocol-v2.md)、[旧版 v1 协议](docs/protocol-v1.md)、
 [兼容性策略](docs/compatibility.md)与[安全策略](SECURITY.md)。
 
@@ -140,8 +144,8 @@ App Server `command/exec` 完成的协调器自有验证。结构化命令结果
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.5-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.5-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.6-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.6-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 v0.1.0 的 GNU 产物要求 GLIBC 2.39，现已停止推荐；受支持的 Linux 主机请使用

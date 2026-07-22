@@ -147,6 +147,17 @@ dispatch and reuses only a completed exact response. An execution left STARTED
 after uncertain delivery returns
 `VERIFICATION_EXECUTION_UNCERTAIN` rather than being dispatched again.
 
+Version 0.2.6 deletes the exact archived turn's event rows in the same
+transaction that resets its reusable turn record. On daemon startup it may
+repair the single known v0.2.5 completion collision only when the blocked
+diagnostic, Primary VERIFY request, four archived statuses, stale completion
+identity, marker-only active event evidence, one successful patch, zero test
+executions, and absent repository lock all match exactly. Canonical task
+history and the unchanged Git result are revalidated before mutation. The
+repair removes only stale archived event rows, reacquires the existing Run's
+lock, and restores its already-started verification action; it does not archive
+another turn, dispatch another resume, or execute a verification command.
+
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
 fixed task ID. `thread/read` can return persisted history for a `notLoaded`
 task, but it does not load that task for model execution; starting a turn after
