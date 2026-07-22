@@ -54,6 +54,7 @@ fn required_method_contract_is_explicit_and_pinned() {
             "thread/resume",
             "turn/start",
             "turn/interrupt",
+            "command/exec",
             "config/read",
             "config/batchWrite"
         ]
@@ -93,7 +94,7 @@ fn prerelease_of_minimum_version_is_rejected() {
 }
 
 #[test]
-fn pinned_fixture_keeps_open_ended_version_gate_and_command_execution_shape() {
+fn pinned_fixture_keeps_open_ended_version_gate_and_unattended_execution_contract() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../schemas/app-server/supported-methods.json"
     ))
@@ -101,6 +102,30 @@ fn pinned_fixture_keeps_open_ended_version_gate_and_command_execution_shape() {
 
     assert_eq!(fixture["minimumVersion"], "0.144.1");
     assert!(fixture.get("maximumVersionExclusive").is_none());
+    assert_eq!(
+        fixture["requiredMethods"],
+        serde_json::json!([
+            "initialize",
+            "thread/list",
+            "thread/read",
+            "thread/resume",
+            "turn/start",
+            "turn/interrupt",
+            "command/exec",
+            "config/read",
+            "config/batchWrite"
+        ])
+    );
+    assert_eq!(
+        fixture["requestShape"]["command/exec"],
+        serde_json::json!([
+            "command",
+            "cwd",
+            "timeoutMs",
+            "outputBytesCap",
+            "sandboxPolicy"
+        ])
+    );
     assert_eq!(fixture["initializeCapabilities"]["experimentalApi"], true);
     assert_eq!(
         fixture["turnLifecycle"]["requiredBeforeEveryTurnStart"],
@@ -113,6 +138,29 @@ fn pinned_fixture_keeps_open_ended_version_gate_and_command_execution_shape() {
             "localProtocolSchema": "../protocol-v1.json",
             "participantResponseProtocol": "worktree-merge-consensus/v2",
             "failClosed": true
+        })
+    );
+    assert_eq!(
+        fixture["turnPolicyShape"],
+        serde_json::json!({
+            "dangerFullAccess": ["type"]
+        })
+    );
+    assert_eq!(
+        fixture["turnPolicyProfiles"],
+        serde_json::json!({
+            "review": {
+                "approvalPolicy": "never",
+                "sandboxPolicy": {"type": "dangerFullAccess"}
+            },
+            "primaryIntegration": {
+                "approvalPolicy": "never",
+                "sandboxPolicy": {"type": "dangerFullAccess"}
+            },
+            "primaryVerification": {
+                "approvalPolicy": "never",
+                "sandboxPolicy": {"type": "dangerFullAccess"}
+            }
         })
     );
     assert_eq!(

@@ -10,6 +10,7 @@
     "thread/resume",
     "turn/start",
     "turn/interrupt",
+    "command/exec",
     "config/read",
     "config/batchWrite"
   ],
@@ -36,6 +37,13 @@
       "sandboxPolicy"
     ],
     "turn/interrupt": ["threadId", "turnId"],
+    "command/exec": [
+      "command",
+      "cwd",
+      "timeoutMs",
+      "outputBytesCap",
+      "sandboxPolicy"
+    ],
     "config/read": ["includeLayers"],
     "config/batchWrite": ["edits", "reloadUserConfig"]
   },
@@ -63,33 +71,26 @@
     "userAgent"
   ],
   "turnPolicyShape": {
-    "readOnly": ["type", "networkAccess"],
-    "workspaceWrite": [
-      "type",
-      "writableRoots",
-      "networkAccess",
-      "excludeSlashTmp",
-      "excludeTmpdirEnvVar"
-    ]
+    "dangerFullAccess": ["type"]
   },
   "turnPolicyProfiles": {
-    "reviewReadOnly": {
+    "review": {
       "approvalPolicy": "never",
-      "networkAccess": false
+      "sandboxPolicy": {
+        "type": "dangerFullAccess"
+      }
     },
-    "primaryIntegrationWorkspaceWrite": {
+    "primaryIntegration": {
       "approvalPolicy": "never",
-      "writableRootRoles": ["primaryWorktree", "sourceGitCommonDirectory"],
-      "networkAccess": false,
-      "excludeSlashTmp": true,
-      "excludeTmpdirEnvVar": true
+      "sandboxPolicy": {
+        "type": "dangerFullAccess"
+      }
     },
-    "primaryVerificationWorkspaceWrite": {
+    "primaryVerification": {
       "approvalPolicy": "never",
-      "writableRootRoles": ["isolatedVerificationClone"],
-      "networkAccess": false,
-      "excludeSlashTmp": false,
-      "excludeTmpdirEnvVar": false
+      "sandboxPolicy": {
+        "type": "dangerFullAccess"
+      }
     }
   },
   "commandExecutionEvidenceShape": {

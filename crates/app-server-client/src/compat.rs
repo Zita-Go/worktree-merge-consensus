@@ -9,6 +9,7 @@ pub const REQUIRED_METHODS: &[&str] = &[
     "thread/resume",
     "turn/start",
     "turn/interrupt",
+    "command/exec",
     "config/read",
     "config/batchWrite",
 ];
