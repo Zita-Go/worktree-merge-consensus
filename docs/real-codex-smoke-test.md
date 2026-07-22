@@ -54,24 +54,25 @@ the evidence below.
    every turn executes at its separately frozen worktree. Observe at least one
    plan correction from the reviewer, exact plan approval,
    primary-only source Git writes, and exact result-SHA approval. Confirm review
-   turns report read-only/offline policy and the integration turn reports
-   bounded source-workspace-write/offline policy. Confirm a separate
-   verification turn uses only the persisted `verification_worktree`, runs each
-   frozen command exactly once, and records completed `commandExecution`
-   evidence with turn ID, item ID, command, cwd, exit code, and bounded failure
+   turns and the integration turn all report `approvalPolicy: "never"` and
+   `sandboxPolicy.type: "dangerFullAccess"`. Confirm the selected tasks and
+   repository are trusted because this mode has no App Server OS sandbox.
+   Confirm the separate Primary verification turn is marker-only and contains
+   no Shell, Git, file, MCP, or patch item. After that marker, confirm the
+   coordinator uses `command/exec` to run each frozen command exactly once in
+   the persisted `verification_worktree` and records deterministic evidence
+   with turn ID, item ID, command, cwd, exit code, and bounded failure
    diagnostics. Exercise one nonzero command and confirm the same Run returns
    to a controlled integration correction, verifies the new SHA, and proceeds
    to result review only after every frozen command passes.
-   Confirm every coordinator-started turn sends `approvalPolicy: "never"` and
-   neither task asks the user to approve a command, file operation, or internal
-   controlled patch. Confirm the writable roots and offline network policy are
-   unchanged despite the unattended approval policy.
+   Confirm neither task asks the user to approve a command, file operation, or
+   internal controlled patch.
    On an App Server whose completed `thread/read` history omits command or MCP
    items, confirm the daemon has persisted matching `item/started`,
-   `item/completed`, and `turn/completed` evidence in private SQLite and still
-   derives the same exact command, cwd, exit code, and bounded output. Restart
-   the daemon after the completion barrier and confirm it reuses that evidence
-   without asking either task to serialize it in JSON.
+   `item/completed`, and `turn/completed` evidence in private SQLite for
+   participant side-effect and controlled-tool auditing. Confirm coordinator
+   verification evidence comes from its separate command journal and does not
+   require either task to serialize command output in JSON.
    Confirm contracts use one result marker plus a JSON body, while the plan,
    review feedback, integration summary, verification summary, and final review
    use one result marker plus ordinary Markdown. No participant should have to
@@ -81,10 +82,12 @@ the evidence below.
    process, and permits an idempotent task read without manual coordinator
    restart. Then restart the coordinator daemon during a second disposable
    integration turn and confirm the persisted run resumes without a duplicate
-   integration action. Repeat during a verification command that creates a
-   disposable test artifact; confirm the same verification turn is recovered
-   without rerunning the command and without relaxing exact-SHA/no-remote
-   isolation.
+   integration action. Repeat immediately after a verification command reaches
+   COMPLETED and confirm its exact journaled result is reused without rerunning
+   the command. Separately stop the coordinator after STARTED but before a
+   completion can be proven; confirm the Run fails closed with
+   `VERIFICATION_EXECUTION_UNCERTAIN` and never automatically reruns that
+   command. In both cases, exact-SHA/no-remote isolation remains unchanged.
    Also pause one disposable Primary integration turn at the exact internal
    `consensus_apply_patch` approval boundary, then enable the required per-tool
    setting and resume the same Run. Confirm the daemon interrupts only the
@@ -143,8 +146,8 @@ Replace `NOT_RECORDED` only with reproducible, redacted evidence.
 | Accepted branch/SHA | `NOT_RECORDED` |
 | Source refs unchanged | `NOT_RECORDED` |
 | Required tests | `NOT_RECORDED` |
-| Verification clone / command-item evidence | `NOT_RECORDED` |
-| Unattended turns / no user approval prompts | `NOT_RECORDED` |
+| Verification clone / coordinator command evidence | `NOT_RECORDED` |
+| Unattended dangerFullAccess turns / no user approval prompts | `NOT_RECORDED` |
 | App Server proxy reconnection | `NOT_RECORDED` |
 | Controlled-patch approval configuration/recovery | `NOT_RECORDED` |
 | Restart recovery | `NOT_RECORDED` |

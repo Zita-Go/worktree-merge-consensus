@@ -37,7 +37,7 @@ parsed into fields.
 | Primary plan | `PLAN_READY`, `BLOCKED` | Nonempty complete plan in free-form Markdown. |
 | Reviewer plan review | `APPROVED`, `CHANGES_REQUIRED`, `BLOCKED` | Feedback is free-form Markdown; it is required only for `CHANGES_REQUIRED`. |
 | Primary integration | `INTEGRATION_READY`, `BLOCKED` | Optional Markdown summary. Branch, SHA, and changed files come from Git. |
-| Primary verification | `VERIFICATION_READY`, `BLOCKED` | Optional Markdown summary. Test evidence comes from App Server command items. |
+| Primary verification | `VERIFICATION_READY`, `BLOCKED` | Marker-only handoff. The turn must not run tools; test evidence comes from coordinator-owned App Server `command/exec` calls. |
 | Reviewer result review | `APPROVED`, `CHANGES_REQUIRED`, `BLOCKED` | Feedback is free-form Markdown; approval is bound to the exact current SHA. |
 
 ## Contract JSON
@@ -66,9 +66,9 @@ canonical App Server turn. It computes and supplies all machine identity:
 - plan approval from the exact Reviewer turn that received that plan;
 - integration branch, HEAD SHA, changed files, ancestry, source-ref stability,
   cleanliness, and conflict-marker checks from Git;
-- test evidence from exact completed `commandExecution` items in the isolated
-  verification clone, including authoritative exit codes and bounded diagnostic
-  output for failures;
+- test evidence from exact coordinator-journaled `command/exec` results in the
+  isolated verification clone, including authoritative exit codes and bounded
+  diagnostic output for failures;
 - final approval from the exact Reviewer turn that received the current result
   SHA.
 
@@ -124,6 +124,26 @@ Every `turn/start` sends approval policy `never`, including integration and
 isolated verification, while retaining the pinned offline sandbox, writable
 roots, exact event evidence, and frozen-source checks. No participant command
 or file operation should wait for interactive user approval.
+
+Release 0.2.5 sends `sandboxPolicy.type: dangerFullAccess` as well as approval
+policy `never` for every participant turn. This requires trusted tasks and
+trusted repository contents; coordinator evidence checks fail closed but are
+not an OS sandbox and cannot undo an already executed action. Primary
+verification is now a marker-only turn that must not run Shell, Git, file, MCP,
+or patch tools. After the marker, the coordinator executes every frozen direct
+command itself through App Server `command/exec`, in order, against the exact
+detached clone. SQLite records STARTED before dispatch and COMPLETED with the
+structured result. Exact completed results are reusable after restart; an
+uncertain STARTED execution is never repeated automatically.
+
+The same release permits one migration only for the exact legacy 0.2.4 history
+and unchanged Run, task, request, branch, integration SHA, verification clone,
+and frozen refs. It requires the archived signal sequence
+`VERIFICATION_READY`, `BLOCKED:CARGO_UNAVAILABLE`, `VERIFICATION_READY`, one
+prior evidence-compatibility archive, and a final completed side-effect-free
+marker turn. Resume archives only that final turn and restores the same frozen
+verification request. It cannot repeat a patch, branch creation, merge, commit,
+or source-ref update, and a second migration is forbidden.
 
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the

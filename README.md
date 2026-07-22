@@ -26,9 +26,10 @@ SHAs before review. It then enforces this sequence:
 4. Only the primary creates a unique new local integration branch and combines
    the two frozen commits.
 5. The coordinator materializes a clean, detached, remote-free clone of the
-   exact result SHA. A separate primary verification turn runs every frozen
-   test there, while the coordinator derives evidence from App Server command
-   execution items and checks Git invariants.
+   exact result SHA. A separate Primary verification turn returns only a ready
+   marker; the coordinator then runs every frozen command there through App
+   Server `command/exec`, journals the structured results, and checks Git
+   invariants.
 6. The reviewer audits the exact resulting SHA; acceptance is recorded only for
    that SHA.
 
@@ -38,22 +39,32 @@ must be on one host. The coordinator does not push, open a pull request, merge
 into an existing branch, update either source ref, rebase, reset, delete, or
 clean up worktrees.
 
-This is enforced beyond prompt text: review turns are read-only and offline;
-the primary integration turn is offline and has bounded source-repository
-writable roots. The separate verification turn can write only inside the
-isolated clone. Every coordinator-started turn uses App Server approval policy
-`never`, so the two participant tasks do not pause for interactive command or
-file approvals. Each accepted integration command must remain in the narrow Git
-allowlist, and each frozen test must run exactly once. Every command must appear
-exactly once as a successful App Server
-`commandExecution` item with the expected cwd; a model's self-reported success
-is not evidence. Frozen tests must be direct non-Git commands; Git executables,
-shell control, and dynamic shell or interpreter launchers are rejected.
-The coordinator rejects acceptance when event evidence contains publication,
-destructive Git, shell chaining, wrong-directory commands, or permission
-escalation. The offline, run-scoped sandbox remains the preventive boundary;
-because approval policy `never` deliberately removes interactive pre-execution
-review, use unattended runs only with trusted tasks and repository contents.
+This is enforced beyond prompt text through frozen identities, request-bound
+operations, canonical task history, exact Git revalidation, and acceptance
+checks. Every coordinator-started turn uses App Server approval policy `never`
+and sandbox policy `dangerFullAccess`, so the two participant tasks do not pause
+for interactive approvals and are not contained by an App Server OS sandbox.
+Use unattended runs only with trusted tasks and repository contents. The daemon
+can reject a Run after forbidden evidence or drift, but it cannot undo an
+action that a participant already performed.
+
+The Primary verification turn is marker-only and must not run Shell, Git,
+file, MCP, or patch tools. After that side-effect-free marker, the coordinator
+executes each frozen direct non-Git command exactly once, in order, with the
+exact detached-clone cwd and `sandboxPolicy.type: "dangerFullAccess"`. The
+participant marker turn retains `approvalPolicy: "never"`. The coordinator
+journals STARTED before dispatch and COMPLETED with the structured exit code
+and bounded output. An exact completed result is reusable after restart; a
+command left STARTED fails closed as `VERIFICATION_EXECUTION_UNCERTAIN` instead
+of being executed again automatically. Git executables, shell control, and
+dynamic shell or interpreter launchers remain invalid frozen tests. A model's
+self-reported success is never test evidence.
+
+The coordinator rejects acceptance when participant history contains
+publication, destructive Git, shell chaining, wrong-directory commands, or
+unexpected side effects. Each accepted integration action must still match its
+bound request and repository invariants, and every coordinator-owned
+verification result must match the frozen command and cwd.
 Conflict scanning uses Git's actual primary-to-result diff, including large
 text files, rather than the task's file list.
 
@@ -158,6 +169,14 @@ well as read-only review. This removes per-command human confirmation without
 changing the pinned writable roots, offline sandbox, exact command-evidence
 checks, source-ref validation, or the request-bound patch-tool approval.
 
+Version 0.2.5 sends `dangerFullAccess` for every participant turn and moves
+test execution out of the Primary marker turn into coordinator-owned
+verification through App Server `command/exec`. Structured command results are
+journaled in SQLite for exact restart behavior. One bounded migration can
+resume only the exact legacy 0.2.4 blocked history on the same Run, branch, and
+integration SHA; it archives one final side-effect-free verification turn and
+cannot repeat a patch, branch creation, merge, commit, or source-ref update.
+
 Read [the v2 participant protocol](docs/protocol-v2.md), the
 [legacy v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
@@ -186,8 +205,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.4-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.4-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.5-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.5-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -264,7 +283,8 @@ codex-consensus run
 For scripts and JSON calls, provide both task IDs and both absolute worktree
 paths. The branch flag is optional; without it the coordinator reserves
 `consensus/<run-id>`. Every `--test` value is an exact direct command the
-primary must run during the isolated verification turn.
+coordinator runs after the marker-only Primary verification turn in the
+isolated clone.
 Git commands, shell control operators, and dynamic shell/interpreter launchers
 are rejected. For composed checks, invoke a committed test script directly.
 

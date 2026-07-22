@@ -37,7 +37,7 @@ for readme in README.md README.zh-CN.md; do
       fail "$readme does not document codex-consensus $command"
   done
 
-  for marker in same-host '>=0.144.1' no-push SHA256SUMS unknown-linux-musl; do
+  for marker in same-host '>=0.144.1' no-push SHA256SUMS unknown-linux-musl dangerFullAccess command/exec; do
     grep -Fq "$marker" "$readme" || fail "$readme is missing the $marker contract"
   done
 
@@ -63,7 +63,11 @@ for readme in README.md README.zh-CN.md; do
   grep -Fq 'codex plugin add' "$readme" || fail "$readme is missing plugin installation"
 done
 
-for method in turn/interrupt config/read config/batchWrite; do
+for marker in dangerFullAccess command/exec VERIFICATION_EXECUTION_UNCERTAIN 'trusted tasks'; do
+  grep -Fq "$marker" SECURITY.md || fail "SECURITY.md is missing the $marker boundary"
+done
+
+for method in turn/interrupt command/exec config/read config/batchWrite; do
   grep -Fq "\"$method\"" schemas/app-server/supported-methods.json ||
     fail "App Server fixture is missing $method"
   grep -Fq "\`$method\`" docs/compatibility.md ||

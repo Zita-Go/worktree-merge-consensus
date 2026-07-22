@@ -18,11 +18,23 @@ verification summaries, and final reviews are free-form Markdown. The daemon,
 not either task, binds machine identity and derives Git and test evidence. This
 launcher never parses or relays those participant responses.
 
-Release 0.2.4 starts every coordinator-owned participant turn with App Server
-approval policy `never`. Contract, plan, integration, verification, and review
-therefore proceed without per-command user confirmation. The daemon still pins
-the role cwd, writable roots, offline sandbox, frozen refs, and evidence checks;
-do not request or apply a global Codex permission change.
+Release 0.2.5 starts every coordinator-owned participant turn with App Server
+approval policy `never` and sandbox policy `dangerFullAccess`. Contract, plan,
+integration, verification, and review therefore proceed without per-command
+user confirmation or an App Server OS sandbox. Use unattended runs only with
+trusted tasks and trusted repository contents. The daemon still binds exact
+tasks, worktrees, refs, requests, turns, Git results, and acceptance evidence,
+but those fail-closed checks do not undo an action already performed by a
+participant. Do not request or apply a global Codex permission change.
+
+Primary verification is a marker-only handoff to coordinator-owned verification:
+do not run Shell in the verification marker turn. After the
+exact side-effect-free marker completes, the daemon invokes App Server
+`command/exec` itself for every frozen direct command, in order, with the exact
+detached verification cwd and `sandboxPolicy.type: "dangerFullAccess"`. The
+participant marker turn retains `approvalPolicy: "never"`. SQLite journals each
+command before dispatch and reuses only a completed exact result; an uncertain
+started command fails closed instead of being run again automatically.
 
 ## Tool surface
 
@@ -59,7 +71,7 @@ Use those CLI commands only for diagnostics or when the user explicitly requests
 4. Present the registered entries with path, source ref or detached state, full HEAD SHA, and clean state. Assign two different, available, clean worktrees as primary and reviewer sources.
 5. Show one complete mapping: `primary_thread` → `primary_worktree`/ref/SHA and `reviewer_thread` → `reviewer_worktree`/ref/SHA. Ask the user to confirm this exact mapping. Do not continue without confirmation.
 6. Call `consensus_start` with all four required fields: `primary_thread`, `reviewer_thread`, `primary_worktree`, and `reviewer_worktree`. Include `integration_branch` only when the user supplied a unique new branch name. Include `test_commands` only when the user supplied additional verification commands.
-7. Report the returned `run_id` and initial status. State that the coordinator's participant turns are unattended, the result will remain on a new local integration branch, and both frozen source refs remain protected. End the launch turn.
+7. Report the returned `run_id` and initial status. State that the coordinator's participant turns are unattended and unsandboxed, so the selected tasks and repository must be trusted; the result will remain on a new local integration branch, and both frozen source refs remain protected. End the launch turn.
 
 The launcher does not conduct or relay review rounds. The persistent coordinator handles contracts, plan revisions, integration, verification, final approval, recovery, and fail-closed pauses.
 
@@ -221,6 +233,18 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   turn, including integration and isolated verification. Do not ask the user to
   approve individual participant commands; inspect `consensus_status` if the
   Run pauses because event evidence or a sandbox boundary rejected an action.
+  Version 0.2.5 additionally sends `dangerFullAccess` for every participant
+  turn. The Primary verification turn is marker-only and must contain no Shell,
+  Git, file, MCP, or patch item; the coordinator then executes the frozen
+  commands itself through `command/exec` in the exact detached clone. Completed
+  command results are journaled and reused, while a persisted STARTED result is
+  `VERIFICATION_EXECUTION_UNCERTAIN` and is never retried automatically. One
+  migration is available only for the exact blocked 0.2.4 history already
+  recorded by the daemon; it archives only the final side-effect-free legacy
+  verification turn and preserves the same Run, integration branch, SHA,
+  successful patch record, merge, commit, and frozen refs. Any different
+  history, side effect, drift, prior migration, or changed identity remains
+  terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
 Read [references/protocol.md](references/protocol.md) when explaining lifecycle states, acceptance evidence, or recovery behavior.

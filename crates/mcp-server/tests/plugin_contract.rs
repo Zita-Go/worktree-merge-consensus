@@ -88,6 +88,10 @@ fn skill_is_a_launcher_for_the_daemon_not_a_review_relay() {
         "run_id",
         "same host",
         "existing Codex tasks",
+        "dangerFullAccess",
+        "trusted tasks",
+        "coordinator-owned verification",
+        "do not run Shell in the verification marker turn",
         "End the launch turn",
     ] {
         assert!(

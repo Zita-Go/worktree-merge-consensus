@@ -36,6 +36,7 @@ and requires these JSON-RPC methods:
 - `thread/resume`
 - `turn/interrupt`
 - `turn/start`
+- `command/exec`
 - `config/read`
 - `config/batchWrite`
 
@@ -137,19 +138,31 @@ side-effect-free `CARGO_UNAVAILABLE` recovery may replace one subsequent
 verification turn whose command evidence is absent from persisted history.
 That compatibility recovery is recorded atomically and is allowed only once;
 it cannot repeat a controlled patch, branch creation, merge, or source update.
+Version 0.2.5 requires `command/exec` for coordinator-owned verification. The
+request supplies a direct argv array, exact absolute detached-clone cwd,
+`sandboxPolicy.type: "dangerFullAccess"`, timeout, and output-byte cap. The
+typed response must contain an exit code, stdout, and stderr; a method or shape
+mismatch fails closed. SQLite records the exact request identity before
+dispatch and reuses only a completed exact response. An execution left STARTED
+after uncertain delivery returns
+`VERIFICATION_EXECUTION_UNCERTAIN` rather than being dispatched again.
+
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
 fixed task ID. `thread/read` can return persisted history for a `notLoaded`
 task, but it does not load that task for model execution; starting a turn after
 only reading history can produce a completed user-message-only turn.
 
 Every `turn/start` also carries the pinned role-specific cwd, runtime workspace
-roots, approval policy, a same-host `local` environment selection with that
-cwd, and one of three sandbox profiles: offline read-only
-review, offline primary integration with source worktree/Git-common writes, or
-offline primary verification with only the isolated clone writable. All three
-profiles send approval policy `never`, so participant turns are fully
-unattended and do not surface per-command human approval. Actual additional
-filesystem or network permissions still fail closed. App Server reports a
+roots, approval policy, and a same-host `local` environment selection with that
+cwd. Release 0.2.4 used separate offline read-only, primary-integration, and
+isolated-verification sandbox profiles. Release 0.2.5 instead sends
+`approvalPolicy: "never"` and `sandboxPolicy.type: "dangerFullAccess"` for
+every participant turn. Participant execution is therefore fully unattended
+and not OS-sandboxed. This mode is only for trusted tasks and trusted repository
+contents. The coordinator still verifies canonical item history, request
+identity, exact Git state, command evidence, and frozen refs before acceptance,
+but those checks cannot undo a participant side effect already performed.
+App Server reports a
 unified-exec command as a shell-joined argument vector, normally one
 known shell followed by `-c` or `-lc` and the model's script. The coordinator
 removes exactly that one wrapper before applying its existing allowlist to the
@@ -158,11 +171,11 @@ values, and non-`local` execution environments reject the Run. Target-existence 
 limited to `git show-ref --verify` with the exact frozen integration ref or
 `git branch --list` with the exact frozen integration branch; no other form of
 either subcommand is accepted. The
-integration profile disables temporary-directory writes; the verification
-profile permits temporary build artifacts but has no source Git-common root.
-With interactive approval disabled, these offline writable-root boundaries are
-the preventive sandbox; command evidence and frozen-ref checks determine
-whether the result may be accepted.
+Primary verification participant turn is marker-only; any command, file,
+MCP, patch, or other side-effect-capable item rejects it before coordinator
+test execution. Frozen tests then run only through the typed `command/exec`
+adapter using the exact verification cwd. Command evidence and frozen-ref
+checks determine whether the result may be accepted.
 These fields are part of the checked-in `supported-methods` fixture and are
 process-tested. An adapter change must revalidate their semantics and the
 `commandExecution` item fields (`id`, `command`, `cwd`, `status`, `exitCode`,

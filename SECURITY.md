@@ -30,23 +30,28 @@ secrets, and local filesystem identities.
   performs read-only inspection. The daemon performs authoritative read-only
   Git checks and materializes only coordinator-owned verification clones under
   the private state directory.
-- Review App Server turns are read-only and offline. The integration turn is
-  offline, can write only the primary worktree and source Git common directory,
-  and cannot run tests. The
-  separate verification turn is offline and can write only a clean, detached,
-  remote-free clone of the exact integration SHA; its Git common directory is
-  independent of the source repository. It may run only exact frozen test
-  commands. Every coordinator-started turn uses approval policy `never`, so no
-  participant action waits for interactive user confirmation. Forbidden
-  publication, destructive Git, shell chaining, dynamic command launchers, and
-  permission escalation reject acceptance when observed in authoritative event
-  evidence. The command gate
+- Every coordinator-started participant turn uses approval policy `never` and
+  sandbox policy `dangerFullAccess`, so no participant action waits for
+  interactive user confirmation and no App Server OS sandbox contains it. This
+  mode is only for trusted tasks and trusted repository contents. Prompts,
+  canonical history, request identity, Git invariants, and final evidence checks
+  fail closed, but they cannot undo a participant action already performed.
+  Forbidden publication, destructive Git, shell chaining, dynamic command
+  launchers, and unexpected side effects reject acceptance when observed. The
+  command gate
   removes at most one App Server-generated known-shell wrapper before checking
   the exact inner command; nested shells, subcommand callbacks, and non-local
-  environments fail the Run. The offline, pinned writable-root sandbox is the
-  preventive boundary; unattended mode intentionally does not provide a human
-  pre-execution checkpoint inside those roots. Every turn
-  explicitly disables inherited sticky execution environments.
+  environments fail the Run. Every turn explicitly disables inherited sticky
+  execution environments.
+- The Primary verification participant turn is marker-only and rejects Shell,
+  Git, file, MCP, patch, or other side-effect-capable items. The coordinator
+  then runs each exact frozen direct command through App Server `command/exec`
+  in a clean, detached, remote-free clone of the integration SHA whose Git
+  common directory is independent of the source repository. Each command is
+  journaled STARTED before dispatch and COMPLETED with its structured result.
+  An exact completed result may be reused after restart; uncertain STARTED
+  execution fails closed as `VERIFICATION_EXECUTION_UNCERTAIN` and is not
+  automatically repeated.
 - Both source refs and SHAs are frozen and revalidated. Integration may occur
   only on a unique new local branch.
 - Task IDs and source worktrees are selected independently. App Server task cwd
@@ -57,8 +62,9 @@ secrets, and local filesystem identities.
   update, reset, rebase, deletion, or cleanup capability.
 - Structured task responses are schema- and invariant-validated. Plan approval
   is bound to a canonical payload hash. Verification evidence is derived from
-  successful App Server `commandExecution` items, including the exact turn,
-  item, command, cwd, and exit code; model-reported evidence cannot replace it.
+  coordinator-journaled App Server `command/exec` results, including the exact
+  turn, deterministic item identity, command, cwd, and exit code;
+  model-reported evidence cannot replace it.
   Malformed or missing required App Server responses and unknown persisted-state
   versions fail closed.
 - Sensitive App Server diagnostics containing authorization, key, secret, or
@@ -85,8 +91,9 @@ review.
 
 Security claims do not extend to a compromised Codex binary, Git binary, host
 account, task model, operating system, or hostile code already committed to the
-repository. Configured tests execute repository code with the user's local
-identity inside the App Server sandbox; while their writable repository root is
-an isolated clone with no remote, users must still review tests before running
-them. The coordinator reduces accidental integration loss; it is not a sandbox
-for adversarial project code.
+repository. Participant turns and configured tests execute with the App Server
+process user's local identity and `dangerFullAccess`; the test cwd is an
+isolated clone with no remote, but that cwd is not an OS containment boundary.
+Users must trust the selected tasks and review repository code and tests before
+running them. The coordinator reduces accidental integration loss; it is not a
+sandbox for adversarial project code.
