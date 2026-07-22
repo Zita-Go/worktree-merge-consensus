@@ -62,6 +62,12 @@ the evidence below.
    diagnostics. Exercise one nonzero command and confirm the same Run returns
    to a controlled integration correction, verifies the new SHA, and proceeds
    to result review only after every frozen command passes.
+   On an App Server whose completed `thread/read` history omits command or MCP
+   items, confirm the daemon has persisted matching `item/started`,
+   `item/completed`, and `turn/completed` evidence in private SQLite and still
+   derives the same exact command, cwd, exit code, and bounded output. Restart
+   the daemon after the completion barrier and confirm it reuses that evidence
+   without asking either task to serialize it in JSON.
    Confirm contracts use one result marker plus a JSON body, while the plan,
    review feedback, integration summary, verification summary, and final review
    use one result marker plus ordinary Markdown. No participant should have to

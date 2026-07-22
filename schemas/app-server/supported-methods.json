@@ -16,6 +16,8 @@
   "requiredNotifications": [
     "thread/status/changed",
     "turn/started",
+    "item/started",
+    "item/completed",
     "turn/completed"
   ],
   "requestShape": {
@@ -95,6 +97,8 @@
     "type": "commandExecution",
     "successfulStatus": "completed",
     "successfulExitCode": 0,
-    "agentSourceWhenPresent": "agent"
+    "agentSourceWhenPresent": "agent",
+    "primarySource": "persisted item lifecycle through turn/completed",
+    "historicalFallback": "thread/read full turn items"
   }
 }

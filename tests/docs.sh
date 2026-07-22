@@ -70,6 +70,13 @@ for method in turn/interrupt config/read config/batchWrite; do
     fail "compatibility policy is missing $method"
 done
 
+for notification in item/started item/completed turn/completed; do
+  grep -Fq "\"$notification\"" schemas/app-server/supported-methods.json ||
+    fail "App Server fixture is missing $notification"
+  grep -Fq "\`$notification\`" docs/compatibility.md ||
+    fail "compatibility policy is missing $notification"
+done
+
 [[ ! -e schemas/app-server/0.144.5-methods.json ]] ||
   fail 'obsolete version-specific App Server fixture still exists'
 

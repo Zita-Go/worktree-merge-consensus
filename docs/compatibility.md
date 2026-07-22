@@ -125,6 +125,18 @@ nonzero commands route the same Run to another controlled integration round.
 It also permits one same-Run retry of an exact completed, side-effect-free
 `CARGO_UNAVAILABLE` verification blocker after the local toolchain is repaired.
 Both paths preserve the integration branch and frozen source refs.
+Version 0.2.3 no longer assumes that `thread/read` replays completed command or
+MCP items. While a turn is active, the daemon writes every `item/started` and
+`item/completed` lifecycle item to private SQLite and records `turn/completed`
+as the ordered completion barrier. It accepts event-derived evidence only when
+the run, task, turn, item identity, and lifecycle are complete, then merges it
+with persisted user/final-agent history. App Server versions that still return
+full turn items continue to use that history as a fallback. Existing Runs with
+the exact archived sequence of one empty verification attempt and one
+side-effect-free `CARGO_UNAVAILABLE` recovery may replace one subsequent
+verification turn whose command evidence is absent from persisted history.
+That compatibility recovery is recorded atomically and is allowed only once;
+it cannot repeat a controlled patch, branch creation, merge, or source update.
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
 fixed task ID. `thread/read` can return persisted history for a `notLoaded`
 task, but it does not load that task for model execution; starting a turn after

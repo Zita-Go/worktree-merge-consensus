@@ -8,6 +8,7 @@ use std::{
 use consensus_core::state::{NextAction, Phase, Role, RunState, RunStatus};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 #[derive(Clone)]
@@ -38,6 +39,12 @@ pub struct AcceptedTurn {
     pub response_hash: String,
     pub thread_id: String,
     pub turn_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnEventEvidence {
+    pub completed_turn: Value,
+    pub completed_items: Vec<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,6 +327,212 @@ impl SqliteRunStore {
         }
     }
 
+    pub fn record_turn_item_event(
+        &self,
+        run_id: &str,
+        thread_id: &str,
+        turn_id: &str,
+        event_method: &str,
+        item: &Value,
+    ) -> Result<(), StoreError> {
+        let lifecycle_state = match event_method {
+            "item/started" => "STARTED",
+            "item/completed" => "COMPLETED",
+            other => {
+                return Err(StoreError::IncompatibleState(format!(
+                    "unsupported turn item lifecycle event {other}"
+                )));
+            }
+        };
+        let item_id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                StoreError::IncompatibleState("turn item event has no nonempty id".into())
+            })?;
+        let item_type = item
+            .get("type")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                StoreError::IncompatibleState("turn item event has no nonempty type".into())
+            })?;
+        let item_json = serde_json::to_string(item)?;
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let turn_record_id = active_turn_record_id(&transaction, run_id, thread_id, turn_id)?;
+        let existing = transaction
+            .query_row(
+                "SELECT item_type, lifecycle_state, item_json
+                 FROM turn_event_items
+                 WHERE turn_record_id = ?1 AND turn_id = ?2 AND item_id = ?3",
+                params![turn_record_id, turn_id, item_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        match existing {
+            None => {
+                transaction.execute(
+                    "INSERT INTO turn_event_items (
+                        turn_record_id, run_id, thread_id, turn_id, item_id,
+                        item_type, lifecycle_state, item_json, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                    params![
+                        turn_record_id,
+                        run_id,
+                        thread_id,
+                        turn_id,
+                        item_id,
+                        item_type,
+                        lifecycle_state,
+                        item_json,
+                        now_unix(),
+                    ],
+                )?;
+            }
+            Some((existing_type, existing_lifecycle, existing_json)) => {
+                if existing_type != item_type {
+                    return Err(StoreError::IncompatibleState(format!(
+                        "turn item {item_id} changed type from {existing_type} to {item_type}"
+                    )));
+                }
+                if existing_lifecycle == "COMPLETED" {
+                    if lifecycle_state == "COMPLETED"
+                        && serde_json::from_str::<Value>(&existing_json)? != *item
+                    {
+                        return Err(StoreError::IncompatibleState(format!(
+                            "completed turn item {item_id} changed after persistence"
+                        )));
+                    }
+                } else {
+                    transaction.execute(
+                        "UPDATE turn_event_items
+                         SET lifecycle_state = ?1, item_json = ?2, updated_at = ?3
+                         WHERE turn_record_id = ?4 AND turn_id = ?5 AND item_id = ?6",
+                        params![
+                            lifecycle_state,
+                            item_json,
+                            now_unix(),
+                            turn_record_id,
+                            turn_id,
+                            item_id,
+                        ],
+                    )?;
+                }
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn record_turn_completed_event(
+        &self,
+        run_id: &str,
+        thread_id: &str,
+        turn_id: &str,
+        turn: &Value,
+    ) -> Result<(), StoreError> {
+        if turn.get("id").and_then(Value::as_str) != Some(turn_id) {
+            return Err(StoreError::IncompatibleState(
+                "turn/completed payload does not match its bound turn id".into(),
+            ));
+        }
+        let completed_turn_json = serde_json::to_string(turn)?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let turn_record_id = active_turn_record_id(&transaction, run_id, thread_id, turn_id)?;
+        let existing = transaction
+            .query_row(
+                "SELECT completed_turn_json
+                 FROM turn_event_completions
+                 WHERE turn_record_id = ?1 AND turn_id = ?2",
+                params![turn_record_id, turn_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            if serde_json::from_str::<Value>(&existing)? != *turn {
+                return Err(StoreError::IncompatibleState(format!(
+                    "completed turn event {turn_id} changed after persistence"
+                )));
+            }
+        } else {
+            transaction.execute(
+                "INSERT INTO turn_event_completions (
+                    turn_record_id, run_id, thread_id, turn_id,
+                    completed_turn_json, recorded_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    turn_record_id,
+                    run_id,
+                    thread_id,
+                    turn_id,
+                    completed_turn_json,
+                    now_unix(),
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn turn_event_evidence(
+        &self,
+        run_id: &str,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<TurnEventEvidence>, StoreError> {
+        let connection = self.lock()?;
+        let completed_turn_json = connection
+            .query_row(
+                "SELECT completion.completed_turn_json
+                 FROM turn_event_completions completion
+                 JOIN turns turn_record ON turn_record.id = completion.turn_record_id
+                 WHERE completion.run_id = ?1
+                   AND completion.thread_id = ?2
+                   AND completion.turn_id = ?3
+                   AND turn_record.thread_id = ?2
+                   AND turn_record.turn_id = ?3",
+                params![run_id, thread_id, turn_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(completed_turn_json) = completed_turn_json else {
+            return Ok(None);
+        };
+        let mut statement = connection.prepare(
+            "SELECT lifecycle_state, item_json
+             FROM turn_event_items
+             WHERE run_id = ?1 AND thread_id = ?2 AND turn_id = ?3
+             ORDER BY id ASC",
+        )?;
+        let rows = statement.query_map(params![run_id, thread_id, turn_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut completed_items = Vec::new();
+        for row in rows {
+            let (lifecycle_state, item_json) = row?;
+            if lifecycle_state != "COMPLETED" {
+                return Err(StoreError::IncompatibleState(format!(
+                    "turn {turn_id} completed before all item lifecycle events were persisted"
+                )));
+            }
+            completed_items.push(serde_json::from_str(&item_json)?);
+        }
+        Ok(Some(TurnEventEvidence {
+            completed_turn: serde_json::from_str(&completed_turn_json)?,
+            completed_items,
+        }))
+    }
+
     pub fn reset_terminal_turn_for_retry(
         &self,
         run_id: &str,
@@ -476,6 +689,105 @@ impl SqliteRunStore {
             turn_id,
             "SENT",
             observed_status,
+        )?;
+        update_run_row(&transaction, &run_id, resumed_state)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn reactivate_blocked_run_with_verification_evidence_retry(
+        &self,
+        blocked_state: &RunState,
+        resumed_state: &RunState,
+        message_hash: &str,
+        thread_id: &str,
+        turn_id: &str,
+        observed_status: &str,
+    ) -> Result<(), StoreError> {
+        let diagnostic = blocked_state.last_error.as_ref();
+        if blocked_state.status != RunStatus::Blocked
+            || blocked_state.reason_code.as_deref() != Some("TEST_FAILURE")
+            || diagnostic.map(|value| value.code.as_str()) != Some("TEST_FAILURE")
+            || diagnostic.map(|value| value.action) != Some(NextAction::RequestPrimaryVerification)
+            || diagnostic.and_then(|value| value.role) != Some(Role::Primary)
+            || resumed_state.status != RunStatus::Running
+            || resumed_state.phase != Phase::Verify
+            || resumed_state.next_action != NextAction::RequestPrimaryVerification
+            || blocked_state.facts != resumed_state.facts
+            || observed_status != "completed"
+        {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "verification evidence retry identity or status is invalid".into(),
+            ));
+        }
+
+        let run_id = blocked_state.facts.run_id.to_string();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let current_json = transaction
+            .query_row(
+                "SELECT state_json FROM runs WHERE run_id = ?1",
+                [&run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::RunNotFound(run_id.clone()))?;
+        let current_state = deserialize_state(&current_json)?;
+        if current_state != *blocked_state {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "run {run_id} changed while preparing verification evidence recovery"
+            )));
+        }
+        let prior_compatibility_retry = transaction
+            .query_row(
+                "SELECT 1 FROM turn_attempts
+                 WHERE run_id = ?1 AND message_hash = ?2
+                   AND terminal_status = 'completed-evidence-unavailable'
+                 LIMIT 1",
+                params![run_id, message_hash],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if prior_compatibility_retry {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "verification evidence compatibility recovery is limited to one retry".into(),
+            ));
+        }
+
+        let common_dir = resumed_state.facts.git_common_dir.to_string_lossy();
+        match transaction.execute(
+            "INSERT INTO locks (repository_id, run_id, primary_worktree, acquired_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                common_dir.as_ref(),
+                run_id,
+                resumed_state
+                    .facts
+                    .primary_worktree
+                    .to_string_lossy()
+                    .as_ref(),
+                now_unix(),
+            ],
+        ) {
+            Ok(_) => {}
+            Err(error) if is_constraint(&error) => {
+                return Err(StoreError::ActiveRunExists(format!(
+                    "repository {} already has an active run",
+                    resumed_state.facts.git_common_dir.display()
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        archive_and_reset_turn(
+            &transaction,
+            &run_id,
+            message_hash,
+            thread_id,
+            turn_id,
+            "SENT",
+            "completed-evidence-unavailable",
         )?;
         update_run_row(&transaction, &run_id, resumed_state)?;
         transaction.commit()?;
@@ -887,6 +1199,25 @@ impl SqliteRunStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn verification_evidence_retry_recorded(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+    ) -> Result<bool, StoreError> {
+        let connection = self.lock()?;
+        Ok(connection
+            .query_row(
+                "SELECT 1 FROM turn_attempts
+                 WHERE run_id = ?1 AND message_hash = ?2
+                   AND terminal_status = 'completed-evidence-unavailable'
+                 LIMIT 1",
+                params![run_id, message_hash],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     pub fn successful_patch_recorded(
         &self,
         run_id: &str,
@@ -958,6 +1289,28 @@ impl SqliteRunStore {
     fn lock(&self) -> Result<MutexGuard<'_, Connection>, StoreError> {
         self.connection.lock().map_err(|_| StoreError::Poisoned)
     }
+}
+
+fn active_turn_record_id(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    thread_id: &str,
+    turn_id: &str,
+) -> Result<i64, StoreError> {
+    transaction
+        .query_row(
+            "SELECT id FROM turns
+             WHERE run_id = ?1 AND thread_id = ?2 AND turn_id = ?3
+               AND delivery_state = 'SENT'",
+            params![run_id, thread_id, turn_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            StoreError::PendingSendNotFound(format!(
+                "run {run_id} has no active turn {turn_id} on task {thread_id}"
+            ))
+        })
 }
 
 fn archive_and_reset_turn(
@@ -1068,8 +1421,33 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             turn_id TEXT NOT NULL,
             terminal_status TEXT NOT NULL,
             recorded_at INTEGER NOT NULL,
-            UNIQUE(turn_record_id, turn_id)
+             UNIQUE(turn_record_id, turn_id)
              );
+         CREATE TABLE IF NOT EXISTS turn_event_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            turn_record_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+            run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+            thread_id TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            item_type TEXT NOT NULL,
+            lifecycle_state TEXT NOT NULL,
+            item_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(turn_record_id, turn_id, item_id)
+         );
+         CREATE INDEX IF NOT EXISTS turn_event_items_lookup
+            ON turn_event_items(run_id, thread_id, turn_id, id ASC);
+         CREATE TABLE IF NOT EXISTS turn_event_completions (
+            turn_record_id INTEGER PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE,
+            run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+            thread_id TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            completed_turn_json TEXT NOT NULL,
+            recorded_at INTEGER NOT NULL,
+            UNIQUE(run_id, turn_id)
+         );
              CREATE TABLE IF NOT EXISTS patch_applications (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,

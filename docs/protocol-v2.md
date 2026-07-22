@@ -108,6 +108,17 @@ replace one exact, completed, side-effect-free `CARGO_UNAVAILABLE` verification
 blocker after the environment is repaired. The integration branch and Run ID
 remain unchanged, and a second such recovery is forbidden.
 
+Release 0.2.3 derives side-effect evidence primarily from the live App Server
+item lifecycle. The daemon persists `item/started`, `item/completed`, and the
+ordered `turn/completed` barrier before it accepts a response, then combines
+those exact-turn items with the stored user and final-agent messages. This
+supports App Server stores that omit command and MCP items from `thread/read`
+without asking participants to serialize evidence in JSON. Full historical
+turn items remain a backwards-compatible fallback. For pre-0.2.3 Runs only,
+one exact empty-verification plus `CARGO_UNAVAILABLE` recovery sequence may be
+followed by one side-effect-free evidence-compatibility retry; SQLite records
+that allowance so it cannot repeat.
+
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the
 [legacy v1 protocol](protocol-v1.md).

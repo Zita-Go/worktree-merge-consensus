@@ -135,6 +135,17 @@ still requires Reviewer approval. After Cargo is installed, one exact
 side-effect-free `CARGO_UNAVAILABLE` verification blocker can also be resumed
 once without replacing the Run or integration branch.
 
+Version 0.2.3 persists App Server `item/started`, `item/completed`, and
+`turn/completed` events before accepting a participant turn. This preserves
+authoritative command and controlled-tool evidence when newer App Server
+storage returns only user and final-agent messages from `thread/read`.
+Completed event evidence is merged with persisted task history under the exact
+run, task, and turn identity; older App Server history remains a compatible
+fallback. One migration-only, side-effect-free verification retry is available
+for the exact prior sequence of an empty verification attempt followed by one
+`CARGO_UNAVAILABLE` recovery and then missing persisted command evidence. It
+never repeats a patch, branch creation, merge, or source-ref update.
+
 Read [the v2 participant protocol](docs/protocol-v2.md), the
 [legacy v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
@@ -163,8 +174,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.2-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.2-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.3-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.3-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or

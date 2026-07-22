@@ -200,6 +200,15 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   side-effect-free `CARGO_UNAVAILABLE` verification blocker. That recovery is
   limited to one attempt and preserves the Run, integration branch, and frozen
   source refs.
+  Version 0.2.3 persists App Server item lifecycle events and the exact
+  `turn/completed` barrier in private SQLite before accepting a participant
+  response. This is the authoritative command and controlled-tool evidence
+  path when `thread/read` omits those items; full historical items remain a
+  compatible fallback. For a pre-0.2.3 Run with the exact archived sequence of
+  one empty verification and one side-effect-free `CARGO_UNAVAILABLE` recovery,
+  explicit resume may replace one subsequent verification turn whose persisted
+  command evidence is absent. The compatibility retry is atomic, one-time, and
+  cannot repeat any patch, branch creation, merge, or source-ref update.
   Network, added-permission, later-phase, mismatched, or side-effectful cases
   remain terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.

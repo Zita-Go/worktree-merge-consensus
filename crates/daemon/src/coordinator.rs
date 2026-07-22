@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -52,6 +53,11 @@ struct RetryableCompletedTurn {
     thread_id: String,
     turn_id: String,
     observed_status: String,
+}
+
+struct RetryableVerificationTurn {
+    turn: RetryableCompletedTurn,
+    compatibility_retry: bool,
 }
 
 struct RetryableTerminalTurn {
@@ -860,15 +866,28 @@ where
                     "restored verification action does not match its failed turn",
                 ));
             }
-            self.store
-                .reactivate_blocked_run_with_completed_turn_retry(
-                    &blocked_state,
-                    &state,
-                    &retry.message_hash,
-                    &retry.thread_id,
-                    &retry.turn_id,
-                    &retry.observed_status,
-                )?;
+            let retry_turn = &retry.turn;
+            if retry.compatibility_retry {
+                self.store
+                    .reactivate_blocked_run_with_verification_evidence_retry(
+                        &blocked_state,
+                        &state,
+                        &retry_turn.message_hash,
+                        &retry_turn.thread_id,
+                        &retry_turn.turn_id,
+                        &retry_turn.observed_status,
+                    )?;
+            } else {
+                self.store
+                    .reactivate_blocked_run_with_completed_turn_retry(
+                        &blocked_state,
+                        &state,
+                        &retry_turn.message_hash,
+                        &retry_turn.thread_id,
+                        &retry_turn.turn_id,
+                        &retry_turn.observed_status,
+                    )?;
+            }
             return Ok(state);
         }
         if let Some(action) = retry_verification_environment_action {
@@ -1711,7 +1730,7 @@ where
         &self,
         state: &RunState,
         action: NextAction,
-    ) -> Result<RetryableCompletedTurn, CoordinatorError> {
+    ) -> Result<RetryableVerificationTurn, CoordinatorError> {
         if action != NextAction::RequestPrimaryVerification
             || state.integration_branch.is_none()
             || state.integration_sha.is_none()
@@ -1751,19 +1770,76 @@ where
                 "verification failure does not match the bound primary request",
             ));
         }
-        if !self
+        let detail = self.read_thread_with_retry(thread_id).await?;
+        self.verify_thread_identity(state, Role::Primary, &detail)?;
+        let archived_turn_ids = self
             .store
-            .archived_turn_ids(&run_id, &pending.message_hash)?
-            .is_empty()
+            .archived_turn_ids(&run_id, &pending.message_hash)?;
+        if !archived_turn_ids.is_empty()
+            && self
+                .store
+                .verification_evidence_retry_recorded(&run_id, &pending.message_hash)?
         {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                "verification evidence compatibility recovery is limited to one retry",
+            ));
+        }
+        if archived_turn_ids.len() == 1 {
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
                 "verification-without-execution recovery is limited to one retry",
             ));
         }
-
-        let detail = self.read_thread_with_retry(thread_id).await?;
-        self.verify_thread_identity(state, Role::Primary, &detail)?;
+        let mut archived_ready = false;
+        let mut archived_cargo_unavailable = false;
+        for archived_turn_id in &archived_turn_ids {
+            let archived = find_turn(&detail, archived_turn_id).ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    format!("archived verification turn {archived_turn_id} is absent"),
+                )
+            })?;
+            if let Some(blocker) = terminal_turn_retry_blocker(archived) {
+                return Err(CoordinatorError::operational(
+                    "MODEL_RESPONSE_RETRY_UNSAFE",
+                    format!(
+                        "archived verification attempt {archived_turn_id} cannot precede an evidence retry: {blocker}"
+                    ),
+                ));
+            }
+            let response = parse_participant_response(
+                final_agent_text(archived)?.trim(),
+                allowed_participant_signals(NextAction::RequestPrimaryVerification),
+            )
+            .map_err(|error| {
+                CoordinatorError::operational("HISTORY_UNAVAILABLE", error.to_string())
+            })?;
+            match response.signal {
+                ParticipantSignal::VerificationReady => archived_ready = true,
+                ParticipantSignal::Blocked
+                    if response.blocked_reason.as_deref() == Some("CARGO_UNAVAILABLE") =>
+                {
+                    archived_cargo_unavailable = true;
+                }
+                _ => {
+                    return Err(CoordinatorError::operational(
+                        "MODEL_RESPONSE_RETRY_UNSAFE",
+                        "archived verification history is outside the bounded evidence-recovery sequence",
+                    ));
+                }
+            }
+        }
+        let compatibility_retry = if archived_turn_ids.is_empty() {
+            false
+        } else if archived_ready && archived_cargo_unavailable {
+            true
+        } else {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                "verification-without-execution recovery is limited to one retry",
+            ));
+        };
         let turn = find_turn(&detail, turn_id).ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
@@ -1789,11 +1865,14 @@ where
             ));
         }
 
-        Ok(RetryableCompletedTurn {
-            message_hash: pending.message_hash,
-            thread_id: thread_id.to_owned(),
-            turn_id: turn_id.to_owned(),
-            observed_status: status.to_owned(),
+        Ok(RetryableVerificationTurn {
+            turn: RetryableCompletedTurn {
+                message_hash: pending.message_hash,
+                thread_id: thread_id.to_owned(),
+                turn_id: turn_id.to_owned(),
+                observed_status: status.to_owned(),
+            },
+            compatibility_retry,
         })
     }
 
@@ -2759,9 +2838,13 @@ where
                 }
                 match turn.get("status").and_then(Value::as_str) {
                     Some("completed") => {
+                        self.drain_completed_turn_events(state, thread_id, turn_id)
+                            .await?;
+                        let canonical_turn = self
+                            .completed_turn_with_event_evidence(state, thread_id, turn_id, turn)?;
                         return Ok(CompletedTurn {
-                            response: final_agent_text(turn)?.to_owned(),
-                            turn: turn.clone(),
+                            response: final_agent_text(&canonical_turn)?.to_owned(),
+                            turn: canonical_turn,
                         });
                     }
                     Some("failed" | "interrupted") => {
@@ -2780,24 +2863,118 @@ where
                 ));
             }
             match tokio::time::timeout(self.options.poll_interval, self.app.next_event()).await {
-                Ok(Some(event))
-                    if event_matches_turn(&event, thread_id, turn_id)
-                        && self.handle_execution_request(state, &event).await? =>
-                {
-                    continue;
-                }
-                Ok(Some(event)) if user_action_event(&event, thread_id, turn_id) => {
-                    state.pause("PERMISSION_REQUIRED")?;
-                    self.store.save_state(state)?;
-                    return Err(CoordinatorError::operational(
-                        "PERMISSION_REQUIRED",
-                        "task turn is waiting for user approval or input",
-                    ));
+                Ok(Some(event)) if event_matches_turn(&event, thread_id, turn_id) => {
+                    self.consume_turn_event(state, thread_id, turn_id, &event)
+                        .await?;
+                    idle_deadline = tokio::time::Instant::now() + self.options.wait_timeout;
                 }
                 Ok(None) => tokio::time::sleep(self.options.poll_interval).await,
                 _ => {}
             }
         }
+    }
+
+    async fn drain_completed_turn_events(
+        &self,
+        state: &mut RunState,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<(), CoordinatorError> {
+        if self
+            .store
+            .turn_event_evidence(&state.facts.run_id.to_string(), thread_id, turn_id)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let drain_timeout = self.options.poll_interval.min(Duration::from_millis(100));
+        for _ in 0..256 {
+            let event = match tokio::time::timeout(drain_timeout, self.app.next_event()).await {
+                Ok(Some(event)) => event,
+                _ => break,
+            };
+            let is_completion =
+                event.method == "turn/completed" && event_matches_turn(&event, thread_id, turn_id);
+            if event_matches_turn(&event, thread_id, turn_id) {
+                self.consume_turn_event(state, thread_id, turn_id, &event)
+                    .await?;
+            }
+            if is_completion {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    async fn consume_turn_event(
+        &self,
+        state: &mut RunState,
+        thread_id: &str,
+        turn_id: &str,
+        event: &AppEvent,
+    ) -> Result<(), CoordinatorError> {
+        debug_assert!(event_matches_turn(event, thread_id, turn_id));
+        let run_id = state.facts.run_id.to_string();
+        match event.method.as_str() {
+            "item/started" | "item/completed" => {
+                let item = event.params.get("item").ok_or_else(|| {
+                    CoordinatorError::operational(
+                        "HISTORY_UNAVAILABLE",
+                        format!("{} event omits its canonical item", event.method),
+                    )
+                })?;
+                self.store.record_turn_item_event(
+                    &run_id,
+                    thread_id,
+                    turn_id,
+                    &event.method,
+                    item,
+                )?;
+            }
+            "turn/completed" => {
+                let turn = event.params.get("turn").ok_or_else(|| {
+                    CoordinatorError::operational(
+                        "HISTORY_UNAVAILABLE",
+                        "turn/completed event omits its canonical turn",
+                    )
+                })?;
+                self.store
+                    .record_turn_completed_event(&run_id, thread_id, turn_id, turn)?;
+            }
+            _ => {}
+        }
+        if self.handle_execution_request(state, event).await? {
+            return Ok(());
+        }
+        if user_action_event(event, thread_id, turn_id) {
+            state.pause("PERMISSION_REQUIRED")?;
+            self.store.save_state(state)?;
+            return Err(CoordinatorError::operational(
+                "PERMISSION_REQUIRED",
+                "task turn is waiting for user approval or input",
+            ));
+        }
+        Ok(())
+    }
+
+    fn completed_turn_with_event_evidence(
+        &self,
+        state: &RunState,
+        thread_id: &str,
+        turn_id: &str,
+        persisted_turn: &Value,
+    ) -> Result<Value, CoordinatorError> {
+        let Some(evidence) =
+            self.store
+                .turn_event_evidence(&state.facts.run_id.to_string(), thread_id, turn_id)?
+        else {
+            return Ok(persisted_turn.clone());
+        };
+        merge_completed_turn_evidence(
+            persisted_turn,
+            &evidence.completed_turn,
+            evidence.completed_items,
+        )
     }
 
     async fn handle_execution_request(
@@ -3201,6 +3378,79 @@ fn command_execution_items(turn: &Value) -> Result<Vec<&Value>, CoordinatorError
         .iter()
         .filter(|item| item.get("type").and_then(Value::as_str) == Some("commandExecution"))
         .collect())
+}
+
+fn merge_completed_turn_evidence(
+    persisted_turn: &Value,
+    event_turn: &Value,
+    completed_items: Vec<Value>,
+) -> Result<Value, CoordinatorError> {
+    let persisted_id = persisted_turn.get("id").and_then(Value::as_str);
+    let event_id = event_turn.get("id").and_then(Value::as_str);
+    if persisted_id.is_none() || persisted_id != event_id {
+        return Err(CoordinatorError::operational(
+            "HISTORY_UNAVAILABLE",
+            "persisted turn and turn/completed event identities differ",
+        ));
+    }
+    let mut ordered = Vec::new();
+    let mut item_ids = HashSet::new();
+    let mut append = |item: &Value| -> Result<(), CoordinatorError> {
+        let item_id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "completed turn evidence contains an item without a nonempty id",
+                )
+            })?;
+        if item_ids.insert(item_id.to_owned()) {
+            ordered.push(item.clone());
+        }
+        Ok(())
+    };
+    for item in &completed_items {
+        append(item)?;
+    }
+    for source in [event_turn, persisted_turn] {
+        let items = source
+            .get("items")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "completed turn evidence has no canonical items",
+                )
+            })?;
+        for item in items {
+            append(item)?;
+        }
+    }
+    let mut merged_items = Vec::with_capacity(ordered.len());
+    for item_type in ["userMessage", "__non_message__", "agentMessage"] {
+        merged_items.extend(
+            ordered
+                .iter()
+                .filter(|item| {
+                    let current = item.get("type").and_then(Value::as_str);
+                    match item_type {
+                        "__non_message__" => {
+                            !matches!(current, Some("userMessage" | "agentMessage"))
+                        }
+                        expected => current == Some(expected),
+                    }
+                })
+                .cloned(),
+        );
+    }
+    let mut merged = persisted_turn.clone();
+    let object = merged.as_object_mut().ok_or_else(|| {
+        CoordinatorError::operational("HISTORY_UNAVAILABLE", "completed turn is not an object")
+    })?;
+    object.insert("items".into(), Value::Array(merged_items));
+    Ok(merged)
 }
 
 fn verify_integration_execution_items(
@@ -4569,7 +4819,17 @@ fn user_action_event(event: &AppEvent, thread_id: &str, turn_id: &str) -> bool {
 
 fn event_matches_turn(event: &AppEvent, thread_id: &str, turn_id: &str) -> bool {
     let event_thread = event.params.get("threadId").and_then(Value::as_str);
-    let event_turn = event.params.get("turnId").and_then(Value::as_str);
+    let event_turn = event
+        .params
+        .get("turnId")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            event
+                .params
+                .get("turn")
+                .and_then(|turn| turn.get("id"))
+                .and_then(Value::as_str)
+        });
     event_thread == Some(thread_id) && event_turn == Some(turn_id)
 }
 

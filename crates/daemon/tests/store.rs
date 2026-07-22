@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use consensus_core::state::{NextAction, Role, RunDiagnostic, RunFacts, RunState, RunStatus};
 use consensus_daemon::store::SqliteRunStore;
 use rusqlite::{Connection, params};
-use serde_json::Value;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 const RUN_ID: &str = "4b230bd8-d870-4ef4-bf20-05a4c61020af";
@@ -52,6 +52,97 @@ fn started_turn_identity_survives_reopen_for_crash_recovery() {
     assert_eq!(pending.thread_id.as_deref(), Some("primary-thread"));
     assert_eq!(pending.turn_id.as_deref(), Some("turn-7"));
     assert!(pending.full_prompt.is_none());
+}
+
+#[test]
+fn completed_app_server_item_events_survive_reopen_as_turn_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+    store
+        .record_pending_send(RUN_ID, "PRIMARY", "VERIFY", 1, "request-hash")
+        .unwrap();
+    store
+        .record_turn_started(RUN_ID, "request-hash", "primary-thread", "turn-7")
+        .unwrap();
+    let started = json!({
+        "id": "command-1",
+        "type": "commandExecution",
+        "command": "cargo test --workspace",
+        "cwd": "/repo/verification",
+        "status": "inProgress"
+    });
+    let completed = json!({
+        "id": "command-1",
+        "type": "commandExecution",
+        "command": "cargo test --workspace",
+        "cwd": "/repo/verification",
+        "status": "completed",
+        "exitCode": 0,
+        "aggregatedOutput": "ok",
+        "source": "agent"
+    });
+    store
+        .record_turn_item_event(RUN_ID, "primary-thread", "turn-7", "item/started", &started)
+        .unwrap();
+    store
+        .record_turn_item_event(
+            RUN_ID,
+            "primary-thread",
+            "turn-7",
+            "item/completed",
+            &completed,
+        )
+        .unwrap();
+    store
+        .record_turn_completed_event(
+            RUN_ID,
+            "primary-thread",
+            "turn-7",
+            &json!({
+                "id": "turn-7",
+                "status": "completed",
+                "items": []
+            }),
+        )
+        .unwrap();
+    drop(store);
+
+    let reopened = SqliteRunStore::open(path).unwrap();
+    let evidence = reopened
+        .turn_event_evidence(RUN_ID, "primary-thread", "turn-7")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(evidence.completed_turn["id"], "turn-7");
+    assert_eq!(evidence.completed_items, vec![completed.clone()]);
+    reopened
+        .record_turn_item_event(
+            RUN_ID,
+            "primary-thread",
+            "turn-7",
+            "item/completed",
+            &completed,
+        )
+        .unwrap();
+    let mut changed = completed;
+    changed["exitCode"] = json!(1);
+    assert_eq!(
+        reopened
+            .record_turn_item_event(
+                RUN_ID,
+                "primary-thread",
+                "turn-7",
+                "item/completed",
+                &changed,
+            )
+            .unwrap_err()
+            .code(),
+        "INCOMPATIBLE_STATE"
+    );
 }
 
 #[test]

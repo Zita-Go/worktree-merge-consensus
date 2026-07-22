@@ -761,10 +761,14 @@ fn emit_post_response(config: &Config, method: &str, result: &Value) -> Result<V
         append_event(config, "user input notification")?;
     }
     if config.scenario == "duplicate_notification" && turn_id == "turn-1" {
+        let turn = result
+            .get("turn")
+            .cloned()
+            .ok_or_else(|| "turn/start response is missing canonical turn".to_owned())?;
         let notification = json!({
             "jsonrpc": "2.0",
             "method": "turn/completed",
-            "params": {"threadId": config.primary_thread, "turnId": turn_id}
+            "params": {"threadId": config.primary_thread, "turn": turn}
         });
         for _ in 0..2 {
             notifications.push(notification.clone());

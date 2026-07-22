@@ -77,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "app-server-client"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -257,7 +257,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "codex-consensus"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "app-server-client",
  "assert_cmd",
@@ -284,7 +284,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "consensus-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "hex",
  "jsonschema",
@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "consensus-daemon"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "app-server-client",
  "async-trait",
@@ -316,7 +316,7 @@ dependencies = [
 
 [[package]]
 name = "consensus-e2e"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -324,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "consensus-fake-app-server"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -333,7 +333,7 @@ dependencies = [
 
 [[package]]
 name = "consensus-mcp-server"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "serde",
