@@ -394,7 +394,7 @@ fn verification_command_completed_record_is_reused_after_reopen() {
     assert_eq!(completed.stderr.as_deref(), Some(""));
     drop(store);
 
-    let reopened = SqliteRunStore::open(path).unwrap();
+    let reopened = SqliteRunStore::open(&path).unwrap();
     let claim = reopened
         .begin_verification_command(
             RUN_ID,
