@@ -702,6 +702,8 @@ where
         let retry_invalid_test_action = invalid_test_retry_action(&state)?;
         let retry_integration_invalid_response_action =
             integration_invalid_response_retry_action(&state)?;
+        let retry_verification_without_execution_action =
+            verification_without_execution_retry_action(&state)?;
         let retry_invalid_response_action = if retry_integration_invalid_response_action.is_none() {
             invalid_response_retry_action(&state)?
         } else {
@@ -714,6 +716,7 @@ where
         let effective_action = retry_execution_tool_action
             .or(retry_forbidden_operation_action)
             .or(retry_integration_invalid_response_action)
+            .or(retry_verification_without_execution_action)
             .or(retry_completed_response_action)
             .unwrap_or(state.next_action);
         if effective_action == NextAction::RequestPrimaryIntegration {
@@ -817,6 +820,29 @@ where
                 return Err(CoordinatorError::operational(
                     "INCOMPATIBLE_STATE",
                     "restored integration invalid-response action does not match its diagnostic",
+                ));
+            }
+            self.store
+                .reactivate_blocked_run_with_completed_turn_retry(
+                    &blocked_state,
+                    &state,
+                    &retry.message_hash,
+                    &retry.thread_id,
+                    &retry.turn_id,
+                    &retry.observed_status,
+                )?;
+            return Ok(state);
+        }
+        if let Some(action) = retry_verification_without_execution_action {
+            let retry = self
+                .inspect_completed_verification_without_execution_retry(&state, action)
+                .await?;
+            let blocked_state = state.clone();
+            let restored_action = state.retry_blocked_verification_without_execution()?;
+            if restored_action != action {
+                return Err(CoordinatorError::operational(
+                    "INCOMPATIBLE_STATE",
+                    "restored verification action does not match its failed turn",
                 ));
             }
             self.store
@@ -1637,6 +1663,96 @@ where
                 format!("completed pre-integration turn {turn_id} cannot be retried: {blocker}"),
             ));
         }
+        Ok(RetryableCompletedTurn {
+            message_hash: pending.message_hash,
+            thread_id: thread_id.to_owned(),
+            turn_id: turn_id.to_owned(),
+            observed_status: status.to_owned(),
+        })
+    }
+
+    async fn inspect_completed_verification_without_execution_retry(
+        &self,
+        state: &RunState,
+        action: NextAction,
+    ) -> Result<RetryableCompletedTurn, CoordinatorError> {
+        if action != NextAction::RequestPrimaryVerification
+            || state.integration_branch.is_none()
+            || state.integration_sha.is_none()
+            || state.current_integration_payload.is_none()
+            || state.verification_worktree.is_none()
+            || state.required_test_commands.is_empty()
+            || !state.test_evidence.is_empty()
+            || state.accepted_result.is_some()
+        {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                "verification retry requires an unchanged unaccepted integration result",
+            ));
+        }
+        let run_id = state.facts.run_id.to_string();
+        let pending = self.store.pending_send(&run_id)?.ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "verification failure has no persisted pending turn",
+            )
+        })?;
+        let (Some(thread_id), Some(turn_id)) =
+            (pending.thread_id.as_deref(), pending.turn_id.as_deref())
+        else {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "verification failure has no exact persisted turn identity",
+            ));
+        };
+        if pending.role != "PRIMARY"
+            || pending.phase != "VERIFY"
+            || pending.round != state.round
+            || thread_id != state.facts.primary_thread_id
+        {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "verification failure does not match the bound primary request",
+            ));
+        }
+        if !self
+            .store
+            .archived_turn_ids(&run_id, &pending.message_hash)?
+            .is_empty()
+        {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                "verification-without-execution recovery is limited to one retry",
+            ));
+        }
+
+        let detail = self.read_thread_with_retry(thread_id).await?;
+        self.verify_thread_identity(state, Role::Primary, &detail)?;
+        let turn = find_turn(&detail, turn_id).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "persisted verification turn is absent from canonical task history",
+            )
+        })?;
+        let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "persisted verification turn has no canonical status",
+            )
+        })?;
+        if status != "completed" || !turn_contains_request_hash(turn, &pending.message_hash) {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                "verification recovery requires the exact completed request turn",
+            ));
+        }
+        if let Some(blocker) = verification_without_execution_retry_blocker(turn) {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                blocker,
+            ));
+        }
+
         Ok(RetryableCompletedTurn {
             message_hash: pending.message_hash,
             thread_id: thread_id.to_owned(),
@@ -3577,6 +3693,41 @@ fn completed_read_only_turn_retry_blocker(turn: &Value) -> Option<String> {
     (!has_agent_message).then(|| "canonical turn has no agent response".into())
 }
 
+fn verification_without_execution_retry_blocker(turn: &Value) -> Option<String> {
+    let Some(items) = turn.get("items").and_then(Value::as_array) else {
+        return Some("canonical verification items are unavailable".into());
+    };
+    if items.is_empty() {
+        return Some("canonical verification items are empty".into());
+    }
+    let mut has_agent_message = false;
+    for item in items {
+        let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+            return Some("canonical verification item has no type".into());
+        };
+        match item_type {
+            "userMessage" | "reasoning" => {}
+            "agentMessage" => has_agent_message = true,
+            "contextCompaction" => {
+                if let Some(blocker) = context_compaction_retry_blocker(item) {
+                    return Some(blocker);
+                }
+            }
+            "commandExecution" => {
+                return Some(
+                    "verification retry is forbidden after any test command was executed".into(),
+                );
+            }
+            _ => {
+                return Some(format!(
+                    "canonical verification item type {item_type} may have side effects"
+                ));
+            }
+        }
+    }
+    (!has_agent_message).then(|| "canonical verification turn has no agent response".into())
+}
+
 fn context_compaction_retry_blocker(item: &Value) -> Option<String> {
     let Some(object) = item.as_object() else {
         return Some("context compaction item is not an object".into());
@@ -3750,6 +3901,39 @@ fn integration_invalid_response_retry_action(
         ));
     }
     Ok(Some(NextAction::RequestPrimaryIntegration))
+}
+
+fn verification_without_execution_retry_action(
+    state: &RunState,
+) -> Result<Option<NextAction>, CoordinatorError> {
+    if state.reason_code.as_deref() != Some("TEST_FAILURE") {
+        return Ok(None);
+    }
+    if state.status != RunStatus::Blocked
+        || state.next_action != NextAction::Stop
+        || state.phase != Phase::Blocked
+    {
+        return Err(CoordinatorError::operational(
+            "INCOMPATIBLE_STATE",
+            "test-failure reason is attached to inconsistent terminal metadata",
+        ));
+    }
+    let diagnostic = state.last_error.as_ref().ok_or_else(|| {
+        CoordinatorError::operational(
+            "INCOMPATIBLE_STATE",
+            "test-failure state has no originating diagnostic",
+        )
+    })?;
+    if diagnostic.code != "TEST_FAILURE"
+        || diagnostic.action != NextAction::RequestPrimaryVerification
+        || diagnostic.role != Some(Role::Primary)
+        || diagnostic.thread_id.as_deref() != Some(state.facts.primary_thread_id.as_str())
+        || diagnostic.detail
+            != "verification must execute each frozen command exactly once and no other command"
+    {
+        return Ok(None);
+    }
+    Ok(Some(NextAction::RequestPrimaryVerification))
 }
 
 fn invalid_response_retry_action(state: &RunState) -> Result<Option<NextAction>, CoordinatorError> {

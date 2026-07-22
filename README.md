@@ -118,6 +118,14 @@ already succeeded but whose legacy final JSON was invalid: it audits the exact
 patch hash and repository result, then requests one read-only marker response
 without repeating the patch, branch creation, or merge.
 
+Version 0.2.1 makes the verification instruction explicit: the Primary must
+create one completed command item for each frozen test before returning
+`VERIFICATION_READY`. If a completed verification turn returned only the
+marker and executed no command at all, explicit same-Run resume may archive
+that empty turn and retry verification once against the unchanged integration
+SHA. Any executed command, second empty attempt, nonzero exit, unknown item,
+repository drift, or accepted result remains terminal.
+
 Read [the v2 participant protocol](docs/protocol-v2.md), the
 [legacy v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
@@ -146,8 +154,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.0-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.0-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.1-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.1-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or

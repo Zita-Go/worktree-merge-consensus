@@ -114,6 +114,11 @@ same Run after one recorded successful controlled patch followed by an invalid
 legacy integration response, but only after matching the stored patch hash,
 canonical turn, authoritative Git result, and unchanged frozen refs. The retry
 is read-only and cannot repeat the patch, branch creation, or merge.
+Version 0.2.1 strengthens the Primary verification prompt and permits one
+same-Run retry only when the exact completed verification turn contains no
+command execution at all. Partial execution, actual test failure, a second
+empty response, unknown items, and identity or repository drift still fail
+closed.
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
 fixed task ID. `thread/read` can return persisted history for a `notLoaded`
 task, but it does not load that task for model execution; starting a turn after

@@ -206,6 +206,43 @@ fn result_verdict_prompt_uses_a_minimal_marker_and_code_side_identity() {
 }
 
 #[test]
+fn verification_prompt_requires_command_items_before_the_marker() {
+    let mut state = plan_state();
+    let plan = json!({"steps": ["merge", "verify"]});
+    let plan_hash = canonical_json_hash(&plan);
+    state.record_plan(plan).unwrap();
+    state.apply_message(approved_plan(&plan_hash)).unwrap();
+    state.apply_message(integration_created()).unwrap();
+    state.verification_worktree = Some(PathBuf::from("/state/verification/run"));
+    let payload = json!({
+        "integration_evidence": {"summary": "integrated"},
+        "changed_files": ["combined.txt"],
+        "required_test_commands": ["cargo test"],
+        "verification_worktree": "/state/verification/run",
+        "integration_branch": "consensus/test-run",
+        "integration_sha": INTEGRATION_SHA
+    });
+
+    let prompt = build_turn_prompt(
+        Role::Primary,
+        NextAction::RequestPrimaryVerification,
+        &state,
+        &payload,
+    )
+    .unwrap();
+
+    for required in [
+        "Invoke the command-execution tool once for each required_test_commands entry",
+        "using each exact command as one standalone tool call",
+        "Do not return VERIFICATION_READY before all required commandExecution items",
+        "a final answer without those tool items is invalid evidence",
+        "<consensus-result>VERIFICATION_READY</consensus-result>",
+    ] {
+        assert!(prompt.contains(required), "missing {required:?}");
+    }
+}
+
+#[test]
 fn result_prompt_rejects_delta_only_payloads() {
     let state = result_state();
 

@@ -832,6 +832,142 @@ async fn self_reported_success_without_command_execution_is_rejected() {
 }
 
 #[tokio::test]
+async fn verification_without_execution_retries_once_and_accepts_the_same_integration() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::new(conflict_free_replies())
+            .with_verification_behavior(VerificationBehavior::MissingExecutionThenPass),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let blocked = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(blocked.status, RunStatus::Blocked);
+    assert_eq!(blocked.reason_code.as_deref(), Some("TEST_FAILURE"));
+    let integration_sha = blocked.integration_sha.clone();
+
+    let accepted = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(accepted.status, RunStatus::Accepted);
+    assert_eq!(accepted.integration_sha, integration_sha);
+    assert_eq!(
+        app.request_order()
+            .iter()
+            .filter(|action| action.ends_with("REQUEST_PRIMARY_VERIFICATION"))
+            .count(),
+        2
+    );
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    let verification_prompts = app
+        .prompts()
+        .into_iter()
+        .filter(|prompt| prompt_action(prompt) == "REQUEST_PRIMARY_VERIFICATION")
+        .collect::<Vec<_>>();
+    assert!(verification_prompts.iter().all(|prompt| {
+        prompt
+            .contains("Do not return VERIFICATION_READY before all required commandExecution items")
+    }));
+}
+
+#[tokio::test]
+async fn verification_without_execution_retry_is_bounded_to_one_attempt() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::new(conflict_free_replies())
+            .with_verification_behavior(VerificationBehavior::MissingExecution),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    assert_eq!(
+        coordinator
+            .drive(RUN_ID)
+            .await
+            .unwrap()
+            .reason_code
+            .as_deref(),
+        Some("TEST_FAILURE")
+    );
+    assert_eq!(
+        coordinator
+            .resume(RUN_ID)
+            .await
+            .unwrap()
+            .reason_code
+            .as_deref(),
+        Some("TEST_FAILURE")
+    );
+
+    let error = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
+
+    assert_eq!(error.code(), "MODEL_RESPONSE_RETRY_UNSAFE");
+    assert!(error.detail().contains("limited to one retry"));
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+}
+
+#[tokio::test]
+async fn verification_retry_refuses_a_turn_that_executed_any_command() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::new(conflict_free_replies())
+            .with_verification_behavior(VerificationBehavior::MissingExecution),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let blocked = coordinator.drive(RUN_ID).await.unwrap();
+    let turn_id = format!("turn-{}", app.request_count());
+    app.append_turn_item(
+        "primary",
+        &turn_id,
+        json!({
+            "id": "unexpected-test-command",
+            "type": "commandExecution",
+            "command": "/bin/bash -lc 'cargo test --workspace'",
+            "cwd": blocked.verification_worktree,
+            "status": "completed",
+            "exitCode": 0,
+            "source": "agent"
+        }),
+    );
+
+    let error = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
+
+    assert_eq!(error.code(), "MODEL_RESPONSE_RETRY_UNSAFE");
+    assert!(
+        error
+            .detail()
+            .contains("forbidden after any test command was executed")
+    );
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+}
+
+#[tokio::test]
 async fn verification_cannot_replace_canonical_integration_evidence() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -2615,7 +2751,7 @@ enum DeferMode {
     InterruptedCommand,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum VerificationBehavior {
     #[default]
     Pass,
@@ -2623,6 +2759,7 @@ enum VerificationBehavior {
     LegacyReport,
     FailedExecution,
     MissingExecution,
+    MissingExecutionThenPass,
     RewriteIntegrationEvidence,
 }
 
@@ -3007,10 +3144,24 @@ impl AppServer for FakeAppServer {
             return Err(AppServerError::InvalidResponse(detail.clone()));
         }
         let action = prompt_action(prompt);
-        self.requests
-            .lock()
-            .unwrap()
-            .push(format!("{thread_id}:{action}"));
+        let verification_request_number = {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(format!("{thread_id}:{action}"));
+            requests
+                .iter()
+                .filter(|request| request.ends_with("REQUEST_PRIMARY_VERIFICATION"))
+                .count()
+        };
+        let verification_behavior = if self.verification_behavior
+            == VerificationBehavior::MissingExecutionThenPass
+            && verification_request_number == 1
+        {
+            VerificationBehavior::MissingExecution
+        } else if self.verification_behavior == VerificationBehavior::MissingExecutionThenPass {
+            VerificationBehavior::Pass
+        } else {
+            self.verification_behavior
+        };
         self.prompts.lock().unwrap().push(prompt.to_owned());
         self.policies.lock().unwrap().push(policy.clone());
         let mut reply = if action == "REQUEST_PRIMARY_VERIFICATION" {
@@ -3019,7 +3170,7 @@ impl AppServer for FakeAppServer {
                     "<consensus-result>VERIFICATION_READY</consensus-result>\n\nAll frozen commands completed."
                 )
             } else {
-                verification_reply(prompt, self.verification_behavior)
+                verification_reply(prompt, verification_behavior)
             }
         } else {
             self.replies.lock().unwrap().pop_front().unwrap()
@@ -3131,7 +3282,7 @@ impl AppServer for FakeAppServer {
             }));
         }
         if action == "REQUEST_PRIMARY_VERIFICATION" {
-            append_verification_command_items(&mut turn, prompt, self.verification_behavior);
+            append_verification_command_items(&mut turn, prompt, verification_behavior);
         }
         self.threads
             .lock()
@@ -3297,6 +3448,7 @@ fn verification_reply(prompt: &str, behavior: VerificationBehavior) -> Value {
         VerificationBehavior::Pass
         | VerificationBehavior::FailedExecution
         | VerificationBehavior::MissingExecution
+        | VerificationBehavior::MissingExecutionThenPass
         | VerificationBehavior::RewriteIntegrationEvidence => {}
     }
     let integration_evidence =

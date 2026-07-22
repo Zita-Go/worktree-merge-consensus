@@ -523,6 +523,61 @@ impl RunState {
         Ok(self.next_action)
     }
 
+    pub fn retry_blocked_verification_without_execution(
+        &mut self,
+    ) -> Result<NextAction, StateError> {
+        if self.status != RunStatus::Blocked
+            || self.phase != Phase::Blocked
+            || self.next_action != NextAction::Stop
+            || self.reason_code.as_deref() != Some("TEST_FAILURE")
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "only a terminal TEST_FAILURE verification turn can be retried",
+            ));
+        }
+        let diagnostic = self.last_error.as_ref().ok_or_else(|| {
+            state_error(
+                "INCOMPATIBLE_STATE",
+                "verification retry requires its originating diagnostic",
+            )
+        })?;
+        if diagnostic.code != "TEST_FAILURE"
+            || diagnostic.action != NextAction::RequestPrimaryVerification
+            || diagnostic.role != Some(Role::Primary)
+            || diagnostic.thread_id.as_deref() != Some(self.facts.primary_thread_id.as_str())
+            || diagnostic.detail
+                != "verification must execute each frozen command exactly once and no other command"
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "verification retry is limited to the bound turn that executed no test commands",
+            ));
+        }
+        if !self.plan_approved
+            || self.integration_branch.is_none()
+            || self.integration_sha.is_none()
+            || self.current_integration_payload.is_none()
+            || self.verification_worktree.is_none()
+            || self.required_test_commands.is_empty()
+            || !self.test_evidence.is_empty()
+            || self.accepted_result.is_some()
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "verification retry requires an unchanged unaccepted integration result",
+            ));
+        }
+
+        self.status = RunStatus::Running;
+        self.phase = Phase::Verify;
+        self.next_action = NextAction::RequestPrimaryVerification;
+        self.reason_code = None;
+        self.last_error = None;
+        self.validate_persisted()?;
+        Ok(self.next_action)
+    }
+
     pub fn retry_blocked_integration_execution_tool_unavailable(
         &mut self,
     ) -> Result<NextAction, StateError> {

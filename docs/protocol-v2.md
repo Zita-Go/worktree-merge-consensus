@@ -88,6 +88,14 @@ It then archives only that response attempt and requests a read-only
 `INTEGRATION_READY` marker. It cannot apply a second patch, recreate the branch,
 or repeat the merge.
 
+Release 0.2.1 also permits one narrow same-Run verification retry. It applies
+only when the exact completed Primary verification turn returned a result but
+contains zero `commandExecution` items. Resume revalidates the unchanged
+integration result and isolated clone, rejects every side-effect-capable or
+unknown item, archives the empty turn atomically, and reissues the same frozen
+verification request once. A partial test run, failed command, second empty
+turn, or changed integration remains terminal.
+
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the
 [legacy v1 protocol](protocol-v1.md).

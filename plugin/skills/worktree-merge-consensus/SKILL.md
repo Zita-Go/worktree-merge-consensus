@@ -185,6 +185,13 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   ancestors, and frozen refs. It archives only that response attempt and asks
   the Primary for one read-only `INTEGRATION_READY` marker; a second patch,
   branch creation, or merge is forbidden.
+  Version 0.2.1 may also recover one exact completed Primary verification turn
+  that returned a result marker without executing any command. Explicit
+  same-Run resume revalidates the unchanged integration result and isolated
+  verification clone, requires zero command items and no side-effect-capable
+  item, archives that empty turn, and retries the frozen verification request
+  once. Partial execution, failed tests, a second empty attempt, or drift remain
+  terminal.
   Network, added-permission, later-phase, mismatched, or side-effectful cases
   remain terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.

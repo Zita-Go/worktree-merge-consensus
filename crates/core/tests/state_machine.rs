@@ -299,6 +299,39 @@ fn completed_integration_with_an_invalid_result_can_retry_only_its_report_turn()
 }
 
 #[test]
+fn verification_without_execution_restores_only_the_verification_action() {
+    let integration_sha = "cccccccccccccccccccccccccccccccccccccccc";
+    let mut state = fixture_plan_state();
+    let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
+    state.apply_message(approved_plan(&plan_hash)).unwrap();
+    state
+        .apply_message(integration_created(integration_sha))
+        .unwrap();
+    state.verification_worktree = Some(PathBuf::from("/state/verification/run"));
+    state.record_error(RunDiagnostic {
+        code: "TEST_FAILURE".into(),
+        detail: "verification must execute each frozen command exactly once and no other command"
+            .into(),
+        operation: None,
+        action: NextAction::RequestPrimaryVerification,
+        role: Some(Role::Primary),
+        thread_id: Some("primary-thread".into()),
+    });
+    state.block("TEST_FAILURE");
+
+    let action = state
+        .retry_blocked_verification_without_execution()
+        .unwrap();
+
+    assert_eq!(action, NextAction::RequestPrimaryVerification);
+    assert_eq!(state.status, RunStatus::Running);
+    assert_eq!(state.phase, Phase::Verify);
+    assert_eq!(state.integration_sha.as_deref(), Some(integration_sha));
+    assert!(state.reason_code.is_none());
+    assert!(state.last_error.is_none());
+}
+
+#[test]
 fn integration_invalid_response_retry_rejects_an_already_accepted_result() {
     let mut state = fixture_result_state("cccccccccccccccccccccccccccccccccccccccc");
     state.record_error(RunDiagnostic {
