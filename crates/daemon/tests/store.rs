@@ -342,12 +342,15 @@ fn unattended_verification_migration_is_atomic_and_bounded_to_one_retry() {
     let pending = store.pending_send(RUN_ID).unwrap().unwrap();
     assert!(pending.thread_id.is_none());
     assert!(pending.turn_id.is_none());
-    assert_eq!(migration_statuses(&path, message_hash), vec![
-        "completed",
-        "completed",
-        "completed-evidence-unavailable",
-        "completed-unattended-verification-migration",
-    ]);
+    assert_eq!(
+        migration_statuses(&path, message_hash),
+        vec![
+            "completed",
+            "completed",
+            "completed-evidence-unavailable",
+            "completed-unattended-verification-migration",
+        ]
+    );
     assert!(
         store
             .successful_patch_recorded(RUN_ID, "integration-request")
@@ -389,6 +392,88 @@ fn unattended_verification_migration_is_atomic_and_bounded_to_one_retry() {
         Some("turn-5")
     );
     assert_eq!(migration_statuses(&path, message_hash).len(), 4);
+}
+
+#[test]
+fn unattended_verification_migration_is_bounded_once_per_run_across_request_hashes() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    let first_hash = "legacy-verification-request";
+    let (blocked, resumed) = seed_legacy_verification_compatibility_retry(&store, first_hash);
+    store
+        .reactivate_blocked_run_with_unattended_verification_retry(
+            &blocked,
+            &resumed,
+            first_hash,
+            "primary-thread",
+            "turn-4",
+            "completed",
+        )
+        .unwrap();
+
+    let second_hash = "different-verification-request";
+    store
+        .record_pending_send(RUN_ID, "PRIMARY", "VERIFY", resumed.round, second_hash)
+        .unwrap();
+    store
+        .record_turn_started(
+            RUN_ID,
+            second_hash,
+            "primary-thread",
+            "different-turn-final",
+        )
+        .unwrap();
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "INSERT INTO turn_attempts (
+                turn_record_id, run_id, message_hash, thread_id, turn_id,
+                terminal_status, recorded_at
+             )
+             SELECT id, run_id, message_hash, 'primary-thread',
+                    'different-turn-compatibility',
+                    'completed-evidence-unavailable', 1
+             FROM turns
+             WHERE run_id = ?1 AND message_hash = ?2",
+            params![RUN_ID, second_hash],
+        )
+        .unwrap();
+    drop(connection);
+    let mut blocked_again = resumed.clone();
+    record_missing_verification_diagnostic(&mut blocked_again);
+    blocked_again.block("TEST_FAILURE");
+    store.save_state(&blocked_again).unwrap();
+    let mut resumed_again = blocked_again.clone();
+    resumed_again
+        .retry_blocked_verification_without_execution()
+        .unwrap();
+
+    let error = store
+        .reactivate_blocked_run_with_unattended_verification_retry(
+            &blocked_again,
+            &resumed_again,
+            second_hash,
+            "primary-thread",
+            "different-turn-final",
+            "completed",
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "TERMINAL_TURN_NOT_RETRYABLE");
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), blocked_again);
+    assert_eq!(
+        migration_statuses(&path, first_hash)
+            .iter()
+            .filter(|status| status.as_str() == "completed-unattended-verification-migration")
+            .count(),
+        1
+    );
+    assert!(
+        migration_statuses(&path, second_hash)
+            .iter()
+            .all(|status| status != "completed-unattended-verification-migration")
+    );
 }
 
 #[test]

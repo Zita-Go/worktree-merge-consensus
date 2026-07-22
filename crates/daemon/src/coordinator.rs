@@ -1794,13 +1794,10 @@ where
         }
         let detail = self.read_thread_with_retry(thread_id).await?;
         self.verify_thread_identity(state, Role::Primary, &detail)?;
-        let archived_turn_ids = self
+        let archived_attempts = self
             .store
-            .archived_turn_ids(&run_id, &pending.message_hash)?;
-        let evidence_retry_recorded = self
-            .store
-            .verification_evidence_retry_recorded(&run_id, &pending.message_hash)?;
-        if archived_turn_ids.len() == 1 {
+            .archived_turn_attempts(&run_id, &pending.message_hash)?;
+        if archived_attempts.len() == 1 {
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
                 "verification-without-execution recovery is limited to one retry",
@@ -1808,14 +1805,23 @@ where
         }
         let mut archived_ready = false;
         let mut archived_cargo_unavailable = false;
-        let mut archived_sequence = Vec::with_capacity(archived_turn_ids.len());
-        for archived_turn_id in &archived_turn_ids {
+        let mut archived_sequence = Vec::with_capacity(archived_attempts.len());
+        for archived_attempt in &archived_attempts {
+            let archived_turn_id = &archived_attempt.turn_id;
             let archived = find_turn(&detail, archived_turn_id).ok_or_else(|| {
                 CoordinatorError::operational(
                     "HISTORY_UNAVAILABLE",
                     format!("archived verification turn {archived_turn_id} is absent"),
                 )
             })?;
+            if !turn_contains_request_hash(archived, &pending.message_hash) {
+                return Err(CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    format!(
+                        "archived verification turn {archived_turn_id} lacks its deterministic request marker"
+                    ),
+                ));
+            }
             if let Some(blocker) = terminal_turn_retry_blocker(archived) {
                 return Err(CoordinatorError::operational(
                     "MODEL_RESPONSE_RETRY_UNSAFE",
@@ -1834,13 +1840,16 @@ where
             match response.signal {
                 ParticipantSignal::VerificationReady => {
                     archived_ready = true;
-                    archived_sequence.push("ready");
+                    archived_sequence.push(("ready", archived_attempt.terminal_status.as_str()));
                 }
                 ParticipantSignal::Blocked
                     if response.blocked_reason.as_deref() == Some("CARGO_UNAVAILABLE") =>
                 {
                     archived_cargo_unavailable = true;
-                    archived_sequence.push("cargo-unavailable");
+                    archived_sequence.push((
+                        "cargo-unavailable",
+                        archived_attempt.terminal_status.as_str(),
+                    ));
                 }
                 _ => {
                     return Err(CoordinatorError::operational(
@@ -1850,18 +1859,27 @@ where
                 }
             }
         }
-        let kind = if archived_turn_ids.is_empty() && !evidence_retry_recorded {
+        let kind = if archived_attempts.is_empty() {
             VerificationRetryKind::EmptyTurn
-        } else if archived_sequence == ["ready", "cargo-unavailable", "ready"]
-            && evidence_retry_recorded
+        } else if archived_sequence
+            == [
+                ("ready", "completed"),
+                ("cargo-unavailable", "completed"),
+                ("ready", "completed-evidence-unavailable"),
+            ]
         {
             VerificationRetryKind::UnattendedVerificationMigration
-        } else if archived_ready && archived_cargo_unavailable && !evidence_retry_recorded {
+        } else if archived_ready
+            && archived_cargo_unavailable
+            && archived_sequence
+                .iter()
+                .all(|(_, terminal_status)| *terminal_status == "completed")
+        {
             VerificationRetryKind::EventEvidenceCompatibility
         } else {
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
-                "verification evidence compatibility recovery is limited to one retry",
+                "verification evidence compatibility recovery requires exact archived verification history and is limited to one retry",
             ));
         };
         let turn = find_turn(&detail, turn_id).ok_or_else(|| {
@@ -1886,6 +1904,17 @@ where
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
                 blocker,
+            ));
+        }
+        let final_response = parse_participant_response(
+            final_agent_text(turn)?.trim(),
+            allowed_participant_signals(NextAction::RequestPrimaryVerification),
+        )
+        .map_err(|error| CoordinatorError::operational("HISTORY_UNAVAILABLE", error.to_string()))?;
+        if final_response.signal != ParticipantSignal::VerificationReady {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                "verification migration requires the final VERIFICATION_READY marker",
             ));
         }
 

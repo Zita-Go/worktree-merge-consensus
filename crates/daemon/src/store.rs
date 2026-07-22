@@ -42,6 +42,12 @@ pub struct AcceptedTurn {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchivedTurnAttempt {
+    pub turn_id: String,
+    pub terminal_status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerificationCommandRecord {
     pub run_id: String,
     pub message_hash: String,
@@ -1023,10 +1029,13 @@ impl SqliteRunStore {
         }
         let (compatibility_retry_count, migration_retry_count) = transaction.query_row(
             "SELECT
-                COALESCE(SUM(CASE WHEN terminal_status = 'completed-evidence-unavailable' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE
+                    WHEN message_hash = ?2
+                     AND terminal_status = 'completed-evidence-unavailable'
+                    THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN terminal_status = 'completed-unattended-verification-migration' THEN 1 ELSE 0 END), 0)
              FROM turn_attempts
-             WHERE run_id = ?1 AND message_hash = ?2",
+             WHERE run_id = ?1",
             params![run_id, message_hash],
             |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)),
         )?;
@@ -1477,6 +1486,26 @@ impl SqliteRunStore {
              ORDER BY id ASC",
         )?;
         let rows = statement.query_map(params![run_id, message_hash], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn archived_turn_attempts(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+    ) -> Result<Vec<ArchivedTurnAttempt>, StoreError> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT turn_id, terminal_status FROM turn_attempts
+             WHERE run_id = ?1 AND message_hash = ?2
+             ORDER BY id ASC",
+        )?;
+        let rows = statement.query_map(params![run_id, message_hash], |row| {
+            Ok(ArchivedTurnAttempt {
+                turn_id: row.get(0)?,
+                terminal_status: row.get(1)?,
+            })
+        })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 

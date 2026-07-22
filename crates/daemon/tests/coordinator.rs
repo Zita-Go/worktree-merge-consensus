@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use consensus_core::{
     canonical_json_hash,
     git::GitInspector,
-    state::{NextAction, Phase, Role, RunDiagnostic, RunFacts, RunState, RunStatus},
+    state::{NextAction, Phase, Role, RunDiagnostic, RunFacts, RunState, RunStatus, TestEvidence},
 };
 use consensus_daemon::{
     coordinator::{
@@ -27,6 +27,7 @@ use consensus_daemon::{
     },
     store::SqliteRunStore,
 };
+use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -1260,6 +1261,211 @@ async fn unattended_migration_rejects_a_different_archived_signal_sequence() {
     );
     assert_eq!(app.request_count(), 6);
     assert!(app.executed_commands().is_empty());
+}
+
+#[tokio::test]
+async fn unattended_migration_rejects_a_nonready_final_marker() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::deferred(marker_replies(), 6, DeferMode::Hold).with_marker_protocol(),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        legacy_migration_options(),
+    );
+    let seed = seed_legacy_unattended_verification_history(
+        &coordinator,
+        &app,
+        &store,
+        ["ready", "cargo-unavailable", "ready"],
+        None,
+    )
+    .await;
+    app.set_agent_text(
+        "primary",
+        "legacy-verification-4",
+        "<consensus-result>BLOCKED:CARGO_UNAVAILABLE</consensus-result>\n\nNot ready.",
+    );
+
+    let error = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
+
+    assert_eq!(error.code(), "MODEL_RESPONSE_RETRY_UNSAFE");
+    assert!(error.detail().contains("final VERIFICATION_READY marker"));
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), seed.blocked);
+}
+
+#[tokio::test]
+async fn unattended_migration_requires_every_archived_request_marker() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::deferred(marker_replies(), 6, DeferMode::Hold).with_marker_protocol(),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        legacy_migration_options(),
+    );
+    let seed = seed_legacy_unattended_verification_history(
+        &coordinator,
+        &app,
+        &store,
+        ["ready", "cargo-unavailable", "ready"],
+        None,
+    )
+    .await;
+    app.set_user_prompt(
+        "primary",
+        "legacy-verification-2",
+        "Legacy verification request with the deterministic marker removed.",
+    );
+
+    let error = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
+
+    assert_eq!(error.code(), "HISTORY_UNAVAILABLE");
+    assert!(
+        error
+            .detail()
+            .contains("lacks its deterministic request marker")
+    );
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), seed.blocked);
+}
+
+#[tokio::test]
+async fn unattended_migration_binds_the_evidence_archive_to_the_third_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    let app = Arc::new(
+        FakeAppServer::deferred(marker_replies(), 6, DeferMode::Hold).with_marker_protocol(),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        legacy_migration_options(),
+    );
+    let seed = seed_legacy_unattended_verification_history(
+        &coordinator,
+        &app,
+        &store,
+        ["ready", "cargo-unavailable", "ready"],
+        None,
+    )
+    .await;
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "UPDATE turn_attempts
+             SET terminal_status = CASE turn_id
+                WHEN 'turn-6' THEN 'completed-evidence-unavailable'
+                WHEN 'legacy-verification-3' THEN 'completed'
+                ELSE terminal_status
+             END
+             WHERE run_id = ?1 AND message_hash = ?2",
+            params![RUN_ID, seed.verification_request_hash],
+        )
+        .unwrap();
+    drop(connection);
+
+    let error = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
+
+    assert_eq!(error.code(), "MODEL_RESPONSE_RETRY_UNSAFE");
+    assert!(
+        error
+            .detail()
+            .contains("exact archived verification history")
+    );
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), seed.blocked);
+}
+
+#[tokio::test]
+async fn unattended_migration_revalidates_source_and_integration_cleanliness() {
+    for reason in ["SOURCE_DRIFT", "DIRTY_WORKTREE"] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+        let app = Arc::new(
+            FakeAppServer::deferred(marker_replies(), 6, DeferMode::Hold).with_marker_protocol(),
+        );
+        let seeding = Coordinator::new(
+            Arc::clone(&app),
+            store.clone(),
+            Arc::new(RecordingSafety::default()),
+            legacy_migration_options(),
+        );
+        let seed = seed_legacy_unattended_verification_history(
+            &seeding,
+            &app,
+            &store,
+            ["ready", "cargo-unavailable", "ready"],
+            None,
+        )
+        .await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&app),
+            store.clone(),
+            Arc::new(RejectingIntegrationSafety { reason }),
+            legacy_migration_options(),
+        );
+
+        let error = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
+
+        assert_eq!(error.code(), reason);
+        assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), seed.blocked);
+    }
+}
+
+#[tokio::test]
+async fn unattended_migration_rejects_already_recorded_test_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::deferred(marker_replies(), 6, DeferMode::Hold).with_marker_protocol(),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        legacy_migration_options(),
+    );
+    let seed = seed_legacy_unattended_verification_history(
+        &coordinator,
+        &app,
+        &store,
+        ["ready", "cargo-unavailable", "ready"],
+        None,
+    )
+    .await;
+    let mut with_evidence = seed.blocked.clone();
+    with_evidence.test_evidence.push(TestEvidence {
+        command: "cargo test --workspace".into(),
+        exit_code: 0,
+        turn_id: "legacy-verification-4".into(),
+        item_id: "legacy-command-evidence".into(),
+        cwd: with_evidence.verification_worktree.clone().unwrap(),
+    });
+    store.save_state(&with_evidence).unwrap();
+
+    let error = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
+
+    assert_eq!(error.code(), "MODEL_RESPONSE_RETRY_UNSAFE");
+    assert!(
+        error
+            .detail()
+            .contains("unchanged unaccepted integration result")
+    );
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), with_evidence);
+    assert_eq!(
+        store
+            .archived_turn_ids(RUN_ID, &seed.verification_request_hash)
+            .unwrap()
+            .len(),
+        3
+    );
 }
 
 #[tokio::test]
@@ -2868,6 +3074,42 @@ impl RepositorySafety for RecordingSafety {
     }
 }
 
+struct RejectingIntegrationSafety {
+    reason: &'static str,
+}
+
+impl RepositorySafety for RejectingIntegrationSafety {
+    fn verify_frozen(&self, _facts: &RunFacts) -> Result<(), SafetyError> {
+        Ok(())
+    }
+
+    fn verify_branch_absent(&self, _facts: &RunFacts, _branch: &str) -> Result<(), SafetyError> {
+        Ok(())
+    }
+
+    fn verify_integration(
+        &self,
+        _facts: &RunFacts,
+        _branch: &str,
+        _sha: &str,
+        _changed_files: &[PathBuf],
+    ) -> Result<(), SafetyError> {
+        Err(SafetyError::new(
+            self.reason,
+            "scripted migration repository revalidation failure",
+        ))
+    }
+
+    fn prepare_verification_workspace(
+        &self,
+        _facts: &RunFacts,
+        _integration_sha: &str,
+        destination: &Path,
+    ) -> Result<PathBuf, SafetyError> {
+        Ok(destination.to_path_buf())
+    }
+}
+
 struct InProgressRecoverySafety {
     integration_branch_active: AtomicBool,
     in_progress_calls: AtomicUsize,
@@ -3329,6 +3571,40 @@ impl FakeAppServer {
             .find(|turn| turn.get("id").and_then(Value::as_str) == Some(turn_id))
             .unwrap();
         turn["status"] = json!(status);
+    }
+
+    fn set_user_prompt(&self, thread_id: &str, turn_id: &str, prompt: &str) {
+        let mut threads = self.threads.lock().unwrap();
+        let turn = threads
+            .get_mut(thread_id)
+            .unwrap()
+            .iter_mut()
+            .find(|turn| turn.get("id").and_then(Value::as_str) == Some(turn_id))
+            .unwrap();
+        let item = turn["items"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| item.get("type").and_then(Value::as_str) == Some("userMessage"))
+            .unwrap();
+        item["content"][0]["text"] = json!(prompt);
+    }
+
+    fn set_agent_text(&self, thread_id: &str, turn_id: &str, text: &str) {
+        let mut threads = self.threads.lock().unwrap();
+        let turn = threads
+            .get_mut(thread_id)
+            .unwrap()
+            .iter_mut()
+            .find(|turn| turn.get("id").and_then(Value::as_str) == Some(turn_id))
+            .unwrap();
+        let item = turn["items"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| item.get("type").and_then(Value::as_str) == Some("agentMessage"))
+            .unwrap();
+        item["text"] = json!(text);
     }
 
     fn complete_deferred_turns(&self) {
