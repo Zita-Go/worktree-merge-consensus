@@ -27,8 +27,8 @@ use crate::{
     compat::{check_compatibility, parse_managed_user_agent},
     transport::{JsonRpcTransport, RpcError},
     types::{
-        AppEvent, CommandExecRequest, CommandExecResult, InitializeInfo, ThreadDetail,
-        ThreadPage, ThreadSummary, TurnExecutionPolicy, TurnHandle,
+        AppEvent, CommandExecRequest, CommandExecResult, InitializeInfo, ThreadDetail, ThreadPage,
+        ThreadSummary, TurnExecutionPolicy, TurnHandle,
     },
 };
 

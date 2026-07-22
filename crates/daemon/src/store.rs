@@ -224,18 +224,20 @@ impl SqliteRunStore {
             ],
         )?;
         transaction.commit()?;
-        Ok(VerificationCommandClaim::Execute(VerificationCommandRecord {
-            run_id: run_id.to_owned(),
-            message_hash: message_hash.to_owned(),
-            turn_id: turn_id.to_owned(),
-            item_id,
-            command_index,
-            command: command.to_owned(),
-            cwd: cwd.to_path_buf(),
-            exit_code: None,
-            stdout: None,
-            stderr: None,
-        }))
+        Ok(VerificationCommandClaim::Execute(
+            VerificationCommandRecord {
+                run_id: run_id.to_owned(),
+                message_hash: message_hash.to_owned(),
+                turn_id: turn_id.to_owned(),
+                item_id,
+                command_index,
+                command: command.to_owned(),
+                cwd: cwd.to_path_buf(),
+                exit_code: None,
+                stdout: None,
+                stderr: None,
+            },
+        ))
     }
 
     pub fn complete_verification_command(

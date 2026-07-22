@@ -668,9 +668,11 @@ fn fixture_run(run_id: &str, common_dir: &str) -> RunState {
 fn verification_command_row_count(path: &std::path::Path) -> i64 {
     Connection::open(path)
         .unwrap()
-        .query_row("SELECT COUNT(*) FROM verification_command_executions", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM verification_command_executions",
+            [],
+            |row| row.get(0),
+        )
         .unwrap()
 }
 

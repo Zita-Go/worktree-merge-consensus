@@ -2,8 +2,7 @@ use std::path::PathBuf;
 
 use app_server_client::{
     AppServer, CONTROLLED_PATCH_APPROVAL_KEY, CodexAppServer, CommandExecRequest,
-    TurnExecutionPolicy,
-    transport::JsonRpcTransport,
+    TurnExecutionPolicy, transport::JsonRpcTransport,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex, split};
@@ -398,7 +397,11 @@ async fn execute_command_rejects_invalid_requests_before_sending() {
         })
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("command cwd must be an absolute path"));
+    assert!(
+        error
+            .to_string()
+            .contains("command cwd must be an absolute path")
+    );
 
     let error = client
         .execute_command(&CommandExecRequest {
@@ -409,7 +412,11 @@ async fn execute_command_rejects_invalid_requests_before_sending() {
         })
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("command timeout must be greater than zero"));
+    assert!(
+        error
+            .to_string()
+            .contains("command timeout must be greater than zero")
+    );
 
     let error = client
         .execute_command(&CommandExecRequest {
@@ -420,9 +427,11 @@ async fn execute_command_rejects_invalid_requests_before_sending() {
         })
         .await
         .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("command output_bytes_cap must be greater than zero"));
+    assert!(
+        error
+            .to_string()
+            .contains("command output_bytes_cap must be greater than zero")
+    );
 }
 
 fn thread_with_turns() -> Value {
