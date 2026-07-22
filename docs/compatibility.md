@@ -2,13 +2,14 @@
 
 ## Supported surface
 
-Version 0.1 has one checked Codex adapter:
+Version 0.2 has one checked Codex adapter:
 
 | Component | Supported value |
 | --- | --- |
 | Codex CLI | `>=0.144.1` |
 | App Server family | `codex-app-server/experimental-v2` |
-| Consensus protocol | `worktree-merge-consensus/v1` |
+| Participant response protocol | `worktree-merge-consensus/v2` |
+| Internal/legacy protocol | `worktree-merge-consensus/v1` |
 | Release OS/architecture | Linux x86_64 and Linux ARM64 |
 | Local transport | WebSocket over the managed Unix domain socket |
 | Rust MSRV | 1.85 |
@@ -40,14 +41,18 @@ and requires these JSON-RPC methods:
 
 It consumes `thread/status/changed`, `turn/started`, and `turn/completed`
 notifications. Task reads include turns. Coordinator prompts require exactly
-one JSON object, then the daemon validates the final assistant text locally
-against the checked-in protocol JSON Schema and state-machine invariants.
+one `<consensus-result>...</consensus-result>` marker. Only contract bodies are
+JSON; plans, feedback, and summaries are free-form Markdown. The daemon parses
+the marker locally, binds it to the exact pending task turn, and derives Git,
+SHA, changed-file, and test evidence in coordinator code. Valid v1 envelopes
+remain locally schema-validated as a migration fallback.
 
 The adapter intentionally omits App Server `outputSchema`. Codex 0.144.6 can
 accept the repository's full Draft 2020-12 schema at `turn/start` yet complete
-the turn with only a user message and no assistant output. Local validation is
-therefore authoritative and fails closed without relying on the provider's
-smaller structured-output schema subset.
+the turn with only a user message and no assistant output. The v2 marker parser,
+contract validation, authoritative command history, Git checks, and
+state-machine invariants are therefore local and fail closed without relying on
+the provider's structured-output schema subset.
 
 The App Server is experimental. A Codex release may change shapes or semantics
 without preserving this adapter. A method call or response-shape mismatch is a
@@ -101,6 +106,14 @@ longer requires the redundant `payload.role` label or free-form
 `blocking_condition` prose. The pending send already binds the exact Primary
 task, and a paused Run rejects `consensus_apply_patch` before Git access. A
 missing request, plan, source, target, or result-SHA identity still fails closed.
+Version 0.2.0 moves machine identity out of participant-authored responses.
+One action marker controls each turn; contract tests remain structured, while
+plans and feedback stay as complete Markdown. The coordinator computes plan
+identity and derives integration and verification facts. It can also resume the
+same Run after one recorded successful controlled patch followed by an invalid
+legacy integration response, but only after matching the stored patch hash,
+canonical turn, authoritative Git result, and unchanged frozen refs. The retry
+is read-only and cannot repeat the patch, branch creation, or merge.
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
 fixed task ID. `thread/read` can return persisted history for a `notLoaded`
 task, but it does not load that task for model execution; starting a turn after
@@ -136,7 +149,7 @@ registered worktree paths through CLI or MCP. The daemon still verifies the
 returned task IDs, but every turn uses the frozen explicit worktree even when
 both tasks report the same cwd or a non-Git directory.
 
-The v0.1 plugin contract exposes eight MCP tools. Seven are operator tools,
+The plugin contract exposes eight MCP tools. Seven are operator tools,
 including `consensus_list_worktrees`; `consensus_start` requires both task IDs
 and both worktree paths. The eighth, `consensus_apply_patch`, is available only
 to an exact active Primary integration request and has no public CLI
@@ -168,7 +181,7 @@ name. In every case, the embedded Codex version must exactly match
 
 ## Persisted-state compatibility
 
-The v0.1 run-state schema is explicitly versioned. This prerelease does not
+The run-state schema is explicitly versioned. This prerelease does not
 silently migrate state written by earlier development snapshots: missing or
 unknown schema versions return `INCOMPATIBLE_STATE`. Preserve the old state
 directory for audit and start the released binary with a fresh `--state-dir`
@@ -181,7 +194,7 @@ runners for the musl targets and are rejected by the release workflow if they
 contain a dynamic-library dependency or program interpreter. They therefore do
 not impose a host GLIBC version floor. The daemon depends on Unix socket
 permissions, so Windows is unsupported. macOS is used for development tests but
-is not a v0.1 release target or compatibility promise.
+is not a release target or compatibility promise.
 
 All participants must satisfy the `same-host` constraint. Cross-host App Server
 connections, Git transfer, SSH relays, and shared-network SQLite files are not

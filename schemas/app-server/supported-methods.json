@@ -51,6 +51,7 @@
   "responseValidation": {
     "transportOutputSchema": false,
     "localProtocolSchema": "../protocol-v1.json",
+    "participantResponseProtocol": "worktree-merge-consensus/v2",
     "failClosed": true
   },
   "initializeResponseShape": [

@@ -11,6 +11,13 @@ Launch the persistent local coordinator for two-task worktree integration. Keep 
 
 This is a launcher and operator skill only. If a coordinator-authored prompt identifies the current task as the Primary or Reviewer participant inside an already-running automated consensus run, this skill is not applicable: do not read it recursively, call its tools, or start another run. Follow that self-contained participant prompt instead.
 
+Participant protocol v2 uses exactly one
+`<consensus-result>...</consensus-result>` marker per response. Only the initial
+contract body is JSON; plans, review feedback, integration summaries,
+verification summaries, and final reviews are free-form Markdown. The daemon,
+not either task, binds machine identity and derives Git and test evidence. This
+launcher never parses or relays those participant responses.
+
 ## Tool surface
 
 `consensus_doctor` is an MCP tool, not a shell command. The same applies to every `consensus_*` name below. Call these names through the Codex tool interface. Never run `consensus_doctor` as an executable.
@@ -171,6 +178,13 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   `blocking_condition` as redundant diagnostics. The persisted pending send
   already binds the Primary task, and the paused Run rejects the patch before
   Git access. Missing machine identity still fails closed.
+  Version 0.2.0 can also recover the exact case where one request-bound
+  controlled patch and integration commit succeeded but the legacy final
+  integration response was invalid. Same-Run resume must match the stored patch
+  hash, canonical completed turn, authoritative clean target result, both
+  ancestors, and frozen refs. It archives only that response attempt and asks
+  the Primary for one read-only `INTEGRATION_READY` marker; a second patch,
+  branch creation, or merge is forbidden.
   Network, added-permission, later-phase, mismatched, or side-effectful cases
   remain terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.

@@ -15,6 +15,7 @@ required_files=(
   SECURITY.md
   LICENSE
   docs/protocol-v1.md
+  docs/protocol-v2.md
   docs/compatibility.md
   docs/real-codex-smoke-test.md
   schemas/app-server/supported-methods.json
@@ -38,6 +39,10 @@ for readme in README.md README.zh-CN.md; do
 
   for marker in same-host '>=0.144.1' no-push SHA256SUMS unknown-linux-musl; do
     grep -Fq "$marker" "$readme" || fail "$readme is missing the $marker contract"
+  done
+
+  for marker in 'worktree-merge-consensus/v2' '<consensus-result>' 'protocol-v2.md'; do
+    grep -Fq "$marker" "$readme" || fail "$readme is missing the $marker protocol contract"
   done
 
   for marker in \

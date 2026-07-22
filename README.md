@@ -9,7 +9,7 @@ reviewer task checks that its own behavior and implementation details survive.
 The result stops on a new local branch.
 
 > **Experimental dependency:** this project uses the experimental Codex App
-> Server protocol. Version 0.1 supports Codex CLI `>=0.144.1`. App Server
+> Server protocol. Version 0.2 supports Codex CLI `>=0.144.1`. App Server
 > identity, required-method, and response-shape mismatches still fail closed.
 > Run `codex-consensus doctor` before starting a real integration.
 
@@ -104,14 +104,29 @@ single patch call was rejected before Git access. All machine identity fields,
 the reported and authoritative merge SHA, canonical tool history, SQLite
 no-write proof, and frozen refs remain mandatory.
 
-Read [the v1 protocol](docs/protocol-v1.md),
+Version 0.2.0 introduces `worktree-merge-consensus/v2` and replaces
+participant-authored protocol envelopes with one
+`<consensus-result>...</consensus-result>` marker plus free-form Markdown.
+Contracts retain one JSON body because
+the coordinator must extract exact test commands; plans, review feedback,
+integration summaries, and result reviews have no field-level prose schema.
+The coordinator binds verdicts to the exact task turn, computes the plan hash,
+and derives branch, SHA, changed files, and test evidence from Git and App
+Server history. Valid v1 envelopes remain readable for in-flight migration.
+The same release can recover an integration whose controlled patch and commit
+already succeeded but whose legacy final JSON was invalid: it audits the exact
+patch hash and repository result, then requests one read-only marker response
+without repeating the patch, branch creation, or merge.
+
+Read [the v2 participant protocol](docs/protocol-v2.md), the
+[legacy v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
 for the exact boundaries.
 
 ## Preconditions
 
 - Linux x86_64 or ARM64 for released binaries. Other Unix systems may work for
-  development but are not release targets in v0.1.
+  development but are not release targets.
 - Git and Codex CLI available in `PATH`.
 - Codex CLI `>=0.144.1` with the required experimental App Server methods.
 - Exactly two existing Codex tasks under the same local account and host.
@@ -131,15 +146,15 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.1.28-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.1.28-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.0-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.0-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
 later on supported Linux hosts.
 
 Release assets also include a CycloneDX JSON SBOM and the Codex plugin bundle.
-Until the real-Codex checklist is recorded, v0.1 releases are marked
+Until the real-Codex checklist is recorded, releases are marked
 pre-release; see [the smoke-test record](docs/real-codex-smoke-test.md).
 
 To build from a source checkout instead:
@@ -392,14 +407,14 @@ with the global `--state-dir DIR` option. It contains:
 - `daemon.pid`: the managed daemon process ID.
 - `verification/<run-id>-<integration-sha>`: a detached, remote-free clone used
   only for exact-SHA tests. It has a Git common directory independent of both
-  source worktrees and is retained for audit/recovery in v0.1.
+  source worktrees and is retained for audit/recovery.
 
-The directory is mode `0700`. The database stores canonical protocol payloads
-and evidence but not full task conversation transcripts or generated prompts;
-Codex itself retains messages in the two selected task histories. Sensitive App
-Server diagnostics are redacted. The managed daemon does not create a
-persistent log file by default, so CLI output, Codex task history, and
-`status --json` are the operational record.
+The directory is mode `0700`. The database stores canonical coordinator state,
+participant response bodies, and evidence, but not full task conversation
+transcripts or generated prompts; Codex itself retains messages in the two
+selected task histories. Sensitive App Server diagnostics are redacted. The
+managed daemon does not create a persistent log file by default, so CLI output,
+Codex task history, and `status --json` are the operational record.
 
 ## Troubleshooting
 
@@ -445,7 +460,7 @@ persistent log file by default, so CLI output, Codex task history, and
   directory, remove no files automatically, and retry `codex-consensus doctor`
   with `--state-dir` if isolation is needed.
 
-## Non-goals for v0.1
+## Current non-goals
 
 - Cross-host or cross-account task communication.
 - More than two tasks per run.

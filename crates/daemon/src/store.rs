@@ -805,6 +805,23 @@ impl SqliteRunStore {
         Ok(exists)
     }
 
+    pub fn successful_patch_hash(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+    ) -> Result<Option<String>, StoreError> {
+        self.lock()?
+            .query_row(
+                "SELECT patch_hash FROM patch_applications
+                 WHERE run_id = ?1 AND message_hash = ?2
+                 LIMIT 1",
+                params![run_id, message_hash],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn record_successful_patch(
         &self,
         run_id: &str,

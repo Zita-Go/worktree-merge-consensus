@@ -481,11 +481,11 @@ fn scripted_reply(
     action: &str,
     occurrence: usize,
     metadata: &Value,
-    current: &Value,
+    _current: &Value,
     verification: Option<&VerificationResult>,
-) -> Result<Value, String> {
+) -> Result<String, String> {
     if config.scenario == "invalid_reply" && occurrence == 1 {
-        return Ok(json!("not a protocol envelope"));
+        return Ok("not a protocol response".to_owned());
     }
     if action == "REQUEST_REVIEWER_PLAN_VERDICT" {
         let issue = match config.scenario.as_str() {
@@ -495,39 +495,27 @@ fn scripted_reply(
             _ => None,
         };
         if let Some(issue) = issue {
-            return Ok(changes_required_message(metadata, &issue));
+            return Ok(changes_required_message(&issue));
         }
     }
     if action == "REQUEST_REVIEWER_RESULT_VERDICT"
         && config.scenario == "result_revision"
         && occurrence == 1
     {
-        return Ok(changes_required_message(metadata, "missing-result-edge"));
+        return Ok(changes_required_message("missing-result-edge"));
     }
-    let (message_type, payload, integration_branch, integration_sha) = match action {
-        "REQUEST_PRIMARY_CONTRACT" => (
-            "CONTRACT_READY",
+    match action {
+        "REQUEST_PRIMARY_CONTRACT" => contract_ready_reply(
             json!({
-                "role": "PRIMARY",
-                "contract": {
-                    "items": ["primary-feature"],
-                    "tests": declared_tests(metadata)
-                }
+                "items": ["primary-feature"],
+                "tests": declared_tests(metadata)
             }),
-            None,
-            None,
         ),
-        "REQUEST_REVIEWER_CONTRACT" => (
-            "CONTRACT_READY",
+        "REQUEST_REVIEWER_CONTRACT" => contract_ready_reply(
             json!({
-                "role": "REVIEWER",
-                "contract": {
-                    "items": ["reviewer-feature"],
-                    "tests": declared_tests(metadata)
-                }
+                "items": ["reviewer-feature"],
+                "tests": declared_tests(metadata)
             }),
-            None,
-            None,
         ),
         "REQUEST_PRIMARY_PLAN" => {
             let step = match config.scenario.as_str() {
@@ -536,133 +524,50 @@ fn scripted_reply(
                 "plan_revision" if occurrence > 1 => "preserve reviewer edge".to_owned(),
                 _ => "merge both frozen commits".to_owned(),
             };
-            (
-                "PLAN_READY",
-                json!({
-                    "primary_contract": current["primary_contract"],
-                    "reviewer_contract": current["reviewer_contract"],
-                    "plan": {"steps": [step]},
-                    "coverage_matrix": [
-                        {"item": "primary-feature", "covered_by": step},
-                        {"item": "reviewer-feature", "covered_by": step}
-                    ],
-                    "test_commands": declared_tests(metadata)
-                }),
-                None,
-                None,
-            )
+            Ok(format!(
+                "<consensus-result>PLAN_READY</consensus-result>\n\n## Integration plan\n\n{step}. Preserve both contracts and run every frozen test."
+            ))
         }
-        "REQUEST_REVIEWER_PLAN_VERDICT" => (
-            "APPROVED_PLAN",
-            json!({
-                "approved_plan_revision": metadata["plan_revision"],
-                "approved_primary_sha": metadata["primary_sha"],
-                "approved_reviewer_sha": metadata["reviewer_sha"],
-                "approved_plan_hash": current["plan_hash"],
-                "uncovered_items": []
-            }),
-            None,
-            None,
+        "REQUEST_REVIEWER_PLAN_VERDICT" => Ok(
+            "<consensus-result>APPROVED</consensus-result>\n\nThe current proposal covers both contracts."
+                .to_owned(),
         ),
         "REQUEST_PRIMARY_INTEGRATION" => {
-            let integration = integrate(config, metadata, occurrence)?;
-            (
-                "INTEGRATION_READY",
-                json!({
-                    "changed_files": integration.changed_files,
-                    "integration_evidence": {"summary": "both frozen commits integrated"}
-                }),
-                Some(config.integration_branch.clone()),
-                Some(integration.sha),
+            integrate(config, metadata, occurrence)?;
+            Ok(
+                "<consensus-result>INTEGRATION_READY</consensus-result>\n\nBoth frozen commits were integrated according to the approved plan."
+                    .to_owned(),
             )
         }
         "REQUEST_PRIMARY_VERIFICATION" => {
-            let verification =
-                verification.ok_or_else(|| "verification execution is missing".to_owned())?;
-            (
-                "INTEGRATION_READY",
-                json!({
-                    "changed_files": current["changed_files"],
-                    "integration_evidence": current["integration_evidence"],
-                    "test_evidence": verification.reported_evidence
-                }),
-                metadata["integration_branch"].as_str().map(str::to_owned),
-                metadata["integration_sha"].as_str().map(str::to_owned),
+            verification.ok_or_else(|| "verification execution is missing".to_owned())?;
+            Ok(
+                "<consensus-result>VERIFICATION_READY</consensus-result>\n\nThe frozen verification commands completed."
+                    .to_owned(),
             )
         }
-        "REQUEST_REVIEWER_RESULT_VERDICT" => (
-            "APPROVED_RESULT",
-            json!({
-                "approved_plan_revision": metadata["plan_revision"],
-                "approved_primary_sha": metadata["primary_sha"],
-                "approved_reviewer_sha": metadata["reviewer_sha"],
-                "approved_integration_branch": metadata["integration_branch"],
-                "approved_integration_sha": metadata["integration_sha"],
-                "uncovered_items": []
-            }),
-            metadata["integration_branch"].as_str().map(str::to_owned),
-            metadata["integration_sha"].as_str().map(str::to_owned),
+        "REQUEST_REVIEWER_RESULT_VERDICT" => Ok(
+            "<consensus-result>APPROVED</consensus-result>\n\nThe exact tested integration result preserves both contracts."
+                .to_owned(),
         ),
-        _ => return Err(format!("unsupported action {action}")),
-    };
-    Ok(protocol_message(
-        metadata,
-        message_type,
-        payload,
-        integration_branch,
-        integration_sha,
-        None,
+        _ => Err(format!("unsupported action {action}")),
+    }
+}
+
+fn contract_ready_reply(contract: Value) -> Result<String, String> {
+    Ok(format!(
+        "<consensus-result>CONTRACT_READY</consensus-result>\n{}",
+        serde_json::to_string(&contract).map_err(|error| error.to_string())?
     ))
 }
 
-fn changes_required_message(metadata: &Value, issue_id: &str) -> Value {
-    protocol_message(
-        metadata,
-        "CHANGES_REQUIRED",
-        json!({
-            "issue_ids": [issue_id],
-            "evidence": [{"issue_id": issue_id, "detail": "fixture requires another revision"}]
-        }),
-        metadata["integration_branch"].as_str().map(str::to_owned),
-        metadata["integration_sha"].as_str().map(str::to_owned),
-        Some("COVERAGE_GAP"),
+fn changes_required_message(issue_id: &str) -> String {
+    format!(
+        "<consensus-result>CHANGES_REQUIRED</consensus-result>\n\n## {issue_id}\n\nThe current proposal must preserve this behavior before approval."
     )
 }
 
-fn protocol_message(
-    metadata: &Value,
-    message_type: &str,
-    payload: Value,
-    integration_branch: Option<String>,
-    integration_sha: Option<String>,
-    reason_code: Option<&str>,
-) -> Value {
-    json!({
-        "protocol": "worktree-merge-consensus/v1",
-        "run_id": metadata["run_id"],
-        "message_type": message_type,
-        "phase": metadata["phase"],
-        "round": metadata["round"],
-        "primary_sha": metadata["primary_sha"],
-        "reviewer_sha": metadata["reviewer_sha"],
-        "plan_revision": metadata["plan_revision"],
-        "integration_branch": integration_branch,
-        "integration_sha": integration_sha,
-        "reason_code": reason_code,
-        "payload": payload
-    })
-}
-
-struct IntegrationResult {
-    sha: String,
-    changed_files: Vec<String>,
-}
-
-fn integrate(
-    config: &Config,
-    metadata: &Value,
-    occurrence: usize,
-) -> Result<IntegrationResult, String> {
+fn integrate(config: &Config, metadata: &Value, occurrence: usize) -> Result<(), String> {
     let primary_sha = required_string(metadata, "primary_sha")?;
     let reviewer_sha = required_string(metadata, "reviewer_sha")?;
     if config.scenario == "result_revision" && occurrence > 1 {
@@ -707,18 +612,10 @@ fn integrate(
 
     let sha = git_text(&config.primary_worktree, &["rev-parse", "HEAD"])?;
     append_event(config, &format!("integration-sha {sha}"))?;
-    let changed_files = git_text(
-        &config.primary_worktree,
-        &["diff", "--name-only", primary_sha, &sha, "--"],
-    )?
-    .lines()
-    .map(str::to_owned)
-    .collect();
-    Ok(IntegrationResult { sha, changed_files })
+    Ok(())
 }
 
 struct VerificationResult {
-    reported_evidence: Vec<Value>,
     command_items: Vec<Value>,
 }
 
@@ -738,7 +635,6 @@ fn run_verification(
         .get("required_test_commands")
         .and_then(Value::as_array)
         .ok_or_else(|| "required_test_commands is missing".to_owned())?;
-    let mut reported_evidence = Vec::with_capacity(commands.len());
     let mut command_items = Vec::with_capacity(commands.len());
     for (index, command) in commands.iter().enumerate() {
         let command = command
@@ -755,10 +651,6 @@ fn run_verification(
             .status()
             .map_err(|error| format!("run test {command}: {error}"))?;
         let exit_code = status.code().unwrap_or(1);
-        reported_evidence.push(json!({
-            "command": command,
-            "exit_code": exit_code
-        }));
         command_items.push(json!({
             "id": format!("{turn_id}-command-{}", index + 1),
             "type": "commandExecution",
@@ -770,10 +662,7 @@ fn run_verification(
             "source": "agent"
         }));
     }
-    Ok(VerificationResult {
-        reported_evidence,
-        command_items,
-    })
+    Ok(VerificationResult { command_items })
 }
 
 fn prompt_json_block(prompt: &str, marker: &str) -> Result<Value, String> {
@@ -797,7 +686,7 @@ struct PendingTurn {
     thread_id: String,
     turn_id: String,
     prompt: String,
-    reply: Value,
+    reply: String,
     #[serde(default)]
     command_items: Vec<Value>,
 }
@@ -897,7 +786,7 @@ fn in_progress_turn(turn_id: &str, prompt: &str) -> Value {
     })
 }
 
-fn completed_turn(turn_id: &str, prompt: &str, reply: &Value) -> Value {
+fn completed_turn(turn_id: &str, prompt: &str, reply: &str) -> Value {
     json!({
         "id": turn_id,
         "status": "completed",
@@ -910,7 +799,7 @@ fn completed_turn(turn_id: &str, prompt: &str, reply: &Value) -> Value {
             {
                 "id": format!("assistant-{turn_id}"),
                 "type": "agentMessage",
-                "text": serde_json::to_string(reply).expect("reply is serializable"),
+                "text": reply,
                 "phase": "final_answer"
             }
         ]

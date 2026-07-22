@@ -4,8 +4,8 @@
 
 No disposable real-Codex run has yet been recorded for the supported Codex CLI
 range beginning at `0.144.1`. Automated tests use a process-level fake App
-Server and do not satisfy this gate. Therefore v0.1 release automation creates
-a GitHub **pre-release** until a maintainer completes this checklist and commits
+Server and do not satisfy this gate. Therefore release automation creates a
+GitHub **pre-release** until a maintainer completes this checklist and commits
 the evidence below.
 
 ## Required environment
@@ -59,6 +59,10 @@ the evidence below.
    verification turn uses only the persisted `verification_worktree`, runs each
    frozen command exactly once, and records successful `commandExecution`
    evidence with turn ID, item ID, command, cwd, and exit code.
+   Confirm contracts use one result marker plus a JSON body, while the plan,
+   review feedback, integration summary, verification summary, and final review
+   use one result marker plus ordinary Markdown. No participant should have to
+   repeat run IDs, plan hashes, branches, SHAs, changed files, or test evidence.
 7. While the coordinator daemon remains alive, restart the managed App Server
    and confirm `doctor` repairs the daemon-owned proxy, reaps the old proxy
    process, and permits an idempotent task read without manual coordinator
@@ -87,6 +91,11 @@ the evidence below.
    `payload.role` and free-form `blocking_condition`; confirm it is retryable,
    while omitting any request, plan, source, target, or result-SHA identity
    still fails closed.
+   Finally, complete one controlled patch and integration commit, then return a
+   malformed legacy final response. Resume the same Run and confirm the daemon
+   matches the stored successful patch hash and authoritative Git result, asks
+   for only one read-only `INTEGRATION_READY` marker response, and never applies
+   another patch or repeats branch creation or merge.
    Keep one disposable participant turn active for longer than five
    minutes while canonical turn items continue to change, and confirm the Run
    does not pause; unchanged state must still hit the bounded idle timeout.

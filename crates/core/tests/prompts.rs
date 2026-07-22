@@ -15,7 +15,7 @@ const REVIEWER_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const INTEGRATION_SHA: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
 #[test]
-fn every_prompt_is_self_contained_and_declares_strict_output() {
+fn every_prompt_is_self_contained_and_declares_v2_contract_output() {
     let state = RunState::new(facts());
     let payload = json!({"task_context": "derive the primary contract from this task"});
 
@@ -28,21 +28,20 @@ fn every_prompt_is_self_contained_and_declares_strict_output() {
     .unwrap();
 
     for required in [
-        "worktree-merge-consensus/v1",
+        "worktree-merge-consensus/v2",
         RUN_ID,
         "CONTRACT",
         "\"round\": 1",
         PRIMARY_SHA,
         REVIEWER_SHA,
         "derive the primary contract from this task",
-        "Worktree Merge Consensus Protocol v1",
-        "Text outside that one JSON object is invalid",
-        "including BLOCKED, must copy phase",
+        "<consensus-result>CONTRACT_READY</consensus-result>",
+        "place exactly one JSON object after the marker",
+        "Do not return the legacy v1 protocol envelope",
         "This is an internal participant turn inside an already-running run",
         "do not select it, read its `SKILL.md`",
         "Do not call `worktreeMergeConsensus`",
-        "payload.approved_plan_revision must equal",
-        "Every required `approved_*` field must be a direct child of payload",
+        "The coordinator binds every response to this exact task turn",
     ] {
         assert!(prompt.contains(required), "missing {required:?}");
     }
@@ -64,7 +63,7 @@ fn prompt_declares_role_binding_and_binding_mismatch_protocol() {
         "/repo/primary",
         "refs/heads/primary",
         PRIMARY_SHA,
-        "payload.role as \"PRIMARY\"",
+        "The contract JSON `tests` field",
         "SOURCE_BINDING_MISMATCH",
         "Do not search for or switch to another source directory",
     ] {
@@ -86,7 +85,7 @@ fn prompt_declares_role_binding_and_binding_mismatch_protocol() {
         "/repo/reviewer",
         "refs/heads/reviewer",
         REVIEWER_SHA,
-        "payload.role as \"REVIEWER\"",
+        "contract itself, not a protocol envelope",
     ] {
         assert!(reviewer.contains(required), "missing {required:?}");
     }
@@ -159,20 +158,20 @@ fn plan_verdict_prompt_contains_both_contracts_plan_and_coverage() {
     assert!(prompt.contains("coverage_matrix"));
     assert!(prompt.contains("merge"));
     for required in [
-        "Action-specific approval payload contract".to_owned(),
-        "If returning APPROVED_PLAN".to_owned(),
-        format!("\"approved_primary_sha\": \"{PRIMARY_SHA}\""),
-        format!("\"approved_reviewer_sha\": \"{REVIEWER_SHA}\""),
-        "\"approved_plan_revision\": 1".to_owned(),
-        "\"approved_plan_hash\": \"0000000000000000000000000000000000000000000000000000000000000000\"".to_owned(),
-        "do not move them under `approval_identity`".to_owned(),
+        "<consensus-result>APPROVED</consensus-result>".to_owned(),
+        "<consensus-result>CHANGES_REQUIRED</consensus-result>".to_owned(),
+        "write concrete free-form Markdown feedback".to_owned(),
+        "Do not return JSON or repeat run, revision, hash, or SHA fields".to_owned(),
+        "\"plan_hash\": \"0000000000000000000000000000000000000000000000000000000000000000\""
+            .to_owned(),
+        "binds the verdict to the exact current plan automatically".to_owned(),
     ] {
         assert!(prompt.contains(&required), "missing {required:?}");
     }
 }
 
 #[test]
-fn result_verdict_prompt_declares_direct_approval_identity_fields() {
+fn result_verdict_prompt_uses_a_minimal_marker_and_code_side_identity() {
     let state = result_state();
     let payload = json!({
         "primary_contract": {"goal": "preserve primary API"},
@@ -195,12 +194,12 @@ fn result_verdict_prompt_declares_direct_approval_identity_fields() {
     .unwrap();
 
     for required in [
-        "If returning APPROVED_RESULT".to_owned(),
-        format!("\"approved_primary_sha\": \"{PRIMARY_SHA}\""),
-        format!("\"approved_reviewer_sha\": \"{REVIEWER_SHA}\""),
-        "\"approved_integration_branch\": \"consensus/test-run\"".to_owned(),
-        format!("\"approved_integration_sha\": \"{INTEGRATION_SHA}\""),
-        "do not move them under `approval_identity`".to_owned(),
+        "<consensus-result>APPROVED</consensus-result>".to_owned(),
+        "<consensus-result>CHANGES_REQUIRED</consensus-result>".to_owned(),
+        "Do not return JSON or repeat the integration branch or SHA".to_owned(),
+        "binds the verdict to the exact current branch and SHA automatically".to_owned(),
+        "\"integration_branch\": \"consensus/test-run\"".to_owned(),
+        format!("\"integration_sha\": \"{INTEGRATION_SHA}\""),
     ] {
         assert!(prompt.contains(&required), "missing {required:?}");
     }

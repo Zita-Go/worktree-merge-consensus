@@ -2,6 +2,7 @@
 
 pub mod git;
 pub mod hash;
+pub mod participant;
 pub mod prompts;
 pub mod protocol;
 pub mod state;

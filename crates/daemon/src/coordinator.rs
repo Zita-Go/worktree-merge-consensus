@@ -16,8 +16,9 @@ use consensus_core::{
         verify_frozen_sources, verify_integration_result, verify_reported_changed_files,
         verify_same_repository,
     },
+    participant::{ParticipantResponse, ParticipantSignal, parse_participant_response},
     prompts::{PromptError, build_turn_prompt},
-    protocol::{MessageType, ProtocolMessage, validate_message},
+    protocol::{Envelope, MessagePhase, MessageType, ProtocolMessage, validate_message},
     state::{
         NextAction, Phase, Role, RunDiagnostic, RunFacts, RunState, RunStatus, StateError,
         TestEvidence,
@@ -40,7 +41,7 @@ const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(1_800);
 const TURN_INTERRUPT_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct CompletedTurn {
-    response: Value,
+    response: String,
     turn: Value,
 }
 
@@ -167,6 +168,17 @@ pub trait RepositorySafety: Send + Sync {
         sha: &str,
         changed_files: &[PathBuf],
     ) -> Result<(), SafetyError>;
+
+    fn authoritative_integration_result(
+        &self,
+        _facts: &RunFacts,
+        _target_branch: &str,
+    ) -> Result<(String, Vec<PathBuf>), SafetyError> {
+        Err(SafetyError::new(
+            "INTEGRATION_INSPECTION_UNAVAILABLE",
+            "repository safety provider cannot derive an authoritative integration result",
+        ))
+    }
 
     fn prepare_verification_workspace(
         &self,
@@ -343,6 +355,22 @@ impl RepositorySafety for GitRepositorySafety {
             .inspect_integration(&facts.primary_worktree, facts)?;
         verify_reported_changed_files(&integration, changed_files)?;
         verify_integration_result(facts, &integration, branch, sha).map_err(Into::into)
+    }
+
+    fn authoritative_integration_result(
+        &self,
+        facts: &RunFacts,
+        target_branch: &str,
+    ) -> Result<(String, Vec<PathBuf>), SafetyError> {
+        self.inspect_frozen_worktree(&facts.primary_worktree, "primary")?;
+        let reviewer = self.inspect_frozen_worktree(&facts.reviewer_worktree, "reviewer")?;
+        verify_reviewer_frozen(facts, &reviewer)?;
+        let integration = self
+            .inspector
+            .inspect_integration(&facts.primary_worktree, facts)?;
+        let sha = integration.worktree.head_sha.clone();
+        verify_integration_result(facts, &integration, target_branch, &sha)?;
+        Ok((sha, integration.changed_files))
     }
 
     fn prepare_verification_workspace(
@@ -672,13 +700,20 @@ where
         let mut state = self.required_run(run_id)?;
         let retry_terminal_turn = state.reason_code.as_deref() == Some("COMMUNICATION_FAILURE");
         let retry_invalid_test_action = invalid_test_retry_action(&state)?;
-        let retry_invalid_response_action = invalid_response_retry_action(&state)?;
+        let retry_integration_invalid_response_action =
+            integration_invalid_response_retry_action(&state)?;
+        let retry_invalid_response_action = if retry_integration_invalid_response_action.is_none() {
+            invalid_response_retry_action(&state)?
+        } else {
+            None
+        };
         let retry_execution_tool_action = execution_tool_unavailable_retry_action(&state)?;
         let retry_forbidden_operation_action = forbidden_operation_retry_action(&state)?;
         let retry_completed_response_action =
             retry_invalid_test_action.or(retry_invalid_response_action);
         let effective_action = retry_execution_tool_action
             .or(retry_forbidden_operation_action)
+            .or(retry_integration_invalid_response_action)
             .or(retry_completed_response_action)
             .unwrap_or(state.next_action);
         if effective_action == NextAction::RequestPrimaryIntegration {
@@ -768,6 +803,29 @@ where
                     &blocked_state,
                     &state,
                     &retry.accepted,
+                    &retry.observed_status,
+                )?;
+            return Ok(state);
+        }
+        if let Some(action) = retry_integration_invalid_response_action {
+            let retry = self
+                .inspect_completed_integration_invalid_response_retry(&state, action)
+                .await?;
+            let blocked_state = state.clone();
+            let restored_action = state.retry_blocked_integration_invalid_response()?;
+            if restored_action != action {
+                return Err(CoordinatorError::operational(
+                    "INCOMPATIBLE_STATE",
+                    "restored integration invalid-response action does not match its diagnostic",
+                ));
+            }
+            self.store
+                .reactivate_blocked_run_with_completed_turn_retry(
+                    &blocked_state,
+                    &state,
+                    &retry.message_hash,
+                    &retry.thread_id,
+                    &retry.turn_id,
                     &retry.observed_status,
                 )?;
             return Ok(state);
@@ -1390,6 +1448,109 @@ where
         }))
     }
 
+    async fn inspect_completed_integration_invalid_response_retry(
+        &self,
+        state: &RunState,
+        action: NextAction,
+    ) -> Result<RetryableCompletedTurn, CoordinatorError> {
+        if action != NextAction::RequestPrimaryIntegration
+            || state.integration_branch.is_some()
+            || state.integration_sha.is_some()
+            || state.current_integration_payload.is_some()
+            || state.verification_worktree.is_some()
+            || !state.test_evidence.is_empty()
+        {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                "integration invalid-response recovery requires an unaccepted first result",
+            ));
+        }
+        let run_id = state.facts.run_id.to_string();
+        let pending = self.store.pending_send(&run_id)?.ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "integration invalid response has no persisted pending turn",
+            )
+        })?;
+        let (Some(thread_id), Some(turn_id)) =
+            (pending.thread_id.as_deref(), pending.turn_id.as_deref())
+        else {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "integration invalid response has no exact persisted turn identity",
+            ));
+        };
+        if pending.role != "PRIMARY"
+            || pending.phase != "INTEGRATE"
+            || pending.round != state.round
+            || thread_id != state.facts.primary_thread_id
+        {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "integration invalid-response turn does not match the bound primary request",
+            ));
+        }
+
+        let detail = self.read_thread_with_retry(thread_id).await?;
+        self.verify_thread_identity(state, Role::Primary, &detail)?;
+        let turn = find_turn(&detail, turn_id).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "integration invalid-response turn is absent from canonical task history",
+            )
+        })?;
+        let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "integration invalid-response turn has no canonical status",
+            )
+        })?;
+        if status != "completed" || !turn_contains_request_hash(turn, &pending.message_hash) {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                "integration invalid-response recovery requires the exact completed request turn",
+            ));
+        }
+        let successful_patch_hash = self
+            .store
+            .successful_patch_hash(&run_id, &pending.message_hash)?
+            .ok_or_else(|| {
+                CoordinatorError::operational(
+                    "MODEL_RESPONSE_RETRY_UNSAFE",
+                    "integration invalid-response turn has no successful controlled patch record",
+                )
+            })?;
+        if let Some(blocker) = recoverable_integration_turn_blocker(
+            state,
+            turn,
+            &pending.message_hash,
+            &successful_patch_hash,
+        ) {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                blocker,
+            ));
+        }
+        let target = state.target_integration_branch.as_deref().ok_or_else(|| {
+            CoordinatorError::operational(
+                "INVALID_STATE",
+                "integration invalid-response recovery has no authorized target branch",
+            )
+        })?;
+        let (sha, changed_files) = self
+            .safety
+            .authoritative_integration_result(&state.facts, target)?;
+        self.safety
+            .verify_integration(&state.facts, target, &sha, &changed_files)?;
+
+        Ok(RetryableCompletedTurn {
+            message_hash: pending.message_hash,
+            thread_id: thread_id.to_owned(),
+            turn_id: turn_id.to_owned(),
+            observed_status: status.to_owned(),
+        })
+    }
+
     async fn inspect_completed_read_only_model_response_retry(
         &self,
         state: &RunState,
@@ -1683,7 +1844,17 @@ where
             "integration_sha": state.integration_sha,
             "payload": payload,
         }));
+        let run_id = state.facts.run_id.to_string();
         let mut prompt = build_turn_prompt(role, action, state, &payload)?;
+        if action == NextAction::RequestPrimaryIntegration
+            && self
+                .store
+                .successful_patch_recorded(&run_id, &request_hash)?
+        {
+            prompt.push_str(
+                "\nCoordinator recovery override:\n- The exact request-bound controlled patch and final commit already succeeded in an archived attempt.\n- Do not call consensus_apply_patch and do not edit, stage, commit, create, or merge anything.\n- Use only read-only Git queries in the authorized primary worktree to inspect the existing clean target branch.\n- Return `<consensus-result>INTEGRATION_READY</consensus-result>` plus optional free-form Markdown. The coordinator derives branch, SHA, and changed files directly from Git.\n",
+            );
+        }
         prompt.push_str("\nCoordinator delivery identity for crash recovery:\n```json\n");
         prompt.push_str(
             &serde_json::to_string(&json!({"request_hash": request_hash})).map_err(|error| {
@@ -1692,7 +1863,6 @@ where
         );
         prompt.push_str("\n```\n");
 
-        let run_id = state.facts.run_id.to_string();
         let mut pending = self.store.pending_send(&run_id)?;
         if let Some(existing) = &pending {
             if existing.message_hash != request_hash {
@@ -1751,9 +1921,7 @@ where
         let completed = self
             .wait_for_turn_response(state, &thread_id, &turn_id)
             .await?;
-        let mut message = validate_message(completed.response).map_err(|error| {
-            CoordinatorError::operational("INVALID_RESPONSE", error.to_string())
-        })?;
+        let mut message = self.normalize_model_response(state, action, &completed.response)?;
         self.verify_message_evidence(state, action, &mut message, &completed.turn, &turn_id)?;
         let response = serde_json::to_value(&message).map_err(|error| {
             CoordinatorError::operational("SERIALIZATION_FAILURE", error.to_string())
@@ -1899,6 +2067,242 @@ where
         Ok(())
     }
 
+    fn normalize_model_response(
+        &self,
+        state: &RunState,
+        action: NextAction,
+        response_text: &str,
+    ) -> Result<ProtocolMessage, CoordinatorError> {
+        let trimmed = response_text.trim();
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+            if value.get("protocol").and_then(Value::as_str) == Some("worktree-merge-consensus/v1")
+            {
+                return validate_message(value).map_err(|error| {
+                    CoordinatorError::operational("INVALID_RESPONSE", error.to_string())
+                });
+            }
+        }
+
+        let response = parse_participant_response(trimmed, allowed_participant_signals(action))
+            .map_err(|error| {
+                CoordinatorError::operational("INVALID_RESPONSE", error.to_string())
+            })?;
+        self.normalized_marker_message(state, action, response)
+    }
+
+    fn normalized_marker_message(
+        &self,
+        state: &RunState,
+        action: NextAction,
+        response: ParticipantResponse,
+    ) -> Result<ProtocolMessage, CoordinatorError> {
+        if response.signal == ParticipantSignal::Blocked {
+            return Ok(ProtocolMessage {
+                envelope: authoritative_envelope(
+                    state,
+                    MessageType::Blocked,
+                    Some(
+                        response
+                            .blocked_reason
+                            .unwrap_or_else(|| "PARTICIPANT_BLOCKED".to_owned()),
+                    ),
+                    state.integration_branch.clone(),
+                    state.integration_sha.clone(),
+                ),
+                payload: json!({
+                    "format": "markdown",
+                    "feedback": response.body,
+                }),
+            });
+        }
+
+        let message = match (action, response.signal) {
+            (
+                NextAction::RequestPrimaryContract | NextAction::RequestReviewerContract,
+                ParticipantSignal::ContractReady,
+            ) => {
+                let contract = parse_contract_json(&response.body)?;
+                let role = if action == NextAction::RequestPrimaryContract {
+                    "PRIMARY"
+                } else {
+                    "REVIEWER"
+                };
+                ProtocolMessage {
+                    envelope: authoritative_envelope(
+                        state,
+                        MessageType::ContractReady,
+                        None,
+                        None,
+                        None,
+                    ),
+                    payload: json!({"role": role, "contract": contract}),
+                }
+            }
+            (NextAction::RequestPrimaryPlan, ParticipantSignal::PlanReady) => {
+                require_free_markdown(&response.body, "PLAN_READY requires a complete plan")?;
+                let primary_contract = state.primary_contract.clone().ok_or_else(|| {
+                    CoordinatorError::operational(
+                        "HISTORY_UNAVAILABLE",
+                        "primary contract is unavailable while normalizing the plan",
+                    )
+                })?;
+                let reviewer_contract = state.reviewer_contract.clone().ok_or_else(|| {
+                    CoordinatorError::operational(
+                        "HISTORY_UNAVAILABLE",
+                        "reviewer contract is unavailable while normalizing the plan",
+                    )
+                })?;
+                ProtocolMessage {
+                    envelope: authoritative_envelope(
+                        state,
+                        MessageType::PlanReady,
+                        None,
+                        None,
+                        None,
+                    ),
+                    payload: json!({
+                        "primary_contract": primary_contract,
+                        "reviewer_contract": reviewer_contract,
+                        "plan": {
+                            "format": "markdown",
+                            "content": response.body,
+                        },
+                        "coverage_matrix": [],
+                        "test_commands": state.required_test_commands,
+                    }),
+                }
+            }
+            (NextAction::RequestReviewerPlanVerdict, ParticipantSignal::Approved) => {
+                let plan_hash = state
+                    .current_plan_payload
+                    .as_ref()
+                    .map(canonical_json_hash)
+                    .ok_or_else(|| {
+                        CoordinatorError::operational(
+                            "HISTORY_UNAVAILABLE",
+                            "current plan hash is unavailable for approval",
+                        )
+                    })?;
+                ProtocolMessage {
+                    envelope: authoritative_envelope(
+                        state,
+                        MessageType::ApprovedPlan,
+                        None,
+                        None,
+                        None,
+                    ),
+                    payload: json!({
+                        "approved_plan_revision": state.plan_revision,
+                        "approved_primary_sha": state.facts.primary_sha,
+                        "approved_reviewer_sha": state.facts.reviewer_sha,
+                        "approved_plan_hash": plan_hash,
+                        "uncovered_items": [],
+                        "review_markdown": response.body,
+                    }),
+                }
+            }
+            (NextAction::RequestReviewerPlanVerdict, ParticipantSignal::ChangesRequired) => {
+                changes_required_message(state, response.body, false)?
+            }
+            (NextAction::RequestPrimaryIntegration, ParticipantSignal::IntegrationReady) => {
+                let branch = state.target_integration_branch.clone().ok_or_else(|| {
+                    CoordinatorError::operational(
+                        "INVALID_STATE",
+                        "authorized integration branch is unavailable",
+                    )
+                })?;
+                let (sha, changed_files) = self
+                    .safety
+                    .authoritative_integration_result(&state.facts, &branch)?;
+                ProtocolMessage {
+                    envelope: authoritative_envelope(
+                        state,
+                        MessageType::IntegrationReady,
+                        None,
+                        Some(branch),
+                        Some(sha),
+                    ),
+                    payload: json!({
+                        "changed_files": changed_files,
+                        "integration_evidence": {
+                            "format": "markdown",
+                            "summary": response.body,
+                        },
+                    }),
+                }
+            }
+            (NextAction::RequestPrimaryVerification, ParticipantSignal::VerificationReady) => {
+                let mut payload = current_integration_payload(state)?.clone();
+                payload
+                    .as_object_mut()
+                    .ok_or_else(|| {
+                        CoordinatorError::operational(
+                            "INVALID_STATE",
+                            "canonical integration payload is not an object",
+                        )
+                    })?
+                    .insert("verification_summary".into(), json!(response.body));
+                ProtocolMessage {
+                    envelope: authoritative_envelope(
+                        state,
+                        MessageType::IntegrationReady,
+                        None,
+                        state.integration_branch.clone(),
+                        state.integration_sha.clone(),
+                    ),
+                    payload,
+                }
+            }
+            (NextAction::RequestReviewerResultVerdict, ParticipantSignal::Approved) => {
+                let branch = state.integration_branch.clone().ok_or_else(|| {
+                    CoordinatorError::operational(
+                        "INVALID_STATE",
+                        "integration branch is unavailable for result approval",
+                    )
+                })?;
+                let sha = state.integration_sha.clone().ok_or_else(|| {
+                    CoordinatorError::operational(
+                        "INVALID_STATE",
+                        "integration SHA is unavailable for result approval",
+                    )
+                })?;
+                ProtocolMessage {
+                    envelope: authoritative_envelope(
+                        state,
+                        MessageType::ApprovedResult,
+                        None,
+                        Some(branch.clone()),
+                        Some(sha.clone()),
+                    ),
+                    payload: json!({
+                        "approved_plan_revision": state.plan_revision,
+                        "approved_primary_sha": state.facts.primary_sha,
+                        "approved_reviewer_sha": state.facts.reviewer_sha,
+                        "approved_integration_branch": branch,
+                        "approved_integration_sha": sha,
+                        "uncovered_items": [],
+                        "review_markdown": response.body,
+                    }),
+                }
+            }
+            (NextAction::RequestReviewerResultVerdict, ParticipantSignal::ChangesRequired) => {
+                changes_required_message(state, response.body, true)?
+            }
+            _ => {
+                return Err(CoordinatorError::operational(
+                    "INVALID_RESPONSE",
+                    "participant result marker does not match the pending action",
+                ));
+            }
+        };
+
+        let value = serde_json::to_value(message).map_err(|error| {
+            CoordinatorError::operational("SERIALIZATION_FAILURE", error.to_string())
+        })?;
+        validate_message(value)
+            .map_err(|error| CoordinatorError::operational("INVALID_RESPONSE", error.to_string()))
+    }
+
     fn verify_message_evidence(
         &self,
         state: &RunState,
@@ -1937,11 +2341,24 @@ where
                             "integration response has no exact pending request identity",
                         )
                     })?;
-                verify_integration_execution_items(state, turn, &pending.message_hash)?;
+                let run_id = state.facts.run_id.to_string();
+                let successful_patch_hash = self
+                    .store
+                    .successful_patch_hash(&run_id, &pending.message_hash)?;
+                let has_archived_attempt = !self
+                    .store
+                    .archived_turn_ids(&run_id, &pending.message_hash)?
+                    .is_empty();
+                verify_integration_execution_items(
+                    state,
+                    turn,
+                    &pending.message_hash,
+                    successful_patch_hash.as_deref(),
+                    has_archived_attempt,
+                )?;
             }
             NextAction::RequestPrimaryVerification => {
                 let authoritative = authoritative_test_evidence(state, turn, turn_id)?;
-                verify_reported_test_evidence(&authoritative, &message.payload)?;
                 let mut canonical = current_integration_payload(state)?.clone();
                 canonical
                     .as_object_mut()
@@ -2060,7 +2477,7 @@ where
                 match turn.get("status").and_then(Value::as_str) {
                     Some("completed") => {
                         return Ok(CompletedTurn {
-                            response: final_agent_json(turn)?,
+                            response: final_agent_text(turn)?.to_owned(),
                             turn: turn.clone(),
                         });
                     }
@@ -2250,6 +2667,132 @@ where
     }
 }
 
+fn allowed_participant_signals(action: NextAction) -> &'static [ParticipantSignal] {
+    match action {
+        NextAction::RequestPrimaryContract | NextAction::RequestReviewerContract => {
+            &[ParticipantSignal::ContractReady, ParticipantSignal::Blocked]
+        }
+        NextAction::RequestPrimaryPlan => {
+            &[ParticipantSignal::PlanReady, ParticipantSignal::Blocked]
+        }
+        NextAction::RequestReviewerPlanVerdict | NextAction::RequestReviewerResultVerdict => &[
+            ParticipantSignal::Approved,
+            ParticipantSignal::ChangesRequired,
+            ParticipantSignal::Blocked,
+        ],
+        NextAction::RequestPrimaryIntegration => &[
+            ParticipantSignal::IntegrationReady,
+            ParticipantSignal::Blocked,
+        ],
+        NextAction::RequestPrimaryVerification => &[
+            ParticipantSignal::VerificationReady,
+            ParticipantSignal::Blocked,
+        ],
+        NextAction::RevalidateAndAccept | NextAction::WaitForUser | NextAction::Stop => &[],
+    }
+}
+
+fn authoritative_envelope(
+    state: &RunState,
+    message_type: MessageType,
+    reason_code: Option<String>,
+    integration_branch: Option<String>,
+    integration_sha: Option<String>,
+) -> Envelope {
+    Envelope {
+        protocol: "worktree-merge-consensus/v1".to_owned(),
+        run_id: state.facts.run_id,
+        message_type,
+        phase: MessagePhase::from(state.phase),
+        round: state.round,
+        primary_sha: state.facts.primary_sha.clone(),
+        reviewer_sha: state.facts.reviewer_sha.clone(),
+        plan_revision: state.plan_revision,
+        integration_branch,
+        integration_sha,
+        reason_code,
+    }
+}
+
+fn parse_contract_json(body: &str) -> Result<Value, CoordinatorError> {
+    let trimmed = body.trim();
+    let candidate = if let Some(inner) = trimmed
+        .strip_prefix("```json")
+        .and_then(|value| value.strip_suffix("```"))
+    {
+        inner.trim()
+    } else if let Some(inner) = trimmed
+        .strip_prefix("```")
+        .and_then(|value| value.strip_suffix("```"))
+    {
+        inner.trim()
+    } else {
+        trimmed
+    };
+    let contract = serde_json::from_str::<Value>(candidate).map_err(|error| {
+        CoordinatorError::operational(
+            "INVALID_RESPONSE",
+            format!("CONTRACT_READY body is not one JSON object: {error}"),
+        )
+    })?;
+    if !contract.is_object() {
+        return Err(CoordinatorError::operational(
+            "INVALID_RESPONSE",
+            "CONTRACT_READY body must be a JSON object",
+        ));
+    }
+    Ok(contract)
+}
+
+fn require_free_markdown(body: &str, detail: &str) -> Result<(), CoordinatorError> {
+    if body.trim().is_empty() {
+        return Err(CoordinatorError::operational("INVALID_RESPONSE", detail));
+    }
+    Ok(())
+}
+
+fn changes_required_message(
+    state: &RunState,
+    feedback: String,
+    result_review: bool,
+) -> Result<ProtocolMessage, CoordinatorError> {
+    require_free_markdown(
+        &feedback,
+        "CHANGES_REQUIRED requires nonempty free-form feedback",
+    )?;
+    let (branch, sha) = if result_review {
+        (
+            Some(state.integration_branch.clone().ok_or_else(|| {
+                CoordinatorError::operational(
+                    "INVALID_STATE",
+                    "result feedback has no current integration branch",
+                )
+            })?),
+            Some(state.integration_sha.clone().ok_or_else(|| {
+                CoordinatorError::operational(
+                    "INVALID_STATE",
+                    "result feedback has no current integration SHA",
+                )
+            })?),
+        )
+    } else {
+        (None, None)
+    };
+    Ok(ProtocolMessage {
+        envelope: authoritative_envelope(
+            state,
+            MessageType::ChangesRequired,
+            Some("REVIEW_CHANGES_REQUIRED".to_owned()),
+            branch,
+            sha,
+        ),
+        payload: json!({
+            "format": "markdown",
+            "feedback": feedback,
+        }),
+    })
+}
+
 fn build_action_payload(state: &RunState, action: NextAction) -> Result<Value, CoordinatorError> {
     let primary_contract = || {
         state.primary_contract.clone().ok_or_else(|| {
@@ -2364,57 +2907,6 @@ fn current_integration_payload(state: &RunState) -> Result<&Value, CoordinatorEr
     })
 }
 
-fn verify_reported_test_evidence(
-    authoritative: &[TestEvidence],
-    payload: &Value,
-) -> Result<(), CoordinatorError> {
-    let evidence = payload
-        .get("test_evidence")
-        .and_then(Value::as_array)
-        .filter(|evidence| !evidence.is_empty())
-        .ok_or_else(|| {
-            CoordinatorError::operational(
-                "TEST_FAILURE",
-                "verification response requires nonempty test_evidence",
-            )
-        })?;
-    if evidence.len() != authoritative.len() {
-        return Err(CoordinatorError::operational(
-            "TEST_FAILURE",
-            "reported test evidence count does not match commandExecution items",
-        ));
-    }
-    for item in evidence {
-        let command = item
-            .get("command")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|command| !command.is_empty());
-        if command.is_none() || item.get("exit_code").and_then(Value::as_i64) != Some(0) {
-            return Err(CoordinatorError::operational(
-                "TEST_FAILURE",
-                "each test evidence entry requires a nonempty command and exact exit_code 0",
-            ));
-        }
-    }
-    for actual in authoritative {
-        let passed = evidence.iter().any(|item| {
-            item.get("command").and_then(Value::as_str) == Some(actual.command.as_str())
-                && item.get("exit_code").and_then(Value::as_i64) == Some(actual.exit_code)
-        });
-        if !passed {
-            return Err(CoordinatorError::operational(
-                "TEST_FAILURE",
-                format!(
-                    "reported test evidence does not match commandExecution: {}",
-                    actual.command
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn command_execution_items(turn: &Value) -> Result<Vec<&Value>, CoordinatorError> {
     let items = turn.get("items").and_then(Value::as_array).ok_or_else(|| {
         CoordinatorError::operational(
@@ -2432,8 +2924,72 @@ fn verify_integration_execution_items(
     state: &RunState,
     turn: &Value,
     request_hash: &str,
+    successful_patch_hash: Option<&str>,
+    has_archived_attempt: bool,
 ) -> Result<(), CoordinatorError> {
-    for item in command_execution_items(turn)? {
+    let command_items = command_execution_items(turn)?;
+    let patch_items = turn
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("mcpToolCall"))
+        .collect::<Vec<_>>();
+
+    if let Some(successful_patch_hash) = successful_patch_hash {
+        if !patch_items.is_empty() {
+            if let Some(blocker) = recoverable_integration_turn_blocker(
+                state,
+                turn,
+                request_hash,
+                successful_patch_hash,
+            ) {
+                return Err(CoordinatorError::operational(
+                    "FORBIDDEN_OPERATION",
+                    blocker,
+                ));
+            }
+            return Ok(());
+        }
+        if !has_archived_attempt {
+            return Err(CoordinatorError::operational(
+                "FORBIDDEN_OPERATION",
+                "a patch-success confirmation turn has no archived originating attempt",
+            ));
+        }
+        for item in command_items {
+            let command = item.get("command").and_then(Value::as_str).ok_or_else(|| {
+                CoordinatorError::operational(
+                    "INVALID_RESPONSE",
+                    "commandExecution item omits command",
+                )
+            })?;
+            let cwd = item.get("cwd").and_then(Value::as_str).ok_or_else(|| {
+                CoordinatorError::operational("INVALID_RESPONSE", "commandExecution item omits cwd")
+            })?;
+            if item.get("status").and_then(Value::as_str) != Some("completed")
+                || item.get("exitCode").and_then(Value::as_i64) != Some(0)
+                || !is_retry_safe_read_only_integration_command(state, cwd, command)
+            {
+                return Err(CoordinatorError::operational(
+                    "FORBIDDEN_OPERATION",
+                    format!(
+                        "patch-success confirmation executed a non-read-only command: {command}"
+                    ),
+                ));
+            }
+        }
+        return Ok(());
+    }
+
+    if !patch_items.is_empty() {
+        return Err(CoordinatorError::operational(
+            "FORBIDDEN_OPERATION",
+            "integration turn contains a controlled patch call without a SQLite success record",
+        ));
+    }
+
+    for item in command_items {
         let command = item.get("command").and_then(Value::as_str).ok_or_else(|| {
             CoordinatorError::operational("INVALID_RESPONSE", "commandExecution item omits command")
         })?;
@@ -2451,23 +3007,10 @@ fn verify_integration_execution_items(
             ));
         }
     }
-    for item in turn
-        .get("items")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|item| item.get("type").and_then(Value::as_str) == Some("mcpToolCall"))
-    {
-        if let Some(blocker) = integration_patch_mcp_blocker(state, item, request_hash) {
-            return Err(CoordinatorError::operational(
-                "FORBIDDEN_OPERATION",
-                blocker,
-            ));
-        }
-    }
     Ok(())
 }
 
+#[cfg(test)]
 fn integration_patch_mcp_blocker(
     state: &RunState,
     item: &Value,
@@ -2609,6 +3152,141 @@ fn pending_controlled_patch_approval_blocker(
     }
     if patch_calls != 1 {
         return Some("controlled patch approval retry requires exactly one MCP call".into());
+    }
+    None
+}
+
+fn recoverable_integration_turn_blocker(
+    state: &RunState,
+    turn: &Value,
+    request_hash: &str,
+    successful_patch_hash: &str,
+) -> Option<String> {
+    let Some(items) = turn.get("items").and_then(Value::as_array) else {
+        return Some("canonical items are unavailable".into());
+    };
+    if items.is_empty() {
+        return Some("canonical items are empty".into());
+    }
+
+    let mut completed_patch_calls = 0usize;
+    let mut completed_patch_seen = false;
+    let mut final_agent_seen = false;
+    for item in items {
+        let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+            return Some("canonical item has no type".into());
+        };
+        match item_type {
+            "userMessage" | "reasoning" => {}
+            "agentMessage" => final_agent_seen = true,
+            "contextCompaction" => {
+                if let Some(blocker) = context_compaction_retry_blocker(item) {
+                    return Some(blocker);
+                }
+            }
+            "commandExecution" => {
+                if final_agent_seen {
+                    return Some(
+                        "integration command appears after the final agent response".into(),
+                    );
+                }
+                if item.get("status").and_then(Value::as_str) != Some("completed")
+                    || item.get("exitCode").and_then(Value::as_i64) != Some(0)
+                {
+                    return Some(
+                        "integration command is not canonically completed with exit code zero"
+                            .into(),
+                    );
+                }
+                let Some(command) = item.get("command").and_then(Value::as_str) else {
+                    return Some("integration command omits its canonical command".into());
+                };
+                let Some(cwd) = item.get("cwd").and_then(Value::as_str) else {
+                    return Some("integration command omits its canonical cwd".into());
+                };
+                if item
+                    .get("source")
+                    .is_some_and(|source| source.as_str() != Some("agent"))
+                    || decide_command_approval(
+                        state,
+                        &json!({
+                            "cwd": cwd,
+                            "command": command,
+                            "availableDecisions": ["accept"]
+                        }),
+                    ) != ApprovalDecision::Accept
+                {
+                    return Some(
+                        "integration command is outside the frozen execution policy".into(),
+                    );
+                }
+            }
+            "mcpToolCall" => {
+                if final_agent_seen {
+                    return Some(
+                        "controlled patch call appears after the final agent response".into(),
+                    );
+                }
+                if let Some(blocker) =
+                    controlled_patch_mcp_identity_blocker(state, item, request_hash)
+                {
+                    return Some(blocker);
+                }
+                let patch = item
+                    .get("arguments")
+                    .and_then(|arguments| arguments.get("patch"))
+                    .and_then(Value::as_str)
+                    .expect("controlled patch identity validation requires a patch string");
+                let patch_hash = canonical_json_hash(&json!({"patch": patch}));
+                match item.get("status").and_then(Value::as_str) {
+                    Some("failed") if !completed_patch_seen => {
+                        if patch_hash == successful_patch_hash {
+                            return Some(
+                                "failed patch preflight has the recorded successful patch hash"
+                                    .into(),
+                            );
+                        }
+                    }
+                    Some("completed") if !completed_patch_seen => {
+                        if patch_hash != successful_patch_hash {
+                            return Some(
+                                "completed controlled patch does not match the SQLite success record"
+                                    .into(),
+                            );
+                        }
+                        completed_patch_seen = true;
+                        completed_patch_calls += 1;
+                    }
+                    Some("completed") => {
+                        return Some(
+                            "integration turn contains more than one completed patch".into(),
+                        );
+                    }
+                    Some("failed") => {
+                        return Some(
+                            "failed patch preflight appears after the successful patch".into(),
+                        );
+                    }
+                    Some(status) => {
+                        return Some(format!(
+                            "controlled patch MCP call has unexpected status {status}"
+                        ));
+                    }
+                    None => return Some("controlled patch MCP call omits status".into()),
+                }
+            }
+            _ => {
+                return Some(format!(
+                    "canonical item type {item_type} may have side effects"
+                ));
+            }
+        }
+    }
+    if completed_patch_calls != 1 {
+        return Some(
+            "integration invalid-response recovery requires exactly one recorded successful patch"
+                .into(),
+        );
     }
     None
 }
@@ -3020,6 +3698,60 @@ fn invalid_test_retry_action(state: &RunState) -> Result<Option<NextAction>, Coo
     Ok(Some(diagnostic.action))
 }
 
+fn integration_invalid_response_retry_action(
+    state: &RunState,
+) -> Result<Option<NextAction>, CoordinatorError> {
+    if state.reason_code.as_deref() != Some("INVALID_RESPONSE") {
+        return Ok(None);
+    }
+    if state.status != RunStatus::Blocked
+        || state.next_action != NextAction::Stop
+        || state.phase != Phase::Blocked
+    {
+        return Err(CoordinatorError::operational(
+            "INCOMPATIBLE_STATE",
+            "invalid-response reason is attached to inconsistent terminal metadata",
+        ));
+    }
+    let diagnostic = state.last_error.as_ref().ok_or_else(|| {
+        CoordinatorError::operational(
+            "INCOMPATIBLE_STATE",
+            "invalid-response state has no originating diagnostic",
+        )
+    })?;
+    if diagnostic.code != "INVALID_RESPONSE"
+        || diagnostic.action != NextAction::RequestPrimaryIntegration
+        || diagnostic.role != Some(Role::Primary)
+        || diagnostic.thread_id.as_deref() != Some(state.facts.primary_thread_id.as_str())
+    {
+        return Ok(None);
+    }
+    if !diagnostic
+        .detail
+        .contains("message requires an integration_branch")
+        && !diagnostic
+            .detail
+            .contains("message requires an integration_sha")
+    {
+        return Err(CoordinatorError::operational(
+            "MODEL_RESPONSE_RETRY_UNSAFE",
+            "integration invalid-response recovery is limited to omitted top-level result identity",
+        ));
+    }
+    if state.integration_branch.is_some()
+        || state.integration_sha.is_some()
+        || state.current_integration_payload.is_some()
+        || state.verification_worktree.is_some()
+        || !state.test_evidence.is_empty()
+    {
+        return Err(CoordinatorError::operational(
+            "MODEL_RESPONSE_RETRY_UNSAFE",
+            "integration invalid-response recovery cannot replace accepted result state",
+        ));
+    }
+    Ok(Some(NextAction::RequestPrimaryIntegration))
+}
+
 fn invalid_response_retry_action(state: &RunState) -> Result<Option<NextAction>, CoordinatorError> {
     if state.reason_code.as_deref() != Some("INVALID_RESPONSE") {
         return Ok(None);
@@ -3373,6 +4105,12 @@ fn thread_progress_fingerprint(detail: &ThreadDetail) -> String {
 }
 
 fn final_agent_json(turn: &Value) -> Result<Value, CoordinatorError> {
+    let text = final_agent_text(turn)?;
+    serde_json::from_str(text.trim())
+        .map_err(|error| CoordinatorError::operational("INVALID_RESPONSE", error.to_string()))
+}
+
+fn final_agent_text(turn: &Value) -> Result<&str, CoordinatorError> {
     let items = turn.get("items").and_then(Value::as_array).ok_or_else(|| {
         CoordinatorError::operational(
             "HISTORY_UNAVAILABLE",
@@ -3387,18 +4125,16 @@ fn final_agent_json(turn: &Value) -> Result<Value, CoordinatorError> {
         .iter()
         .rev()
         .find(|item| item.get("type").and_then(Value::as_str) == Some("agentMessage"));
-    let text = preferred
+    preferred
         .or(fallback)
         .and_then(|item| item.get("text"))
         .and_then(Value::as_str)
         .ok_or_else(|| {
             CoordinatorError::operational(
                 "INVALID_RESPONSE",
-                "completed turn has no final assistant JSON",
+                "completed turn has no final assistant response",
             )
-        })?;
-    serde_json::from_str(text.trim())
-        .map_err(|error| CoordinatorError::operational("INVALID_RESPONSE", error.to_string()))
+        })
 }
 
 fn user_action_event(event: &AppEvent, thread_id: &str, turn_id: &str) -> bool {
@@ -3665,6 +4401,53 @@ mod retry_safety_tests {
             integration_patch_mcp_blocker(&state, &call, request_hash)
                 .unwrap()
                 .contains("arguments")
+        );
+    }
+
+    #[test]
+    fn completed_integration_recovery_binds_the_exact_successful_patch_hash() {
+        let state = integration_state();
+        let request_hash = "request-hash";
+        let call = |id: &str, status: &str, patch: &str| {
+            json!({
+                "id": id,
+                "type": "mcpToolCall",
+                "pluginId": "worktree-merge-consensus@worktree-merge-consensus",
+                "server": "worktreeMergeConsensus",
+                "tool": "consensus_apply_patch",
+                "arguments": {
+                    "run_id": state.facts.run_id.to_string(),
+                    "request_hash": request_hash,
+                    "patch": patch,
+                },
+                "status": status,
+                "appContext": null,
+            })
+        };
+        let successful_patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n";
+        let turn = json!({
+            "items": [
+                {"id": "user", "type": "userMessage"},
+                call("failed", "failed", "*** Begin Patch\n*** End Patch"),
+                call("completed", "completed", successful_patch),
+                {"id": "agent", "type": "agentMessage", "text": "invalid legacy response"}
+            ]
+        });
+        let successful_hash = canonical_json_hash(&json!({"patch": successful_patch}));
+
+        assert_eq!(
+            recoverable_integration_turn_blocker(&state, &turn, request_hash, &successful_hash),
+            None
+        );
+        assert!(
+            recoverable_integration_turn_blocker(
+                &state,
+                &turn,
+                request_hash,
+                &canonical_json_hash(&json!({"patch": "different"}))
+            )
+            .unwrap()
+            .contains("SQLite success record")
         );
     }
 

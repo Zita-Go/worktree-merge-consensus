@@ -226,6 +226,74 @@ async fn task_cwd_is_metadata_and_bound_worktrees_drive_turns() {
 }
 
 #[tokio::test]
+async fn marker_v2_keeps_plan_and_review_prose_free_form() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(FakeAppServer::new(marker_replies()).with_marker_protocol());
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let accepted = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(accepted.status, RunStatus::Accepted);
+    assert_eq!(accepted.integration_sha.as_deref(), Some(INTEGRATION_SHA));
+    let plan = accepted.current_plan_payload.as_ref().unwrap();
+    assert_eq!(plan["plan"]["format"], "markdown");
+    assert!(
+        plan["plan"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Preserve both implementations")
+    );
+    let integration = accepted.current_integration_payload.as_ref().unwrap();
+    assert_eq!(integration["changed_files"], json!(["combined.txt"]));
+    assert_eq!(accepted.test_evidence.len(), 1);
+    assert!(app.prompts().iter().all(|prompt| {
+        prompt.contains("worktree-merge-consensus/v2")
+            && prompt.contains("Do not return the legacy v1 protocol envelope")
+    }));
+}
+
+#[tokio::test]
+async fn marker_v2_blocked_reason_is_bound_to_the_pending_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::new(vec![json!(
+            "<consensus-result>BLOCKED:SOURCE_BINDING_MISMATCH</consensus-result>\n\nThe frozen source does not match this task's implementation history."
+        )])
+        .with_marker_protocol(),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let blocked = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(blocked.status, RunStatus::Blocked);
+    assert_eq!(
+        blocked.reason_code.as_deref(),
+        Some("SOURCE_BINDING_MISMATCH")
+    );
+    assert_eq!(app.request_count(), 1);
+}
+
+#[tokio::test]
 async fn start_requires_the_exact_controlled_patch_approval_configuration() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -476,7 +544,104 @@ async fn invalid_plan_approval_revision_can_resume_the_same_blocked_run() {
         .filter(|prompt| prompt.contains("REQUEST_REVIEWER_PLAN_VERDICT"))
         .collect::<Vec<_>>();
     assert_eq!(verdict_prompts.len(), 2);
-    assert!(verdict_prompts[1].contains("payload.approved_plan_revision must equal"));
+    assert!(
+        verdict_prompts[1].contains("The coordinator binds every response to this exact task turn")
+    );
+    assert!(verdict_prompts[1].contains("<consensus-result>APPROVED</consensus-result>"));
+}
+
+#[tokio::test]
+async fn invalid_integration_json_after_one_successful_patch_resumes_with_a_marker_only_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let mut replies = conflict_free_replies();
+    replies[4] = message(
+        "INTEGRATION_READY",
+        "INTEGRATE",
+        1,
+        Some(1),
+        None,
+        None,
+        json!({
+            "request_hash": "filled-from-pending",
+            "approved_plan_revision": 1,
+            "approved_primary_sha": PRIMARY_SHA,
+            "approved_reviewer_sha": REVIEWER_SHA,
+            "resulting_integration_branch": "consensus/test-run",
+            "resulting_integration_sha": INTEGRATION_SHA,
+            "changed_files": [{"status": "M", "path": "combined.txt"}],
+            "uncovered_items": []
+        }),
+    );
+    replies.insert(
+        5,
+        json!(
+            "<consensus-result>INTEGRATION_READY</consensus-result>\n\nThe existing clean integration commit is ready."
+        ),
+    );
+    replies[6] = json!("<consensus-result>APPROVED</consensus-result>");
+    let app = Arc::new(FakeAppServer::new(replies).with_marker_protocol());
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let blocked = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(blocked.status, RunStatus::Blocked);
+    assert_eq!(blocked.reason_code.as_deref(), Some("INVALID_RESPONSE"));
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    let turn_id = pending.turn_id.clone().unwrap();
+    let failed_patch = "*** Begin Patch\n*** End Patch";
+    let successful_patch = "diff --git a/combined.txt b/combined.txt\n--- a/combined.txt\n+++ b/combined.txt\n@@ -1 +1 @@\n-old\n+new\n";
+    for (suffix, status, patch) in [
+        ("failed", "failed", failed_patch),
+        ("completed", "completed", successful_patch),
+    ] {
+        app.insert_turn_item_before_agent(
+            "primary",
+            &turn_id,
+            json!({
+                "id": format!("patch-{suffix}"),
+                "type": "mcpToolCall",
+                "pluginId": "worktree-merge-consensus@worktree-merge-consensus",
+                "server": "worktreeMergeConsensus",
+                "tool": "consensus_apply_patch",
+                "arguments": {
+                    "run_id": RUN_ID,
+                    "request_hash": pending.message_hash.clone(),
+                    "patch": patch,
+                },
+                "status": status,
+                "appContext": null,
+            }),
+        );
+    }
+    let successful_patch_hash = canonical_json_hash(&json!({"patch": successful_patch}));
+    store
+        .record_successful_patch(RUN_ID, &pending.message_hash, &successful_patch_hash)
+        .unwrap();
+
+    let accepted = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(accepted.status, RunStatus::Accepted);
+    assert_eq!(accepted.integration_sha.as_deref(), Some(INTEGRATION_SHA));
+    assert_eq!(app.request_count(), 8);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    let retry_prompt = app
+        .prompts()
+        .into_iter()
+        .rfind(|prompt| prompt.contains("REQUEST_PRIMARY_INTEGRATION"))
+        .unwrap();
+    assert!(retry_prompt.contains("Coordinator recovery override"));
+    assert!(retry_prompt.contains("Do not call consensus_apply_patch"));
+    assert!(retry_prompt.contains("INTEGRATION_READY</consensus-result>"));
 }
 
 #[tokio::test]
@@ -588,7 +753,7 @@ async fn failed_required_test_blocks_before_result_review() {
 }
 
 #[tokio::test]
-async fn empty_test_evidence_blocks_even_without_cli_test_flags() {
+async fn empty_self_report_is_ignored_when_authoritative_tests_pass() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
     let coordinator = Coordinator::new(
@@ -608,12 +773,12 @@ async fn empty_test_evidence_blocks_even_without_cli_test_flags() {
 
     let result = coordinator.drive(RUN_ID).await.unwrap();
 
-    assert_eq!(result.status, RunStatus::Blocked);
-    assert_eq!(result.reason_code.as_deref(), Some("TEST_FAILURE"));
+    assert_eq!(result.status, RunStatus::Accepted);
+    assert_eq!(result.accepted_result.unwrap().tests.len(), 1);
 }
 
 #[tokio::test]
-async fn legacy_passed_status_without_exact_exit_code_is_rejected() {
+async fn legacy_self_report_shape_is_ignored_when_authoritative_tests_pass() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
     let coordinator = Coordinator::new(
@@ -632,8 +797,8 @@ async fn legacy_passed_status_without_exact_exit_code_is_rejected() {
 
     let result = coordinator.drive(RUN_ID).await.unwrap();
 
-    assert_eq!(result.status, RunStatus::Blocked);
-    assert_eq!(result.reason_code.as_deref(), Some("TEST_FAILURE"));
+    assert_eq!(result.status, RunStatus::Accepted);
+    assert_eq!(result.accepted_result.unwrap().tests.len(), 1);
 }
 
 #[tokio::test]
@@ -2206,6 +2371,17 @@ impl RepositorySafety for RecordingSafety {
         Ok(())
     }
 
+    fn authoritative_integration_result(
+        &self,
+        _facts: &RunFacts,
+        _target_branch: &str,
+    ) -> Result<(String, Vec<PathBuf>), SafetyError> {
+        Ok((
+            INTEGRATION_SHA.to_owned(),
+            vec![PathBuf::from("combined.txt")],
+        ))
+    }
+
     fn prepare_verification_workspace(
         &self,
         _facts: &RunFacts,
@@ -2424,6 +2600,7 @@ struct FakeAppServer {
     deferred_replies: Mutex<HashMap<String, Value>>,
     events: Mutex<VecDeque<AppEvent>>,
     verification_behavior: VerificationBehavior,
+    marker_protocol: bool,
     start_error: Option<String>,
 }
 
@@ -2473,6 +2650,7 @@ impl FakeAppServer {
             deferred_replies: Mutex::new(HashMap::new()),
             events: Mutex::new(VecDeque::new()),
             verification_behavior: VerificationBehavior::Pass,
+            marker_protocol: false,
             start_error: None,
         }
     }
@@ -2485,6 +2663,11 @@ impl FakeAppServer {
 
     fn with_verification_behavior(mut self, behavior: VerificationBehavior) -> Self {
         self.verification_behavior = behavior;
+        self
+    }
+
+    fn with_marker_protocol(mut self) -> Self {
+        self.marker_protocol = true;
         self
     }
 
@@ -2566,6 +2749,22 @@ impl FakeAppServer {
             .find(|turn| turn.get("id").and_then(Value::as_str) == Some(turn_id))
             .unwrap();
         turn["items"].as_array_mut().unwrap().push(item);
+    }
+
+    fn insert_turn_item_before_agent(&self, thread_id: &str, turn_id: &str, item: Value) {
+        let mut threads = self.threads.lock().unwrap();
+        let turn = threads
+            .get_mut(thread_id)
+            .unwrap()
+            .iter_mut()
+            .find(|turn| turn.get("id").and_then(Value::as_str) == Some(turn_id))
+            .unwrap();
+        let items = turn["items"].as_array_mut().unwrap();
+        let index = items
+            .iter()
+            .position(|item| item.get("type").and_then(Value::as_str) == Some("agentMessage"))
+            .unwrap_or(items.len());
+        items.insert(index, item);
     }
 
     fn set_turn_status(&self, thread_id: &str, turn_id: &str, status: &str) {
@@ -2815,7 +3014,13 @@ impl AppServer for FakeAppServer {
         self.prompts.lock().unwrap().push(prompt.to_owned());
         self.policies.lock().unwrap().push(policy.clone());
         let mut reply = if action == "REQUEST_PRIMARY_VERIFICATION" {
-            verification_reply(prompt, self.verification_behavior)
+            if self.marker_protocol {
+                json!(
+                    "<consensus-result>VERIFICATION_READY</consensus-result>\n\nAll frozen commands completed."
+                )
+            } else {
+                verification_reply(prompt, self.verification_behavior)
+            }
         } else {
             self.replies.lock().unwrap().pop_front().unwrap()
         };
@@ -3005,11 +3210,18 @@ fn completed_turn(turn_id: &str, prompt: &str, reply: &Value) -> Value {
             {
                 "id": format!("assistant-{turn_id}"),
                 "type": "agentMessage",
-                "text": serde_json::to_string(reply).unwrap(),
+                "text": reply_text(reply),
                 "phase": "final_answer"
             }
         ]
     })
+}
+
+fn reply_text(reply: &Value) -> String {
+    reply
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| serde_json::to_string(reply).unwrap())
 }
 
 async fn wait_for_request(app: &FakeAppServer) {
@@ -3283,6 +3495,29 @@ fn conflict_free_replies() -> Vec<Value> {
                 "approved_integration_sha": INTEGRATION_SHA,
                 "uncovered_items": []
             }),
+        ),
+    ]
+}
+
+fn marker_replies() -> Vec<Value> {
+    vec![
+        json!(
+            "<consensus-result>CONTRACT_READY</consensus-result>\n{\"items\":[\"primary-feature\"],\"tests\":[\"cargo test --workspace\"]}"
+        ),
+        json!(
+            "<consensus-result>CONTRACT_READY</consensus-result>\n```json\n{\"items\":[\"reviewer-feature\"],\"tests\":[\"cargo test --workspace\"]}\n```"
+        ),
+        json!(
+            "<consensus-result>PLAN_READY</consensus-result>\n\n## Integration plan\n\nPreserve both implementations, resolve the shared parser deliberately, and run every frozen test."
+        ),
+        json!(
+            "The proposal covers both contracts.\n\n<consensus-result>APPROVED</consensus-result>"
+        ),
+        json!(
+            "<consensus-result>INTEGRATION_READY</consensus-result>\n\nBoth frozen implementations are present."
+        ),
+        json!(
+            "<consensus-result>APPROVED</consensus-result>\n\nThe exact tested result preserves both contracts."
         ),
     ]
 }

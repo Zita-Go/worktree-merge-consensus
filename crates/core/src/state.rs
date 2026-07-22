@@ -465,6 +465,64 @@ impl RunState {
         Ok(self.next_action)
     }
 
+    pub fn retry_blocked_integration_invalid_response(&mut self) -> Result<NextAction, StateError> {
+        if self.status != RunStatus::Blocked
+            || self.phase != Phase::Blocked
+            || self.next_action != NextAction::Stop
+            || self.reason_code.as_deref() != Some("INVALID_RESPONSE")
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "only a terminal INVALID_RESPONSE integration result can be retried",
+            ));
+        }
+        let diagnostic = self.last_error.as_ref().ok_or_else(|| {
+            state_error(
+                "INCOMPATIBLE_STATE",
+                "integration invalid-response recovery requires its originating diagnostic",
+            )
+        })?;
+        if diagnostic.code != "INVALID_RESPONSE"
+            || diagnostic.action != NextAction::RequestPrimaryIntegration
+            || diagnostic.role != Some(Role::Primary)
+            || diagnostic.thread_id.as_deref() != Some(self.facts.primary_thread_id.as_str())
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "invalid-response recovery is limited to the bound primary integration turn",
+            ));
+        }
+        if !self.plan_approved
+            || self.current_plan_payload.is_none()
+            || self.plan_approval_payload.is_none()
+            || self.target_integration_branch.is_none()
+        {
+            return Err(state_error(
+                "INCOMPATIBLE_STATE",
+                "integration invalid-response recovery requires an approved frozen plan",
+            ));
+        }
+        if self.integration_branch.is_some()
+            || self.integration_sha.is_some()
+            || self.current_integration_payload.is_some()
+            || self.verification_worktree.is_some()
+            || !self.test_evidence.is_empty()
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "integration invalid-response recovery cannot replace an accepted result",
+            ));
+        }
+
+        self.status = RunStatus::Running;
+        self.phase = Phase::Integrate;
+        self.next_action = NextAction::RequestPrimaryIntegration;
+        self.reason_code = None;
+        self.last_error = None;
+        self.validate_persisted()?;
+        Ok(self.next_action)
+    }
+
     pub fn retry_blocked_integration_execution_tool_unavailable(
         &mut self,
     ) -> Result<NextAction, StateError> {

@@ -1,5 +1,10 @@
 # Worktree Merge Consensus Protocol v1
 
+> **Legacy participant protocol:** release 0.2.0 and later prompt for the
+> [v2 marker protocol](protocol-v2.md). This document remains authoritative for
+> valid v1 envelopes accepted during in-flight migration and for the
+> coordinator's canonical internal representation.
+
 This document is the human-readable contract for
 [`worktree-merge-consensus/v1`](../schemas/protocol-v1.json). The checked-in JSON
 Schema and Rust invariants are authoritative when this document and executable

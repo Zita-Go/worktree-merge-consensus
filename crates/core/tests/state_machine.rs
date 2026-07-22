@@ -273,6 +273,52 @@ fn blocked_postintegration_invalid_response_is_not_retryable() {
 }
 
 #[test]
+fn completed_integration_with_an_invalid_result_can_retry_only_its_report_turn() {
+    let mut state = fixture_plan_state();
+    let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
+    state.apply_message(approved_plan(&plan_hash)).unwrap();
+    state.record_error(RunDiagnostic {
+        code: "INVALID_RESPONSE".into(),
+        detail: "protocol invariant failed: message requires an integration_branch".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some(state.facts.primary_thread_id.clone()),
+    });
+    state.block("INVALID_RESPONSE");
+
+    let action = state.retry_blocked_integration_invalid_response().unwrap();
+
+    assert_eq!(action, NextAction::RequestPrimaryIntegration);
+    assert_eq!(state.status, RunStatus::Running);
+    assert_eq!(state.phase, Phase::Integrate);
+    assert_eq!(state.integration_branch, None);
+    assert_eq!(state.integration_sha, None);
+    assert!(state.reason_code.is_none());
+    assert!(state.last_error.is_none());
+}
+
+#[test]
+fn integration_invalid_response_retry_rejects_an_already_accepted_result() {
+    let mut state = fixture_result_state("cccccccccccccccccccccccccccccccccccccccc");
+    state.record_error(RunDiagnostic {
+        code: "INVALID_RESPONSE".into(),
+        detail: "late malformed response".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some(state.facts.primary_thread_id.clone()),
+    });
+    state.block("INVALID_RESPONSE");
+
+    let error = state
+        .retry_blocked_integration_invalid_response()
+        .unwrap_err();
+
+    assert_eq!(error.code(), "NOT_RETRYABLE");
+}
+
+#[test]
 fn side_effect_free_integration_tool_blocker_restores_the_integration_action() {
     let mut state = fixture_plan_state();
     let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
