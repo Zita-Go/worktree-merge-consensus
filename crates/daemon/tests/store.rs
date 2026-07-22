@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use consensus_core::state::{NextAction, Role, RunDiagnostic, RunFacts, RunState, RunStatus};
-use consensus_daemon::store::SqliteRunStore;
+use consensus_daemon::store::{SqliteRunStore, VerificationCommandClaim};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -111,7 +111,7 @@ fn completed_app_server_item_events_survive_reopen_as_turn_evidence() {
         .unwrap();
     drop(store);
 
-    let reopened = SqliteRunStore::open(path).unwrap();
+    let reopened = SqliteRunStore::open(&path).unwrap();
     let evidence = reopened
         .turn_event_evidence(RUN_ID, "primary-thread", "turn-7")
         .unwrap()
@@ -210,7 +210,7 @@ fn terminal_turn_retry_is_archived_and_reset_atomically() {
         .unwrap();
     drop(store);
 
-    let reopened = SqliteRunStore::open(path).unwrap();
+    let reopened = SqliteRunStore::open(&path).unwrap();
     let pending = reopened.pending_send(RUN_ID).unwrap().unwrap();
     assert_eq!(pending.message_hash, "request-hash");
     assert!(pending.thread_id.is_none());
@@ -361,6 +361,225 @@ fn legacy_state_without_schema_version_fails_closed() {
 }
 
 #[test]
+fn verification_command_completed_record_is_reused_after_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+
+    let claim = store
+        .begin_verification_command(
+            RUN_ID,
+            "request-hash",
+            "turn-7",
+            0,
+            "cargo test --locked",
+            std::path::Path::new("/verify/run"),
+        )
+        .unwrap();
+    let started = match claim {
+        VerificationCommandClaim::Execute(record) => record,
+        VerificationCommandClaim::Reuse(_) => panic!("new verification command should execute"),
+    };
+    assert_eq!(started.item_id, "coordinator-command/request-hash/0");
+    assert_eq!(started.exit_code, None);
+
+    let completed = store
+        .complete_verification_command(RUN_ID, "request-hash", 0, 0, "ok", "")
+        .unwrap();
+    assert_eq!(completed.exit_code, Some(0));
+    assert_eq!(completed.stdout.as_deref(), Some("ok"));
+    assert_eq!(completed.stderr.as_deref(), Some(""));
+    drop(store);
+
+    let reopened = SqliteRunStore::open(path).unwrap();
+    let claim = reopened
+        .begin_verification_command(
+            RUN_ID,
+            "request-hash",
+            "turn-7",
+            0,
+            "cargo test --locked",
+            std::path::Path::new("/verify/run"),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        claim,
+        VerificationCommandClaim::Reuse(record)
+            if record.exit_code == Some(0)
+                && record.stdout.as_deref() == Some("ok")
+                && record.stderr.as_deref() == Some("")
+    ));
+    assert_eq!(verification_command_row_count(&path), 1);
+}
+
+#[test]
+fn verification_command_started_row_fails_closed_as_uncertain() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+
+    let first = store
+        .begin_verification_command(
+            RUN_ID,
+            "request-hash",
+            "turn-7",
+            0,
+            "cargo test --locked",
+            std::path::Path::new("/verify/run"),
+        )
+        .unwrap();
+    assert!(matches!(first, VerificationCommandClaim::Execute(_)));
+
+    let error = store
+        .begin_verification_command(
+            RUN_ID,
+            "request-hash",
+            "turn-7",
+            0,
+            "cargo test --locked",
+            std::path::Path::new("/verify/run"),
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "VERIFICATION_EXECUTION_UNCERTAIN");
+    assert_eq!(
+        verification_command_status(&path, RUN_ID, "request-hash", 0),
+        "STARTED"
+    );
+    assert_eq!(verification_command_row_count(&path), 1);
+}
+
+#[test]
+fn verification_command_identity_mismatch_fails_without_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+    store
+        .begin_verification_command(
+            RUN_ID,
+            "request-hash",
+            "turn-7",
+            0,
+            "cargo test --locked",
+            std::path::Path::new("/verify/run"),
+        )
+        .unwrap();
+    store
+        .complete_verification_command(RUN_ID, "request-hash", 0, 0, "ok", "")
+        .unwrap();
+
+    let changed_command = store
+        .begin_verification_command(
+            RUN_ID,
+            "request-hash",
+            "turn-7",
+            0,
+            "cargo test --workspace --locked",
+            std::path::Path::new("/verify/run"),
+        )
+        .unwrap_err();
+    let changed_cwd = store
+        .begin_verification_command(
+            RUN_ID,
+            "request-hash",
+            "turn-7",
+            0,
+            "cargo test --locked",
+            std::path::Path::new("/verify/other"),
+        )
+        .unwrap_err();
+    let changed_turn = store
+        .begin_verification_command(
+            RUN_ID,
+            "request-hash",
+            "turn-8",
+            0,
+            "cargo test --locked",
+            std::path::Path::new("/verify/run"),
+        )
+        .unwrap_err();
+    let changed_request = store
+        .begin_verification_command(
+            RUN_ID,
+            "request-hash-2",
+            "turn-7",
+            0,
+            "cargo test --locked",
+            std::path::Path::new("/verify/run"),
+        )
+        .unwrap_err();
+
+    assert_eq!(changed_command.code(), "INCOMPATIBLE_STATE");
+    assert_eq!(changed_cwd.code(), "INCOMPATIBLE_STATE");
+    assert_eq!(changed_turn.code(), "INCOMPATIBLE_STATE");
+    assert_eq!(changed_request.code(), "INCOMPATIBLE_STATE");
+    assert_eq!(verification_command_row_count(&path), 1);
+    assert_eq!(
+        verification_command_identity(&path, RUN_ID, "request-hash", 0),
+        (
+            "turn-7".into(),
+            "cargo test --locked".into(),
+            "/verify/run".into(),
+            "COMPLETED".into(),
+        )
+    );
+}
+
+#[test]
+fn verification_command_completion_updates_started_row_and_rejects_changed_second_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+
+    let missing = store
+        .complete_verification_command(RUN_ID, "request-hash", 0, 0, "ok", "")
+        .unwrap_err();
+    assert_eq!(missing.code(), "INCOMPATIBLE_STATE");
+
+    store
+        .begin_verification_command(
+            RUN_ID,
+            "request-hash",
+            "turn-7",
+            0,
+            "cargo test --locked",
+            std::path::Path::new("/verify/run"),
+        )
+        .unwrap();
+    let first = store
+        .complete_verification_command(RUN_ID, "request-hash", 0, 0, "ok", "")
+        .unwrap();
+    assert_eq!(first.exit_code, Some(0));
+
+    let repeated = store
+        .complete_verification_command(RUN_ID, "request-hash", 0, 0, "ok", "")
+        .unwrap();
+    assert_eq!(repeated, first);
+
+    let changed = store
+        .complete_verification_command(RUN_ID, "request-hash", 0, 1, "nope", "")
+        .unwrap_err();
+    assert_eq!(changed.code(), "INCOMPATIBLE_STATE");
+    assert_eq!(
+        verification_command_completion(&path, RUN_ID, "request-hash", 0),
+        (Some(0), Some("ok".into()), Some("".into()))
+    );
+}
+
+#[test]
 fn second_active_run_for_same_repository_is_rejected() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -413,4 +632,67 @@ fn fixture_run(run_id: &str, common_dir: &str) -> RunState {
         primary_ref: Some("refs/heads/primary".into()),
         reviewer_ref: Some("refs/heads/reviewer".into()),
     })
+}
+
+fn verification_command_row_count(path: &std::path::Path) -> i64 {
+    Connection::open(path)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM verification_command_executions", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+fn verification_command_status(
+    path: &std::path::Path,
+    run_id: &str,
+    message_hash: &str,
+    command_index: u32,
+) -> String {
+    Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT status
+             FROM verification_command_executions
+             WHERE run_id = ?1 AND message_hash = ?2 AND command_index = ?3",
+            params![run_id, message_hash, command_index],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn verification_command_identity(
+    path: &std::path::Path,
+    run_id: &str,
+    message_hash: &str,
+    command_index: u32,
+) -> (String, String, String, String) {
+    Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT turn_id, command, cwd, status
+             FROM verification_command_executions
+             WHERE run_id = ?1 AND message_hash = ?2 AND command_index = ?3",
+            params![run_id, message_hash, command_index],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap()
+}
+
+fn verification_command_completion(
+    path: &std::path::Path,
+    run_id: &str,
+    message_hash: &str,
+    command_index: u32,
+) -> (Option<i32>, Option<String>, Option<String>) {
+    Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT exit_code, stdout, stderr
+             FROM verification_command_executions
+             WHERE run_id = ?1 AND message_hash = ?2 AND command_index = ?3",
+            params![run_id, message_hash, command_index],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap()
 }

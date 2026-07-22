@@ -41,6 +41,26 @@ pub struct AcceptedTurn {
     pub turn_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationCommandRecord {
+    pub run_id: String,
+    pub message_hash: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub command_index: u32,
+    pub command: String,
+    pub cwd: PathBuf,
+    pub exit_code: Option<i32>,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerificationCommandClaim {
+    Execute(VerificationCommandRecord),
+    Reuse(VerificationCommandRecord),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnEventEvidence {
     pub completed_turn: Value,
@@ -69,6 +89,8 @@ pub enum StoreError {
     PendingSendNotFound(String),
     #[error("TERMINAL_TURN_NOT_RETRYABLE: {0}")]
     TerminalTurnNotRetryable(String),
+    #[error("VERIFICATION_EXECUTION_UNCERTAIN: {0}")]
+    VerificationExecutionUncertain(String),
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
     #[error("state serialization error: {0}")]
@@ -88,6 +110,7 @@ impl StoreError {
             Self::RunNotFound(_) => "RUN_NOT_FOUND",
             Self::PendingSendNotFound(_) => "PENDING_SEND_NOT_FOUND",
             Self::TerminalTurnNotRetryable(_) => "TERMINAL_TURN_NOT_RETRYABLE",
+            Self::VerificationExecutionUncertain(_) => "VERIFICATION_EXECUTION_UNCERTAIN",
             Self::Database(_) => "DATABASE_ERROR",
             Self::Serialization(_) => "SERIALIZATION_ERROR",
             Self::IncompatibleState(_) => "INCOMPATIBLE_STATE",
@@ -126,6 +149,163 @@ impl SqliteRunStore {
         self.state_root
             .join("verification")
             .join(format!("{run_id}-{integration_sha}"))
+    }
+
+    pub fn begin_verification_command(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+        turn_id: &str,
+        command_index: u32,
+        command: &str,
+        cwd: &Path,
+    ) -> Result<VerificationCommandClaim, StoreError> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        ensure_run_exists(&transaction, run_id)?;
+        let item_id = verification_command_item_id(message_hash, command_index);
+        let matches = verification_command_claim_matches(
+            &transaction,
+            run_id,
+            message_hash,
+            turn_id,
+            command_index,
+        )?;
+
+        if matches.len() > 1 {
+            return Err(StoreError::IncompatibleState(format!(
+                "run {run_id} has conflicting persisted verification command identity for turn {turn_id} item {item_id}"
+            )));
+        }
+
+        if let Some(existing) = matches.into_iter().next() {
+            let VerificationCommandRow { record, status } = existing;
+            if record.message_hash != message_hash
+                || record.turn_id != turn_id
+                || record.item_id != item_id
+                || record.command_index != command_index
+                || record.command != command
+                || record.cwd != cwd
+            {
+                return Err(StoreError::IncompatibleState(format!(
+                    "verification command identity mismatch for run {run_id}, turn {turn_id}, item {item_id}"
+                )));
+            }
+            return match status.as_str() {
+                "STARTED" => Err(StoreError::VerificationExecutionUncertain(format!(
+                    "verification command {item_id} for run {run_id} was started but not completed"
+                ))),
+                "COMPLETED" => Ok(VerificationCommandClaim::Reuse(record)),
+                status => Err(StoreError::IncompatibleState(format!(
+                    "verification command {item_id} for run {run_id} has unsupported status {status}"
+                ))),
+            };
+        }
+
+        transaction.execute(
+            "INSERT INTO verification_command_executions (
+                run_id, message_hash, turn_id, item_id, command_index, command,
+                cwd, status, exit_code, stdout, stderr, started_at, completed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'STARTED', NULL, NULL, NULL, ?8, NULL)",
+            params![
+                run_id,
+                message_hash,
+                turn_id,
+                item_id,
+                command_index,
+                command,
+                cwd.to_string_lossy().as_ref(),
+                now_unix(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(VerificationCommandClaim::Execute(VerificationCommandRecord {
+            run_id: run_id.to_owned(),
+            message_hash: message_hash.to_owned(),
+            turn_id: turn_id.to_owned(),
+            item_id,
+            command_index,
+            command: command.to_owned(),
+            cwd: cwd.to_path_buf(),
+            exit_code: None,
+            stdout: None,
+            stderr: None,
+        }))
+    }
+
+    pub fn complete_verification_command(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+        command_index: u32,
+        exit_code: i32,
+        stdout: &str,
+        stderr: &str,
+    ) -> Result<VerificationCommandRecord, StoreError> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        ensure_run_exists(&transaction, run_id)?;
+        let existing = verification_command_by_run_message_and_index(
+            &transaction,
+            run_id,
+            message_hash,
+            command_index,
+        )?
+        .ok_or_else(|| {
+            StoreError::IncompatibleState(format!(
+                "run {run_id} has no started verification command for request {message_hash} index {command_index}"
+            ))
+        })?;
+
+        let VerificationCommandRow { record, status } = existing;
+        match status.as_str() {
+            "STARTED" => {
+                let changed = transaction.execute(
+                    "UPDATE verification_command_executions
+                     SET status = 'COMPLETED', exit_code = ?1, stdout = ?2, stderr = ?3, completed_at = ?4
+                     WHERE run_id = ?5 AND message_hash = ?6 AND command_index = ?7 AND status = 'STARTED'",
+                    params![
+                        exit_code,
+                        stdout,
+                        stderr,
+                        now_unix(),
+                        run_id,
+                        message_hash,
+                        command_index,
+                    ],
+                )?;
+                if changed != 1 {
+                    return Err(StoreError::IncompatibleState(format!(
+                        "verification command {} for run {run_id} changed while completing",
+                        record.item_id
+                    )));
+                }
+                transaction.commit()?;
+                Ok(VerificationCommandRecord {
+                    exit_code: Some(exit_code),
+                    stdout: Some(stdout.to_owned()),
+                    stderr: Some(stderr.to_owned()),
+                    ..record
+                })
+            }
+            "COMPLETED" => {
+                if record.exit_code == Some(exit_code)
+                    && record.stdout.as_deref() == Some(stdout)
+                    && record.stderr.as_deref() == Some(stderr)
+                {
+                    Ok(record)
+                } else {
+                    Err(StoreError::IncompatibleState(format!(
+                        "verification command {} for run {run_id} already completed with different output",
+                        record.item_id
+                    )))
+                }
+            }
+            status => Err(StoreError::IncompatibleState(format!(
+                "verification command {} for run {run_id} has unsupported status {status}",
+                record.item_id
+            ))),
+        }
     }
 
     pub fn insert_run(&self, state: &RunState) -> Result<(), StoreError> {
@@ -1368,6 +1548,12 @@ fn archive_and_reset_turn(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VerificationCommandRow {
+    record: VerificationCommandRecord,
+    status: String,
+}
+
 fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS runs (
@@ -1456,6 +1642,24 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
                 applied_at INTEGER NOT NULL,
                 UNIQUE(run_id, message_hash)
              );
+         CREATE TABLE IF NOT EXISTS verification_command_executions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+            message_hash TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            command_index INTEGER NOT NULL,
+            command TEXT NOT NULL,
+            cwd TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('STARTED', 'COMPLETED')),
+            exit_code INTEGER,
+            stdout TEXT,
+            stderr TEXT,
+            started_at INTEGER NOT NULL,
+            completed_at INTEGER,
+            UNIQUE(run_id, message_hash, command_index),
+            UNIQUE(run_id, item_id)
+         );
          CREATE INDEX IF NOT EXISTS turn_attempts_run
             ON turn_attempts(run_id, id DESC);
          CREATE TABLE IF NOT EXISTS transitions (
@@ -1532,6 +1736,97 @@ fn deserialize_state(encoded: &str) -> Result<RunState, StoreError> {
         .validate_persisted()
         .map_err(|error| StoreError::IncompatibleState(error.to_string()))?;
     Ok(state)
+}
+
+fn verification_command_claim_matches(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    message_hash: &str,
+    turn_id: &str,
+    command_index: u32,
+) -> Result<Vec<VerificationCommandRow>, StoreError> {
+    let mut statement = transaction.prepare(
+        "SELECT run_id, message_hash, turn_id, item_id, command_index, command,
+                cwd, status, exit_code, stdout, stderr
+         FROM verification_command_executions
+         WHERE run_id = ?1
+           AND command_index = ?2
+           AND (message_hash = ?3 OR turn_id = ?4)
+         ORDER BY id ASC",
+    )?;
+    let rows = statement.query_map(
+        params![run_id, command_index, message_hash, turn_id],
+        verification_command_row_from_sql,
+    )?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+fn verification_command_by_run_message_and_index(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    message_hash: &str,
+    command_index: u32,
+) -> Result<Option<VerificationCommandRow>, StoreError> {
+    transaction
+        .query_row(
+            "SELECT run_id, message_hash, turn_id, item_id, command_index, command,
+                    cwd, status, exit_code, stdout, stderr
+             FROM verification_command_executions
+             WHERE run_id = ?1 AND message_hash = ?2 AND command_index = ?3",
+            params![run_id, message_hash, command_index],
+            verification_command_row_from_sql,
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn verification_command_row_from_sql(
+    row: &rusqlite::Row<'_>,
+) -> Result<VerificationCommandRow, rusqlite::Error> {
+    let status = row.get::<_, String>(7)?;
+    let exit_code = row.get::<_, Option<i32>>(8)?;
+    let stdout = row.get::<_, Option<String>>(9)?;
+    let stderr = row.get::<_, Option<String>>(10)?;
+    let outputs_present = exit_code.is_some() || stdout.is_some() || stderr.is_some();
+    if status == "STARTED" && outputs_present {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            7,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "started verification command row has completion output",
+            )),
+        ));
+    }
+    if status == "COMPLETED" && !outputs_present {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            7,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "completed verification command row has no persisted output",
+            )),
+        ));
+    }
+    Ok(VerificationCommandRow {
+        record: VerificationCommandRecord {
+            run_id: row.get(0)?,
+            message_hash: row.get(1)?,
+            turn_id: row.get(2)?,
+            item_id: row.get(3)?,
+            command_index: row.get(4)?,
+            command: row.get(5)?,
+            cwd: PathBuf::from(row.get::<_, String>(6)?),
+            exit_code,
+            stdout,
+            stderr,
+        },
+        status,
+    })
+}
+
+fn verification_command_item_id(message_hash: &str, command_index: u32) -> String {
+    format!("coordinator-command/{message_hash}/{command_index}")
 }
 
 fn ensure_run_exists(transaction: &Transaction<'_>, run_id: &str) -> Result<(), StoreError> {
