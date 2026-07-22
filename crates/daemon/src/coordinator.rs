@@ -35,8 +35,7 @@ use crate::policy::{
     is_retry_safe_read_only_integration_command, validate_test_command,
 };
 use crate::store::{
-    AcceptedTurn, SqliteRunStore, StoreError, VerificationCommandClaim,
-    VerificationCommandRecord,
+    AcceptedTurn, SqliteRunStore, StoreError, VerificationCommandClaim, VerificationCommandRecord,
 };
 
 const MAX_DRIVER_STEPS: usize = 128;
@@ -3978,19 +3977,28 @@ fn append_verification_record(
     let exit_code = record.exit_code.ok_or_else(|| {
         CoordinatorError::operational(
             "INVALID_STATE",
-            format!("completed verification command {} has no exit code", record.item_id),
+            format!(
+                "completed verification command {} has no exit code",
+                record.item_id
+            ),
         )
     })?;
     let stdout = record.stdout.as_deref().ok_or_else(|| {
         CoordinatorError::operational(
             "INVALID_STATE",
-            format!("completed verification command {} has no stdout", record.item_id),
+            format!(
+                "completed verification command {} has no stdout",
+                record.item_id
+            ),
         )
     })?;
     let stderr = record.stderr.as_deref().ok_or_else(|| {
         CoordinatorError::operational(
             "INVALID_STATE",
-            format!("completed verification command {} has no stderr", record.item_id),
+            format!(
+                "completed verification command {} has no stderr",
+                record.item_id
+            ),
         )
     })?;
     if exit_code != 0 {

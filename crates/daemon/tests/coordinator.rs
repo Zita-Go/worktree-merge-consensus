@@ -317,17 +317,21 @@ async fn coordinator_owned_verification_executes_marker_only_commands_in_order()
         .find(|turn| {
             turn["items"][0]["content"][0]["text"]
                 .as_str()
-                .is_some_and(|prompt| {
-                    prompt_action(prompt) == "REQUEST_PRIMARY_VERIFICATION"
-                })
+                .is_some_and(|prompt| prompt_action(prompt) == "REQUEST_PRIMARY_VERIFICATION")
         })
         .unwrap();
-    assert!(verification_turn["items"].as_array().unwrap().iter().all(|item| {
-        matches!(
-            item.get("type").and_then(Value::as_str),
-            Some("userMessage" | "agentMessage")
-        )
-    }));
+    assert!(
+        verification_turn["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| {
+                matches!(
+                    item.get("type").and_then(Value::as_str),
+                    Some("userMessage" | "agentMessage")
+                )
+            })
+    );
 }
 
 #[tokio::test]
@@ -999,9 +1003,12 @@ async fn live_item_events_keep_marker_turns_free_of_participant_commands() {
         )
         .unwrap()
         .unwrap();
-    assert!(evidence.completed_items.iter().all(|item| {
-        item.get("type").and_then(Value::as_str) != Some("commandExecution")
-    }));
+    assert!(
+        evidence
+            .completed_items
+            .iter()
+            .all(|item| { item.get("type").and_then(Value::as_str) != Some("commandExecution") })
+    );
     assert_eq!(app.executed_commands().len(), 2);
     let corrective_prompt = app
         .prompts()
@@ -1084,7 +1091,10 @@ async fn coordinator_evidence_does_not_require_participant_command_items() {
 
     assert_eq!(result.status, RunStatus::Accepted);
     assert_eq!(result.test_evidence.len(), 1);
-    assert_eq!(app.executed_commands(), vec![vec!["cargo", "test", "--workspace"]]);
+    assert_eq!(
+        app.executed_commands(),
+        vec![vec!["cargo", "test", "--workspace"]]
+    );
 }
 
 #[tokio::test]
@@ -3060,15 +3070,11 @@ impl FakeAppServer {
         verification_request_number: usize,
     ) -> VerificationBehavior {
         match self.verification_behavior {
-            VerificationBehavior::MissingExecutionThenPass
-                if verification_request_number == 1 =>
-            {
+            VerificationBehavior::MissingExecutionThenPass if verification_request_number == 1 => {
                 VerificationBehavior::MissingExecution
             }
             VerificationBehavior::MissingExecutionThenPass => VerificationBehavior::Pass,
-            VerificationBehavior::FailedExecutionThenPass
-                if verification_request_number == 1 =>
-            {
+            VerificationBehavior::FailedExecutionThenPass if verification_request_number == 1 => {
                 VerificationBehavior::FailedExecution
             }
             VerificationBehavior::FailedExecutionThenPass => VerificationBehavior::Pass,
