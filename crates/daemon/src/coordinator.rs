@@ -57,9 +57,15 @@ struct RetryableCompletedTurn {
     observed_status: String,
 }
 
+enum VerificationRetryKind {
+    EmptyTurn,
+    EventEvidenceCompatibility,
+    UnattendedVerificationMigration,
+}
+
 struct RetryableVerificationTurn {
     turn: RetryableCompletedTurn,
-    compatibility_retry: bool,
+    kind: VerificationRetryKind,
 }
 
 struct RetryableTerminalTurn {
@@ -869,26 +875,40 @@ where
                 ));
             }
             let retry_turn = &retry.turn;
-            if retry.compatibility_retry {
-                self.store
-                    .reactivate_blocked_run_with_verification_evidence_retry(
-                        &blocked_state,
-                        &state,
-                        &retry_turn.message_hash,
-                        &retry_turn.thread_id,
-                        &retry_turn.turn_id,
-                        &retry_turn.observed_status,
-                    )?;
-            } else {
-                self.store
-                    .reactivate_blocked_run_with_completed_turn_retry(
-                        &blocked_state,
-                        &state,
-                        &retry_turn.message_hash,
-                        &retry_turn.thread_id,
-                        &retry_turn.turn_id,
-                        &retry_turn.observed_status,
-                    )?;
+            match retry.kind {
+                VerificationRetryKind::EmptyTurn => {
+                    self.store
+                        .reactivate_blocked_run_with_completed_turn_retry(
+                            &blocked_state,
+                            &state,
+                            &retry_turn.message_hash,
+                            &retry_turn.thread_id,
+                            &retry_turn.turn_id,
+                            &retry_turn.observed_status,
+                        )?;
+                }
+                VerificationRetryKind::EventEvidenceCompatibility => {
+                    self.store
+                        .reactivate_blocked_run_with_verification_evidence_retry(
+                            &blocked_state,
+                            &state,
+                            &retry_turn.message_hash,
+                            &retry_turn.thread_id,
+                            &retry_turn.turn_id,
+                            &retry_turn.observed_status,
+                        )?;
+                }
+                VerificationRetryKind::UnattendedVerificationMigration => {
+                    self.store
+                        .reactivate_blocked_run_with_unattended_verification_retry(
+                            &blocked_state,
+                            &state,
+                            &retry_turn.message_hash,
+                            &retry_turn.thread_id,
+                            &retry_turn.turn_id,
+                            &retry_turn.observed_status,
+                        )?;
+                }
             }
             return Ok(state);
         }
@@ -1777,16 +1797,9 @@ where
         let archived_turn_ids = self
             .store
             .archived_turn_ids(&run_id, &pending.message_hash)?;
-        if !archived_turn_ids.is_empty()
-            && self
-                .store
-                .verification_evidence_retry_recorded(&run_id, &pending.message_hash)?
-        {
-            return Err(CoordinatorError::operational(
-                "MODEL_RESPONSE_RETRY_UNSAFE",
-                "verification evidence compatibility recovery is limited to one retry",
-            ));
-        }
+        let evidence_retry_recorded = self
+            .store
+            .verification_evidence_retry_recorded(&run_id, &pending.message_hash)?;
         if archived_turn_ids.len() == 1 {
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
@@ -1795,6 +1808,7 @@ where
         }
         let mut archived_ready = false;
         let mut archived_cargo_unavailable = false;
+        let mut archived_sequence = Vec::with_capacity(archived_turn_ids.len());
         for archived_turn_id in &archived_turn_ids {
             let archived = find_turn(&detail, archived_turn_id).ok_or_else(|| {
                 CoordinatorError::operational(
@@ -1818,11 +1832,15 @@ where
                 CoordinatorError::operational("HISTORY_UNAVAILABLE", error.to_string())
             })?;
             match response.signal {
-                ParticipantSignal::VerificationReady => archived_ready = true,
+                ParticipantSignal::VerificationReady => {
+                    archived_ready = true;
+                    archived_sequence.push("ready");
+                }
                 ParticipantSignal::Blocked
                     if response.blocked_reason.as_deref() == Some("CARGO_UNAVAILABLE") =>
                 {
                     archived_cargo_unavailable = true;
+                    archived_sequence.push("cargo-unavailable");
                 }
                 _ => {
                     return Err(CoordinatorError::operational(
@@ -1832,14 +1850,18 @@ where
                 }
             }
         }
-        let compatibility_retry = if archived_turn_ids.is_empty() {
-            false
-        } else if archived_ready && archived_cargo_unavailable {
-            true
+        let kind = if archived_turn_ids.is_empty() && !evidence_retry_recorded {
+            VerificationRetryKind::EmptyTurn
+        } else if archived_sequence == ["ready", "cargo-unavailable", "ready"]
+            && evidence_retry_recorded
+        {
+            VerificationRetryKind::UnattendedVerificationMigration
+        } else if archived_ready && archived_cargo_unavailable && !evidence_retry_recorded {
+            VerificationRetryKind::EventEvidenceCompatibility
         } else {
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
-                "verification-without-execution recovery is limited to one retry",
+                "verification evidence compatibility recovery is limited to one retry",
             ));
         };
         let turn = find_turn(&detail, turn_id).ok_or_else(|| {
@@ -1874,7 +1896,7 @@ where
                 turn_id: turn_id.to_owned(),
                 observed_status: status.to_owned(),
             },
-            compatibility_retry,
+            kind,
         })
     }
 
