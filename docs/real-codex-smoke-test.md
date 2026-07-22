@@ -57,8 +57,11 @@ the evidence below.
    turns report read-only/offline policy and the integration turn reports
    bounded source-workspace-write/offline policy. Confirm a separate
    verification turn uses only the persisted `verification_worktree`, runs each
-   frozen command exactly once, and records successful `commandExecution`
-   evidence with turn ID, item ID, command, cwd, and exit code.
+   frozen command exactly once, and records completed `commandExecution`
+   evidence with turn ID, item ID, command, cwd, exit code, and bounded failure
+   diagnostics. Exercise one nonzero command and confirm the same Run returns
+   to a controlled integration correction, verifies the new SHA, and proceeds
+   to result review only after every frozen command passes.
    Confirm contracts use one result marker plus a JSON body, while the plan,
    review feedback, integration summary, verification summary, and final review
    use one result marker plus ordinary Markdown. No participant should have to
@@ -96,6 +99,10 @@ the evidence below.
    matches the stored successful patch hash and authoritative Git result, asks
    for only one read-only `INTEGRATION_READY` marker response, and never applies
    another patch or repeats branch creation or merge.
+   Also return one exact, completed, side-effect-free
+   `BLOCKED:CARGO_UNAVAILABLE` verification result, repair Cargo, and resume the
+   same Run. Confirm the unchanged verification request is retried once, and a
+   second environment retry is rejected.
    Keep one disposable participant turn active for longer than five
    minutes while canonical turn items continue to change, and confirm the Run
    does not pause; unchanged state must still hit the bounded idle timeout.

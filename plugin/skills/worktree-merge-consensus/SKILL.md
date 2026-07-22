@@ -190,8 +190,16 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   same-Run resume revalidates the unchanged integration result and isolated
   verification clone, requires zero command items and no side-effect-capable
   item, archives that empty turn, and retries the frozen verification request
-  once. Partial execution, failed tests, a second empty attempt, or drift remain
-  terminal.
+  once. Partial execution, a second empty attempt, or drift remain terminal.
+  Version 0.2.2 requires every frozen verification command to complete even
+  after a nonzero exit. The marker means only that the evidence set is complete;
+  the coordinator derives exit codes and bounded diagnostics. Failed commands
+  return the same Run to a new controlled Primary integration round, and only a
+  fully passing new SHA proceeds to Reviewer result review. After repairing the
+  local toolchain, explicit resume may also replace one exact completed,
+  side-effect-free `CARGO_UNAVAILABLE` verification blocker. That recovery is
+  limited to one attempt and preserves the Run, integration branch, and frozen
+  source refs.
   Network, added-permission, later-phase, mismatched, or side-effectful cases
   remain terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.

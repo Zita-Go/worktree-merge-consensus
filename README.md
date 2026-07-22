@@ -123,8 +123,17 @@ create one completed command item for each frozen test before returning
 `VERIFICATION_READY`. If a completed verification turn returned only the
 marker and executed no command at all, explicit same-Run resume may archive
 that empty turn and retry verification once against the unchanged integration
-SHA. Any executed command, second empty attempt, nonzero exit, unknown item,
-repository drift, or accepted result remains terminal.
+SHA. Any partial execution, second empty attempt, unknown item, repository
+drift, or accepted result remains terminal.
+
+Version 0.2.2 makes `VERIFICATION_READY` mean “the complete evidence set is
+ready,” not “every test passed.” The Primary must run every frozen command even
+after an earlier nonzero exit. The coordinator derives exit codes and bounded
+diagnostic output from the canonical command items; failed commands route the
+same Run back to a new controlled integration round, and the final tested SHA
+still requires Reviewer approval. After Cargo is installed, one exact
+side-effect-free `CARGO_UNAVAILABLE` verification blocker can also be resumed
+once without replacing the Run or integration branch.
 
 Read [the v2 participant protocol](docs/protocol-v2.md), the
 [legacy v1 protocol](docs/protocol-v1.md),
@@ -154,8 +163,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.1-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.1-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.2-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.2-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or

@@ -24,7 +24,7 @@ fn desktop_app_server_user_agent_exposes_exact_codex_version() {
 #[test]
 fn cli_app_server_user_agent_exposes_exact_codex_version() {
     let version = parse_managed_user_agent(
-        "worktree-merge-consensus/0.144.6 (Debian 12.0.0; x86_64) unknown (worktree-merge-consensus; 0.2.1)",
+        "worktree-merge-consensus/0.144.6 (Debian 12.0.0; x86_64) unknown (worktree-merge-consensus; 0.2.2)",
     );
 
     assert_eq!(

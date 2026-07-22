@@ -39,6 +39,8 @@ use crate::store::{AcceptedTurn, SqliteRunStore, StoreError};
 const MAX_DRIVER_STEPS: usize = 128;
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(1_800);
 const TURN_INTERRUPT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_VERIFICATION_FAILURE_OUTPUT_BYTES: usize = 16_384;
+const VERIFICATION_OUTPUT_TRUNCATION_MARKER: &str = "[earlier output truncated]\n";
 
 struct CompletedTurn {
     response: String,
@@ -62,6 +64,16 @@ struct RetryableTerminalTurn {
 struct RetryableAcceptedExecutionToolTurn {
     accepted: AcceptedTurn,
     observed_status: String,
+}
+
+struct RetryableAcceptedVerificationEnvironmentTurn {
+    accepted: AcceptedTurn,
+    observed_status: String,
+}
+
+struct AuthoritativeVerification {
+    evidence: Vec<TestEvidence>,
+    failures: Vec<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -704,6 +716,8 @@ where
             integration_invalid_response_retry_action(&state)?;
         let retry_verification_without_execution_action =
             verification_without_execution_retry_action(&state)?;
+        let retry_verification_environment_action =
+            verification_environment_unavailable_retry_action(&state)?;
         let retry_invalid_response_action = if retry_integration_invalid_response_action.is_none() {
             invalid_response_retry_action(&state)?
         } else {
@@ -717,6 +731,7 @@ where
             .or(retry_forbidden_operation_action)
             .or(retry_integration_invalid_response_action)
             .or(retry_verification_without_execution_action)
+            .or(retry_verification_environment_action)
             .or(retry_completed_response_action)
             .unwrap_or(state.next_action);
         if effective_action == NextAction::RequestPrimaryIntegration {
@@ -852,6 +867,27 @@ where
                     &retry.message_hash,
                     &retry.thread_id,
                     &retry.turn_id,
+                    &retry.observed_status,
+                )?;
+            return Ok(state);
+        }
+        if let Some(action) = retry_verification_environment_action {
+            let retry = self
+                .inspect_completed_verification_environment_unavailable_retry(&state, action)
+                .await?;
+            let blocked_state = state.clone();
+            let restored_action = state.retry_blocked_verification_environment_unavailable()?;
+            if restored_action != action {
+                return Err(CoordinatorError::operational(
+                    "INCOMPATIBLE_STATE",
+                    "restored verification action does not match its environment-blocked turn",
+                ));
+            }
+            self.store
+                .reactivate_blocked_run_with_accepted_verification_environment_retry(
+                    &blocked_state,
+                    &state,
+                    &retry.accepted,
                     &retry.observed_status,
                 )?;
             return Ok(state);
@@ -1761,6 +1797,134 @@ where
         })
     }
 
+    async fn inspect_completed_verification_environment_unavailable_retry(
+        &self,
+        state: &RunState,
+        action: NextAction,
+    ) -> Result<RetryableAcceptedVerificationEnvironmentTurn, CoordinatorError> {
+        if action != NextAction::RequestPrimaryVerification
+            || state.reason_code.as_deref() != Some("CARGO_UNAVAILABLE")
+            || state.integration_branch.is_none()
+            || state.integration_sha.is_none()
+            || state.current_integration_payload.is_none()
+            || state.verification_worktree.is_none()
+            || state.required_test_commands.is_empty()
+            || !state.test_evidence.is_empty()
+            || state.accepted_result.is_some()
+        {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                "verification environment retry requires an unchanged CARGO_UNAVAILABLE result",
+            ));
+        }
+        let run_id = state.facts.run_id.to_string();
+        let accepted = self.store.latest_accepted_turn(&run_id)?.ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "verification environment blocker has no accepted turn record",
+            )
+        })?;
+        if accepted.role != "PRIMARY"
+            || accepted.phase != "VERIFY"
+            || accepted.round != state.round
+            || accepted.thread_id != state.facts.primary_thread_id
+        {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "verification environment blocker does not match the frozen primary request",
+            ));
+        }
+
+        let detail = self.read_thread_with_retry(&accepted.thread_id).await?;
+        self.verify_thread_identity(state, Role::Primary, &detail)?;
+        for archived_turn_id in self
+            .store
+            .archived_turn_ids(&run_id, &accepted.message_hash)?
+        {
+            let archived = find_turn(&detail, &archived_turn_id).ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    format!("archived verification turn {archived_turn_id} is absent"),
+                )
+            })?;
+            let archived_response = parse_participant_response(
+                final_agent_text(archived)?.trim(),
+                allowed_participant_signals(NextAction::RequestPrimaryVerification),
+            )
+            .map_err(|error| {
+                CoordinatorError::operational("HISTORY_UNAVAILABLE", error.to_string())
+            })?;
+            if archived_response.signal == ParticipantSignal::Blocked
+                && archived_response.blocked_reason.as_deref() == Some("CARGO_UNAVAILABLE")
+            {
+                return Err(CoordinatorError::operational(
+                    "MODEL_RESPONSE_RETRY_UNSAFE",
+                    "verification CARGO_UNAVAILABLE recovery is limited to one retry",
+                ));
+            }
+        }
+
+        let turn = find_turn(&detail, &accepted.turn_id).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "accepted verification environment blocker is absent from canonical task history",
+            )
+        })?;
+        let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "verification environment blocker has no canonical status",
+            )
+        })?;
+        if status != "completed" || !turn_contains_request_hash(turn, &accepted.message_hash) {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                "verification environment recovery requires the exact completed request turn",
+            ));
+        }
+        if let Some(blocker) = terminal_turn_retry_blocker(turn) {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                format!("verification environment blocker cannot be retried: {blocker}"),
+            ));
+        }
+
+        let parsed = parse_participant_response(
+            final_agent_text(turn)?.trim(),
+            allowed_participant_signals(NextAction::RequestPrimaryVerification),
+        )
+        .map_err(|error| CoordinatorError::operational("INVALID_RESPONSE", error.to_string()))?;
+        if parsed.signal != ParticipantSignal::Blocked
+            || parsed.blocked_reason.as_deref() != Some("CARGO_UNAVAILABLE")
+        {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                "accepted verification blocker is not exactly CARGO_UNAVAILABLE",
+            ));
+        }
+        let mut response_state = state.clone();
+        response_state.retry_blocked_verification_environment_unavailable()?;
+        let normalized = self.normalized_marker_message(
+            &response_state,
+            NextAction::RequestPrimaryVerification,
+            parsed,
+        )?;
+        let normalized = serde_json::to_value(normalized).map_err(|error| {
+            CoordinatorError::operational("SERIALIZATION_FAILURE", error.to_string())
+        })?;
+        if canonical_json_hash(&normalized) != accepted.response_hash {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "verification environment response hash does not match canonical task history",
+            ));
+        }
+
+        Ok(RetryableAcceptedVerificationEnvironmentTurn {
+            accepted,
+            observed_status: status.to_owned(),
+        })
+    }
+
     async fn inspect_interrupted_forbidden_operation_retry(
         &self,
         state: &RunState,
@@ -2476,24 +2640,27 @@ where
             NextAction::RequestPrimaryVerification => {
                 let authoritative = authoritative_test_evidence(state, turn, turn_id)?;
                 let mut canonical = current_integration_payload(state)?.clone();
-                canonical
-                    .as_object_mut()
-                    .ok_or_else(|| {
-                        CoordinatorError::operational(
-                            "INVALID_STATE",
-                            "canonical integration payload is not an object",
-                        )
-                    })?
-                    .insert(
-                        "test_evidence".into(),
-                        serde_json::to_value(authoritative).map_err(|error| {
-                            CoordinatorError::operational(
-                                "SERIALIZATION_FAILURE",
-                                error.to_string(),
-                            )
-                        })?,
+                let canonical = canonical.as_object_mut().ok_or_else(|| {
+                    CoordinatorError::operational(
+                        "INVALID_STATE",
+                        "canonical integration payload is not an object",
+                    )
+                })?;
+                canonical.insert(
+                    "test_evidence".into(),
+                    serde_json::to_value(authoritative.evidence).map_err(|error| {
+                        CoordinatorError::operational("SERIALIZATION_FAILURE", error.to_string())
+                    })?,
+                );
+                if authoritative.failures.is_empty() {
+                    canonical.remove("verification_failures");
+                } else {
+                    canonical.insert(
+                        "verification_failures".into(),
+                        Value::Array(authoritative.failures),
                     );
-                message.payload = canonical;
+                }
+                message.payload = Value::Object(canonical.clone());
             }
             _ => {
                 return Err(CoordinatorError::operational(
@@ -3411,7 +3578,7 @@ fn authoritative_test_evidence(
     state: &RunState,
     turn: &Value,
     turn_id: &str,
-) -> Result<Vec<TestEvidence>, CoordinatorError> {
+) -> Result<AuthoritativeVerification, CoordinatorError> {
     let expected_cwd = state.verification_worktree.as_ref().ok_or_else(|| {
         CoordinatorError::operational("INVALID_STATE", "verification workspace is not persisted")
     })?;
@@ -3423,6 +3590,7 @@ fn authoritative_test_evidence(
         ));
     }
     let mut evidence = Vec::with_capacity(items.len());
+    let mut failures = Vec::new();
     for required in &state.required_test_commands {
         let matches = items
             .iter()
@@ -3454,14 +3622,21 @@ fn authoritative_test_evidence(
                 format!("test executed outside the isolated clone: {required}"),
             ));
         }
-        if item.get("status").and_then(Value::as_str) != Some("completed")
-            || item.get("exitCode").and_then(Value::as_i64) != Some(0)
-        {
+        if item.get("status").and_then(Value::as_str) != Some("completed") {
             return Err(CoordinatorError::operational(
                 "TEST_FAILURE",
-                format!("frozen test did not complete with exit code 0: {required}"),
+                format!("frozen test did not reach completed status: {required}"),
             ));
         }
+        let exit_code = item
+            .get("exitCode")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| {
+                CoordinatorError::operational(
+                    "TEST_FAILURE",
+                    format!("completed frozen test omits its exit code: {required}"),
+                )
+            })?;
         if item
             .get("source")
             .and_then(Value::as_str)
@@ -3472,15 +3647,43 @@ fn authoritative_test_evidence(
                 "test commandExecution source is not the agent turn",
             ));
         }
+        if exit_code != 0 {
+            failures.push(json!({
+                "command": required,
+                "exit_code": exit_code,
+                "item_id": item_id,
+                "output": bounded_verification_output(
+                    item.get("aggregatedOutput")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                ),
+            }));
+        }
         evidence.push(TestEvidence {
             command: required.clone(),
-            exit_code: 0,
+            exit_code,
             turn_id: turn_id.to_owned(),
             item_id: item_id.to_owned(),
             cwd: expected_cwd.clone(),
         });
     }
-    Ok(evidence)
+    Ok(AuthoritativeVerification { evidence, failures })
+}
+
+fn bounded_verification_output(output: &str) -> String {
+    if output.len() <= MAX_VERIFICATION_FAILURE_OUTPUT_BYTES {
+        return output.to_owned();
+    }
+    let retained_bytes = MAX_VERIFICATION_FAILURE_OUTPUT_BYTES
+        .saturating_sub(VERIFICATION_OUTPUT_TRUNCATION_MARKER.len());
+    let mut start = output.len() - retained_bytes;
+    while !output.is_char_boundary(start) {
+        start += 1;
+    }
+    format!(
+        "{VERIFICATION_OUTPUT_TRUNCATION_MARKER}{}",
+        &output[start..]
+    )
 }
 
 fn declared_test_commands(message: &ProtocolMessage) -> Result<Vec<String>, CoordinatorError> {
@@ -3932,6 +4135,37 @@ fn verification_without_execution_retry_action(
             != "verification must execute each frozen command exactly once and no other command"
     {
         return Ok(None);
+    }
+    Ok(Some(NextAction::RequestPrimaryVerification))
+}
+
+fn verification_environment_unavailable_retry_action(
+    state: &RunState,
+) -> Result<Option<NextAction>, CoordinatorError> {
+    if state.reason_code.as_deref() != Some("CARGO_UNAVAILABLE") {
+        return Ok(None);
+    }
+    if state.status != RunStatus::Blocked
+        || state.next_action != NextAction::Stop
+        || state.phase != Phase::Blocked
+    {
+        return Err(CoordinatorError::operational(
+            "INCOMPATIBLE_STATE",
+            "verification environment blocker is attached to inconsistent terminal metadata",
+        ));
+    }
+    if !state.test_evidence.is_empty()
+        || state.integration_branch.is_none()
+        || state.integration_sha.is_none()
+        || state.current_integration_payload.is_none()
+        || state.verification_worktree.is_none()
+        || state.required_test_commands.is_empty()
+        || state.accepted_result.is_some()
+    {
+        return Err(CoordinatorError::operational(
+            "MODEL_RESPONSE_RETRY_UNSAFE",
+            "verification environment recovery requires an unchanged unaccepted integration result",
+        ));
     }
     Ok(Some(NextAction::RequestPrimaryVerification))
 }
@@ -4653,5 +4887,17 @@ mod retry_safety_tests {
         ] {
             assert!(context_compaction_retry_blocker(&malformed).is_some());
         }
+    }
+
+    #[test]
+    fn verification_failure_output_is_utf8_safe_and_strictly_bounded() {
+        assert_eq!(bounded_verification_output("short output"), "short output");
+
+        let output = "界".repeat(MAX_VERIFICATION_FAILURE_OUTPUT_BYTES);
+        let bounded = bounded_verification_output(&output);
+
+        assert!(bounded.len() <= MAX_VERIFICATION_FAILURE_OUTPUT_BYTES);
+        assert!(bounded.starts_with(VERIFICATION_OUTPUT_TRUNCATION_MARKER));
+        assert!(bounded.ends_with('界'));
     }
 }

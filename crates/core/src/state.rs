@@ -578,6 +578,43 @@ impl RunState {
         Ok(self.next_action)
     }
 
+    pub fn retry_blocked_verification_environment_unavailable(
+        &mut self,
+    ) -> Result<NextAction, StateError> {
+        if self.status != RunStatus::Blocked
+            || self.phase != Phase::Blocked
+            || self.next_action != NextAction::Stop
+            || self.reason_code.as_deref() != Some("CARGO_UNAVAILABLE")
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "only a terminal CARGO_UNAVAILABLE verification turn can be retried",
+            ));
+        }
+        if !self.plan_approved
+            || self.integration_branch.is_none()
+            || self.integration_sha.is_none()
+            || self.current_integration_payload.is_none()
+            || self.verification_worktree.is_none()
+            || self.required_test_commands.is_empty()
+            || !self.test_evidence.is_empty()
+            || self.accepted_result.is_some()
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "verification environment recovery requires an unchanged unaccepted integration result",
+            ));
+        }
+
+        self.status = RunStatus::Running;
+        self.phase = Phase::Verify;
+        self.next_action = NextAction::RequestPrimaryVerification;
+        self.reason_code = None;
+        self.last_error = None;
+        self.validate_persisted()?;
+        Ok(self.next_action)
+    }
+
     pub fn retry_blocked_integration_execution_tool_unavailable(
         &mut self,
     ) -> Result<NextAction, StateError> {
@@ -759,6 +796,15 @@ impl RunState {
                 "INCOMPATIBLE_STATE",
                 "persisted active result state lacks canonical integration evidence",
             ));
+        }
+        if !self.test_evidence.is_empty() {
+            self.validate_complete_test_evidence(&self.test_evidence)
+                .map_err(|_| {
+                    state_error(
+                        "INCOMPATIBLE_STATE",
+                        "persisted result state has incomplete authoritative test evidence",
+                    )
+                })?;
         }
         if matches!(
             self.next_action,
@@ -1006,6 +1052,33 @@ impl RunState {
         }
         self.require_current_integration(&message)?;
         let evidence = test_evidence(&message.payload)?;
+        self.validate_complete_test_evidence(&evidence)?;
+        if evidence.iter().any(|entry| entry.exit_code != 0) {
+            self.test_evidence = evidence;
+            self.current_integration_payload = Some(message.payload.clone());
+            self.result_approved_sha = None;
+            self.last_result_feedback = Some(json!({
+                "format": "machine_verification",
+                "summary": "One or more frozen verification commands failed. Correct only the reported failures on the existing integration branch, then return a new integration result for isolated verification.",
+                "failed_tests": message
+                    .payload
+                    .get("verification_failures")
+                    .cloned()
+                    .unwrap_or_else(|| json!([])),
+                "verification_summary": message
+                    .payload
+                    .get("verification_summary")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            }));
+            if self.round >= self.max_review_rounds {
+                return Ok(self.block("ROUND_LIMIT"));
+            }
+            self.round += 1;
+            self.phase = Phase::Integrate;
+            self.next_action = NextAction::RequestPrimaryIntegration;
+            return Ok(self.next_action);
+        }
         self.test_evidence = evidence;
         self.current_integration_payload = Some(message.payload);
         self.result_approved_sha = None;
@@ -1139,8 +1212,23 @@ impl RunState {
     }
 
     fn validate_test_evidence(&self) -> Result<(), StateError> {
+        self.validate_complete_test_evidence(&self.test_evidence)?;
+        if self
+            .test_evidence
+            .iter()
+            .any(|evidence| evidence.exit_code != 0)
+        {
+            return Err(state_error(
+                "TEST_FAILURE",
+                "acceptance requires exact successful evidence for every frozen test command",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_complete_test_evidence(&self, evidence: &[TestEvidence]) -> Result<(), StateError> {
         if self.required_test_commands.is_empty()
-            || self.test_evidence.len() != self.required_test_commands.len()
+            || evidence.len() != self.required_test_commands.len()
             || self
                 .required_test_commands
                 .iter()
@@ -1149,24 +1237,23 @@ impl RunState {
                     command.trim().is_empty()
                         || self.required_test_commands[..index].contains(command)
                 })
-            || self.test_evidence.iter().any(|evidence| {
-                evidence.command.trim().is_empty()
-                    || evidence.exit_code != 0
-                    || evidence.turn_id.trim().is_empty()
-                    || evidence.item_id.trim().is_empty()
-                    || !evidence.cwd.is_absolute()
+            || evidence.iter().any(|entry| {
+                entry.command.trim().is_empty()
+                    || entry.turn_id.trim().is_empty()
+                    || entry.item_id.trim().is_empty()
+                    || !entry.cwd.is_absolute()
             })
             || self.required_test_commands.iter().any(|required| {
-                self.test_evidence
+                evidence
                     .iter()
-                    .filter(|evidence| evidence.command == *required && evidence.exit_code == 0)
+                    .filter(|entry| entry.command == *required)
                     .count()
                     != 1
             })
         {
             return Err(state_error(
                 "TEST_FAILURE",
-                "acceptance requires exact successful evidence for every frozen test command",
+                "verification requires exact terminal evidence for every frozen test command",
             ));
         }
         Ok(())

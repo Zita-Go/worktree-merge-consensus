@@ -66,8 +66,9 @@ canonical App Server turn. It computes and supplies all machine identity:
 - plan approval from the exact Reviewer turn that received that plan;
 - integration branch, HEAD SHA, changed files, ancestry, source-ref stability,
   cleanliness, and conflict-marker checks from Git;
-- test evidence from exact successful `commandExecution` items in the isolated
-  verification clone;
+- test evidence from exact completed `commandExecution` items in the isolated
+  verification clone, including authoritative exit codes and bounded diagnostic
+  output for failures;
 - final approval from the exact Reviewer turn that received the current result
   SHA.
 
@@ -93,8 +94,19 @@ only when the exact completed Primary verification turn returned a result but
 contains zero `commandExecution` items. Resume revalidates the unchanged
 integration result and isolated clone, rejects every side-effect-capable or
 unknown item, archives the empty turn atomically, and reissues the same frozen
-verification request once. A partial test run, failed command, second empty
-turn, or changed integration remains terminal.
+verification request once. A partial test run, second empty turn, or changed
+integration remains terminal.
+
+Release 0.2.2 requires the Primary to complete every frozen verification
+command even after a nonzero exit. `VERIFICATION_READY` signals only that the
+complete command evidence set exists. The coordinator derives every exit code
+and bounded diagnostic output itself. Any failed command routes the same Run
+back to a new controlled Primary integration round with that machine evidence;
+verification then runs against the new integration SHA, and Reviewer approval
+is requested only after all frozen commands pass. Explicit resume may also
+replace one exact, completed, side-effect-free `CARGO_UNAVAILABLE` verification
+blocker after the environment is repaired. The integration branch and Run ID
+remain unchanged, and a second such recovery is forbidden.
 
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the

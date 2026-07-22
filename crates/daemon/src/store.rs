@@ -5,7 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use consensus_core::state::{NextAction, Role, RunState, RunStatus};
+use consensus_core::state::{NextAction, Phase, Role, RunState, RunStatus};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -621,6 +621,107 @@ impl SqliteRunStore {
         if current_state != *blocked_state {
             return Err(StoreError::TerminalTurnNotRetryable(format!(
                 "run {run_id} changed while preparing execution-tool recovery"
+            )));
+        }
+
+        let common_dir = resumed_state.facts.git_common_dir.to_string_lossy();
+        match transaction.execute(
+            "INSERT INTO locks (repository_id, run_id, primary_worktree, acquired_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                common_dir.as_ref(),
+                run_id,
+                resumed_state
+                    .facts
+                    .primary_worktree
+                    .to_string_lossy()
+                    .as_ref(),
+                now_unix(),
+            ],
+        ) {
+            Ok(_) => {}
+            Err(error) if is_constraint(&error) => {
+                return Err(StoreError::ActiveRunExists(format!(
+                    "repository {} already has an active run",
+                    resumed_state.facts.git_common_dir.display()
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        archive_and_reset_turn(
+            &transaction,
+            &run_id,
+            &accepted.message_hash,
+            &accepted.thread_id,
+            &accepted.turn_id,
+            "ACCEPTED",
+            observed_status,
+        )?;
+        update_run_row(&transaction, &run_id, resumed_state)?;
+        transaction.execute(
+            "INSERT INTO transitions (
+                run_id, from_phase, to_phase, status, reason_code,
+                response_hash, created_at
+             ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)",
+            params![
+                run_id,
+                enum_name(&blocked_state.phase)?,
+                enum_name(&resumed_state.phase)?,
+                enum_name(&resumed_state.status)?,
+                now_unix(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn reactivate_blocked_run_with_accepted_verification_environment_retry(
+        &self,
+        blocked_state: &RunState,
+        resumed_state: &RunState,
+        accepted: &AcceptedTurn,
+        observed_status: &str,
+    ) -> Result<(), StoreError> {
+        if blocked_state.status != RunStatus::Blocked
+            || blocked_state.reason_code.as_deref() != Some("CARGO_UNAVAILABLE")
+            || resumed_state.status != RunStatus::Running
+            || resumed_state.phase != Phase::Verify
+            || resumed_state.next_action != NextAction::RequestPrimaryVerification
+            || blocked_state.facts != resumed_state.facts
+            || observed_status != "completed"
+        {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "blocked verification environment retry identity or status is invalid".into(),
+            ));
+        }
+
+        let run_id = blocked_state.facts.run_id.to_string();
+        if accepted.run_id != run_id
+            || accepted.role != "PRIMARY"
+            || accepted.phase != "VERIFY"
+            || accepted.round != blocked_state.round
+            || accepted.thread_id != blocked_state.facts.primary_thread_id
+        {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "accepted verification environment blocker does not match the frozen request"
+                    .into(),
+            ));
+        }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let current_json = transaction
+            .query_row(
+                "SELECT state_json FROM runs WHERE run_id = ?1",
+                [&run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::RunNotFound(run_id.clone()))?;
+        let current_state = deserialize_state(&current_json)?;
+        if current_state != *blocked_state {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "run {run_id} changed while preparing verification environment recovery"
             )));
         }
 

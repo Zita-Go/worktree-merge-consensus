@@ -332,6 +332,65 @@ fn verification_without_execution_restores_only_the_verification_action() {
 }
 
 #[test]
+fn cargo_environment_blocker_restores_only_the_verification_action() {
+    let integration_sha = "cccccccccccccccccccccccccccccccccccccccc";
+    let mut state = fixture_plan_state();
+    let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
+    state.apply_message(approved_plan(&plan_hash)).unwrap();
+    state
+        .apply_message(integration_created(integration_sha))
+        .unwrap();
+    state.verification_worktree = Some(PathBuf::from("/state/verification/run"));
+    state.block("CARGO_UNAVAILABLE");
+
+    let action = state
+        .retry_blocked_verification_environment_unavailable()
+        .unwrap();
+
+    assert_eq!(action, NextAction::RequestPrimaryVerification);
+    assert_eq!(state.status, RunStatus::Running);
+    assert_eq!(state.phase, Phase::Verify);
+    assert_eq!(state.integration_sha.as_deref(), Some(integration_sha));
+    assert!(state.reason_code.is_none());
+    assert!(state.test_evidence.is_empty());
+}
+
+#[test]
+fn completed_failed_verification_routes_machine_feedback_to_integration() {
+    let integration_sha = "cccccccccccccccccccccccccccccccccccccccc";
+    let mut state = fixture_plan_state();
+    let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
+    state.apply_message(approved_plan(&plan_hash)).unwrap();
+    state
+        .apply_message(integration_created(integration_sha))
+        .unwrap();
+    let mut verification = integration_ready(integration_sha);
+    verification.payload["test_evidence"][0]["exit_code"] = json!(1);
+    verification.payload["verification_failures"] = json!([{
+        "command": "cargo test",
+        "exit_code": 1,
+        "item_id": "test-command-1",
+        "output": "a compiler diagnostic"
+    }]);
+
+    let action = state.apply_message(verification).unwrap();
+
+    assert_eq!(action, NextAction::RequestPrimaryIntegration);
+    assert_eq!(state.status, RunStatus::Running);
+    assert_eq!(state.phase, Phase::Integrate);
+    assert_eq!(state.round, 2);
+    assert_eq!(state.integration_sha.as_deref(), Some(integration_sha));
+    assert_eq!(state.test_evidence[0].exit_code, 1);
+    let feedback = state.last_result_feedback.as_ref().unwrap();
+    assert_eq!(feedback["format"], "machine_verification");
+    assert_eq!(
+        feedback["failed_tests"][0]["output"],
+        "a compiler diagnostic"
+    );
+    state.validate_persisted().unwrap();
+}
+
+#[test]
 fn integration_invalid_response_retry_rejects_an_already_accepted_result() {
     let mut state = fixture_result_state("cccccccccccccccccccccccccccccccccccccccc");
     state.record_error(RunDiagnostic {

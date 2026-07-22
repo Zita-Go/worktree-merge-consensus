@@ -234,8 +234,10 @@ fn verification_prompt_requires_command_items_before_the_marker() {
     for required in [
         "Invoke the command-execution tool once for each required_test_commands entry",
         "using each exact command as one standalone tool call",
-        "Do not return VERIFICATION_READY before all required commandExecution items",
-        "a final answer without those tool items is invalid evidence",
+        "Always invoke the first command instead of inferring that its executable is unavailable",
+        "Continue through every remaining entry even when an earlier command exits nonzero",
+        "VERIFICATION_READY means the evidence set is complete",
+        "A final answer without all command items is invalid evidence",
         "<consensus-result>VERIFICATION_READY</consensus-result>",
     ] {
         assert!(prompt.contains(required), "missing {required:?}");
