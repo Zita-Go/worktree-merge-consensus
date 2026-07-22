@@ -425,6 +425,35 @@ async fn marker_only_verification_rejects_participant_side_effects_before_execut
 }
 
 #[tokio::test]
+async fn blocked_marker_only_verification_rejects_participant_side_effects_before_execution() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::new(marker_replies())
+            .with_marker_protocol()
+            .with_verification_behavior(VerificationBehavior::CargoUnavailable)
+            .with_verification_item("fileChange"),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let blocked = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(blocked.status, RunStatus::Blocked);
+    assert_eq!(blocked.reason_code.as_deref(), Some("FORBIDDEN_OPERATION"));
+    assert_eq!(blocked.accepted_result, None);
+    assert!(app.executed_commands().is_empty());
+}
+
+#[tokio::test]
 async fn marker_v2_blocked_reason_is_bound_to_the_pending_turn() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();

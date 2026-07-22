@@ -2282,11 +2282,13 @@ where
         let completed = self
             .wait_for_turn_response(state, &thread_id, &turn_id)
             .await?;
+        if action == NextAction::RequestPrimaryVerification {
+            verify_marker_only_verification_turn(&completed.turn)?;
+        }
         let mut message = self.normalize_model_response(state, action, &completed.response)?;
         let authoritative_verification = if action == NextAction::RequestPrimaryVerification
             && message.envelope.message_type == MessageType::IntegrationReady
         {
-            verify_marker_only_verification_turn(&completed.turn)?;
             Some(
                 self.execute_frozen_verification(state, &request_hash, &turn_id)
                     .await?,
