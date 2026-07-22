@@ -160,6 +160,11 @@ impl SqliteRunStore {
         command: &str,
         cwd: &Path,
     ) -> Result<VerificationCommandClaim, StoreError> {
+        let cwd_utf8 = cwd.to_str().ok_or_else(|| {
+            StoreError::IncompatibleState(format!(
+                "verification command cwd for run {run_id}, turn {turn_id}, index {command_index} is not valid UTF-8"
+            ))
+        })?;
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
         ensure_run_exists(&transaction, run_id)?;
@@ -214,7 +219,7 @@ impl SqliteRunStore {
                 item_id,
                 command_index,
                 command,
-                cwd.to_string_lossy().as_ref(),
+                cwd_utf8,
                 now_unix(),
             ],
         )?;

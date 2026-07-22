@@ -456,6 +456,37 @@ fn verification_command_started_row_fails_closed_as_uncertain() {
     assert_eq!(verification_command_row_count(&path), 1);
 }
 
+#[cfg(unix)]
+#[test]
+fn verification_command_non_utf8_cwd_is_rejected_without_mutation() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+    let rows_before = verification_command_row_count(&path);
+    let cwd = PathBuf::from(std::ffi::OsString::from_vec(
+        b"/verify/non-utf8-\xff".to_vec(),
+    ));
+
+    let error = store
+        .begin_verification_command(
+            RUN_ID,
+            "request-hash",
+            "turn-7",
+            0,
+            "cargo test --locked",
+            &cwd,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "INCOMPATIBLE_STATE");
+    assert_eq!(verification_command_row_count(&path), rows_before);
+}
+
 #[test]
 fn verification_command_identity_mismatch_fails_without_mutation() {
     let temp = tempfile::tempdir().unwrap();
