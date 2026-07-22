@@ -94,7 +94,7 @@ async fn cli_managed_app_server_identity_is_accepted_end_to_end() {
         temp.path(),
         &log,
         "0.144.6",
-        "worktree-merge-consensus/0.144.6 (Debian 12.0.0; x86_64) unknown (worktree-merge-consensus; 0.2.4)",
+        "worktree-merge-consensus/0.144.6 (Debian 12.0.0; x86_64) unknown (worktree-merge-consensus; 0.2.5)",
     );
 
     CodexAppServer::connect(ConnectOptions {
@@ -308,10 +308,7 @@ exit 2
         user_agent = user_agent,
         mode = mode,
     );
-    fs::write(&binary, script).unwrap();
-    let mut permissions = fs::metadata(&binary).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&binary, permissions).unwrap();
+    write_executable_script(&binary, &script);
     binary
 }
 
@@ -355,11 +352,17 @@ exit 2
         version,
         version,
     );
-    fs::write(&binary, script).unwrap();
-    let mut permissions = fs::metadata(&binary).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&binary, permissions).unwrap();
+    write_executable_script(&binary, &script);
     binary
+}
+
+fn write_executable_script(binary: &Path, script: &str) {
+    let temporary = binary.with_extension("tmp");
+    fs::write(&temporary, script).unwrap();
+    let mut permissions = fs::metadata(&temporary).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&temporary, permissions).unwrap();
+    fs::rename(temporary, binary).unwrap();
 }
 
 const FAKE_WEBSOCKET_PROXY: &str = r#"import base64

@@ -114,6 +114,11 @@ fn conflict_free() {
         ""
     );
     assert_eq!(git_text(&fixture.repository.primary, &["remote"]), "");
+    assert_eq!(
+        fixture.verification_command_count("test -f reviewer.txt"),
+        1
+    );
+    fixture.assert_no_participant_command_items();
     assert!(!fixture.events().contains("git push"));
 }
 
@@ -335,6 +340,11 @@ fn daemon_crash_recovers_a_dirty_in_progress_verification_clone() {
             .join("verification-artifact.txt")
             .exists()
     );
+    assert_eq!(
+        fixture.verification_command_count("touch verification-artifact.txt"),
+        1
+    );
+    fixture.assert_no_participant_command_items();
     fixture.assert_source_refs_unchanged();
 }
 
@@ -488,6 +498,22 @@ impl AcceptanceFixture {
 
     fn event_count(&self, event: &str) -> usize {
         self.events().lines().filter(|line| *line == event).count()
+    }
+
+    fn verification_command_count(&self, command: &str) -> usize {
+        let marker = format!(" {command} timeout=");
+        self.events()
+            .lines()
+            .filter(|line| line.starts_with("verification-test ") && line.contains(&marker))
+            .count()
+    }
+
+    fn assert_no_participant_command_items(&self) {
+        let turns = fs::read_to_string(self.fake_state.join("turns.jsonl")).unwrap_or_default();
+        assert!(
+            !turns.contains("\"type\":\"commandExecution\""),
+            "verification commands must not execute inside participant turns: {turns}"
+        );
     }
 
     fn integration_shas(&self) -> Vec<String> {

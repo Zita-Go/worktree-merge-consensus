@@ -22,7 +22,6 @@ struct Config {
     reviewer_thread_cwd: PathBuf,
     primary_worktree: PathBuf,
     reviewer_worktree: PathBuf,
-    git_common_dir: PathBuf,
     integration_branch: String,
     state_directory: PathBuf,
 }
@@ -175,6 +174,7 @@ fn handle_request(config: &Config, method: &str, params: &Value) -> Result<Value
         }
         "config/read" => Ok(controlled_patch_config(config)),
         "config/batchWrite" => configure_controlled_patch(config, params),
+        "command/exec" => execute_command(config, params),
         "turn/start" => start_turn(config, params),
         _ => Err(format!("unsupported method {method}")),
     }
@@ -294,30 +294,14 @@ fn start_turn(config: &Config, params: &Value) -> Result<Value, String> {
     let occurrence = action_count(config, action)?;
 
     let turn_id = format!("turn-{}", turn_count(config)? + 1);
-    let verification = if action == "REQUEST_PRIMARY_VERIFICATION" {
-        Some(run_verification(config, &payload, &turn_id)?)
-    } else {
-        None
-    };
-    let reply = scripted_reply(
-        config,
-        action,
-        occurrence,
-        &metadata,
-        &payload,
-        verification.as_ref(),
-    )?;
+    let reply = scripted_reply(config, action, occurrence, &metadata)?;
     let deferred = deferred_marker(config, action);
-    let mut turn = if deferred.is_some() {
+    let turn = if deferred.is_some() {
         let pending = PendingTurn {
             thread_id: thread_id.to_owned(),
             turn_id: turn_id.clone(),
             prompt: prompt.to_owned(),
             reply: reply.clone(),
-            command_items: verification
-                .as_ref()
-                .map(|result| result.command_items.clone())
-                .unwrap_or_default(),
         };
         fs::write(
             pending_path(config, &turn_id),
@@ -328,11 +312,6 @@ fn start_turn(config: &Config, params: &Value) -> Result<Value, String> {
     } else {
         completed_turn(&turn_id, prompt, &reply)
     };
-    if deferred.is_none() {
-        if let Some(verification) = verification {
-            append_command_items(&mut turn, verification.command_items);
-        }
-    }
     append_turn(config, thread_id, &turn)?;
     Ok(json!({
         "turn": {
@@ -385,7 +364,6 @@ fn validate_turn_policy(
     params: &Value,
     current: &Value,
 ) -> Result<(), String> {
-    let integration = action == "REQUEST_PRIMARY_INTEGRATION";
     let verification = action == "REQUEST_PRIMARY_VERIFICATION";
     let primary_action = matches!(
         action,
@@ -447,25 +425,7 @@ fn validate_turn_policy(
     if params.get("approvalPolicy") != Some(&json!(expected_approval)) {
         return Err("turn/start approval policy is not fail-closed".to_owned());
     }
-    let expected_sandbox = if integration {
-        json!({
-            "type": "workspaceWrite",
-            "writableRoots": [expected_cwd, config.git_common_dir],
-            "networkAccess": false,
-            "excludeSlashTmp": true,
-            "excludeTmpdirEnvVar": true
-        })
-    } else if verification {
-        json!({
-            "type": "workspaceWrite",
-            "writableRoots": [expected_cwd],
-            "networkAccess": false,
-            "excludeSlashTmp": false,
-            "excludeTmpdirEnvVar": false
-        })
-    } else {
-        json!({"type": "readOnly", "networkAccess": false})
-    };
+    let expected_sandbox = json!({"type": "dangerFullAccess"});
     if params.get("sandboxPolicy") != Some(&expected_sandbox) {
         return Err("turn/start sandbox policy is not pinned".to_owned());
     }
@@ -477,8 +437,6 @@ fn scripted_reply(
     action: &str,
     occurrence: usize,
     metadata: &Value,
-    _current: &Value,
-    verification: Option<&VerificationResult>,
 ) -> Result<String, String> {
     if config.scenario == "invalid_reply" && occurrence == 1 {
         return Ok("not a protocol response".to_owned());
@@ -535,13 +493,10 @@ fn scripted_reply(
                     .to_owned(),
             )
         }
-        "REQUEST_PRIMARY_VERIFICATION" => {
-            verification.ok_or_else(|| "verification execution is missing".to_owned())?;
-            Ok(
-                "<consensus-result>VERIFICATION_READY</consensus-result>\n\nThe frozen verification commands completed."
-                    .to_owned(),
-            )
-        }
+        "REQUEST_PRIMARY_VERIFICATION" => Ok(
+            "<consensus-result>VERIFICATION_READY</consensus-result>\n\nThe integration is ready for coordinator-owned verification."
+                .to_owned(),
+        ),
         "REQUEST_REVIEWER_RESULT_VERDICT" => Ok(
             "<consensus-result>APPROVED</consensus-result>\n\nThe exact tested integration result preserves both contracts."
                 .to_owned(),
@@ -611,54 +566,67 @@ fn integrate(config: &Config, metadata: &Value, occurrence: usize) -> Result<(),
     Ok(())
 }
 
-struct VerificationResult {
-    command_items: Vec<Value>,
-}
-
-fn run_verification(
-    config: &Config,
-    current: &Value,
-    turn_id: &str,
-) -> Result<VerificationResult, String> {
-    let cwd = current
-        .get("verification_worktree")
+fn execute_command(config: &Config, params: &Value) -> Result<Value, String> {
+    let command = params
+        .get("command")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "command/exec command is missing".to_owned())?
+        .iter()
+        .map(|argument| {
+            argument
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "command/exec argument is not a string".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (program, arguments) = command
+        .split_first()
+        .ok_or_else(|| "command/exec command is empty".to_owned())?;
+    let cwd = params
+        .get("cwd")
         .and_then(Value::as_str)
         .map(PathBuf::from)
-        .ok_or_else(|| "verification_worktree is missing".to_owned())?;
-    let cwd = fs::canonicalize(cwd)
-        .map_err(|error| format!("canonicalize verification worktree: {error}"))?;
-    let commands = current
-        .get("required_test_commands")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "required_test_commands is missing".to_owned())?;
-    let mut command_items = Vec::with_capacity(commands.len());
-    for (index, command) in commands.iter().enumerate() {
-        let command = command
-            .as_str()
-            .ok_or_else(|| "test command is not a string".to_owned())?;
-        append_event(
-            config,
-            &format!("verification-test {} {command}", cwd.display()),
-        )?;
-        let status = Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(&cwd)
-            .status()
-            .map_err(|error| format!("run test {command}: {error}"))?;
-        let exit_code = status.code().unwrap_or(1);
-        command_items.push(json!({
-            "id": format!("{turn_id}-command-{}", index + 1),
-            "type": "commandExecution",
-            "command": command,
-            "commandActions": [],
-            "cwd": cwd,
-            "status": "completed",
-            "exitCode": exit_code,
-            "source": "agent"
-        }));
+        .ok_or_else(|| "command/exec cwd is missing".to_owned())?;
+    let cwd =
+        fs::canonicalize(cwd).map_err(|error| format!("canonicalize command/exec cwd: {error}"))?;
+    let timeout_ms = params
+        .get("timeoutMs")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "command/exec timeoutMs must be greater than zero".to_owned())?;
+    let output_bytes_cap = params
+        .get("outputBytesCap")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "command/exec outputBytesCap must be greater than zero".to_owned())?;
+    if params.get("sandboxPolicy") != Some(&json!({"type": "dangerFullAccess"})) {
+        return Err("command/exec sandbox policy is not dangerFullAccess".to_owned());
     }
-    Ok(VerificationResult { command_items })
+
+    append_event(
+        config,
+        &format!(
+            "verification-test {} {} timeout={timeout_ms}",
+            cwd.display(),
+            command.join(" ")
+        ),
+    )?;
+    let output = Command::new(program)
+        .args(arguments)
+        .current_dir(&cwd)
+        .output()
+        .map_err(|error| format!("run command/exec {command:?}: {error}"))?;
+    Ok(json!({
+        "exitCode": output.status.code().unwrap_or(1),
+        "stdout": bounded_output(&output.stdout, output_bytes_cap),
+        "stderr": bounded_output(&output.stderr, output_bytes_cap)
+    }))
+}
+
+fn bounded_output(output: &[u8], cap: usize) -> String {
+    let start = output.len().saturating_sub(cap);
+    String::from_utf8_lossy(&output[start..]).into_owned()
 }
 
 fn prompt_json_block(prompt: &str, marker: &str) -> Result<Value, String> {
@@ -683,8 +651,6 @@ struct PendingTurn {
     turn_id: String,
     prompt: String,
     reply: String,
-    #[serde(default)]
-    command_items: Vec<Value>,
 }
 
 fn deferred_marker(config: &Config, action: &str) -> Option<&'static str> {
@@ -719,10 +685,7 @@ fn complete_deferred_turns(config: &Config) -> Result<(), String> {
             &fs::read(entry.path()).map_err(|error| format!("read pending turn: {error}"))?,
         )
         .map_err(|error| format!("parse pending turn: {error}"))?;
-        let mut turn = completed_turn(&pending.turn_id, &pending.prompt, &pending.reply);
-        if !pending.command_items.is_empty() {
-            append_command_items(&mut turn, pending.command_items);
-        }
+        let turn = completed_turn(&pending.turn_id, &pending.prompt, &pending.reply);
         append_turn(config, &pending.thread_id, &turn)?;
         fs::remove_file(entry.path()).map_err(|error| format!("remove pending turn: {error}"))?;
         append_event(config, &format!("completed deferred {}", pending.turn_id))?;
@@ -804,17 +767,6 @@ fn completed_turn(turn_id: &str, prompt: &str, reply: &str) -> Value {
             }
         ]
     })
-}
-
-fn append_command_items(turn: &mut Value, command_items: Vec<Value>) {
-    let items = turn["items"]
-        .as_array_mut()
-        .expect("completed turn items must be an array");
-    let assistant = items
-        .pop()
-        .expect("completed turn must end with an assistant item");
-    items.extend(command_items);
-    items.push(assistant);
 }
 
 fn append_turn(config: &Config, thread_id: &str, turn: &Value) -> Result<(), String> {
