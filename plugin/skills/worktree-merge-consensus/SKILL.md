@@ -18,6 +18,12 @@ verification summaries, and final reviews are free-form Markdown. The daemon,
 not either task, binds machine identity and derives Git and test evidence. This
 launcher never parses or relays those participant responses.
 
+Release 0.2.4 starts every coordinator-owned participant turn with App Server
+approval policy `never`. Contract, plan, integration, verification, and review
+therefore proceed without per-command user confirmation. The daemon still pins
+the role cwd, writable roots, offline sandbox, frozen refs, and evidence checks;
+do not request or apply a global Codex permission change.
+
 ## Tool surface
 
 `consensus_doctor` is an MCP tool, not a shell command. The same applies to every `consensus_*` name below. Call these names through the Codex tool interface. Never run `consensus_doctor` as an executable.
@@ -53,7 +59,7 @@ Use those CLI commands only for diagnostics or when the user explicitly requests
 4. Present the registered entries with path, source ref or detached state, full HEAD SHA, and clean state. Assign two different, available, clean worktrees as primary and reviewer sources.
 5. Show one complete mapping: `primary_thread` → `primary_worktree`/ref/SHA and `reviewer_thread` → `reviewer_worktree`/ref/SHA. Ask the user to confirm this exact mapping. Do not continue without confirmation.
 6. Call `consensus_start` with all four required fields: `primary_thread`, `reviewer_thread`, `primary_worktree`, and `reviewer_worktree`. Include `integration_branch` only when the user supplied a unique new branch name. Include `test_commands` only when the user supplied additional verification commands.
-7. Report the returned `run_id` and initial status. State that the result will remain on a new local integration branch and both frozen source refs remain protected. End the launch turn.
+7. Report the returned `run_id` and initial status. State that the coordinator's participant turns are unattended, the result will remain on a new local integration branch, and both frozen source refs remain protected. End the launch turn.
 
 The launcher does not conduct or relay review rounds. The persistent coordinator handles contracts, plan revisions, integration, verification, final approval, recovery, and fail-closed pauses.
 
@@ -211,6 +217,10 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   cannot repeat any patch, branch creation, merge, or source-ref update.
   Network, added-permission, later-phase, mismatched, or side-effectful cases
   remain terminal.
+  Version 0.2.4 sends approval policy `never` for every coordinator-started
+  turn, including integration and isolated verification. Do not ask the user to
+  approve individual participant commands; inspect `consensus_status` if the
+  Run pauses because event evidence or a sandbox boundary rejected an action.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
 Read [references/protocol.md](references/protocol.md) when explaining lifecycle states, acceptance evidence, or recovery behavior.

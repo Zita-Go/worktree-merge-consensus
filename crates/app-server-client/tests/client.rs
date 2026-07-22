@@ -127,7 +127,7 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
 
         let integration_turn = read_request(&mut lines).await;
         assert_eq!(integration_turn["method"], "turn/start");
-        assert_eq!(integration_turn["params"]["approvalPolicy"], "untrusted");
+        assert_eq!(integration_turn["params"]["approvalPolicy"], "never");
         assert_eq!(
             integration_turn["params"]["environments"],
             json!([{"environmentId": "local", "cwd": "/repo/primary"}])
@@ -156,7 +156,7 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
 
         let verification_turn = read_request(&mut lines).await;
         assert_eq!(verification_turn["method"], "turn/start");
-        assert_eq!(verification_turn["params"]["approvalPolicy"], "untrusted");
+        assert_eq!(verification_turn["params"]["approvalPolicy"], "never");
         assert_eq!(
             verification_turn["params"]["environments"],
             json!([{

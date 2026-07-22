@@ -2,9 +2,9 @@
 
 ## Supported versions
 
-Only the latest published 0.1.x release receives security fixes while the
-project remains pre-1.0. The supported Codex version floor and runtime adapter
-checks are listed in [the compatibility policy](docs/compatibility.md).
+Only the latest published pre-1.0 release receives security fixes. The
+supported Codex version floor and runtime adapter checks are listed in
+[the compatibility policy](docs/compatibility.md).
 
 ## Report a vulnerability privately
 
@@ -32,15 +32,20 @@ secrets, and local filesystem identities.
   the private state directory.
 - Review App Server turns are read-only and offline. The integration turn is
   offline, can write only the primary worktree and source Git common directory,
-  and is guarded by deterministic command approvals. It cannot run tests. The
+  and cannot run tests. The
   separate verification turn is offline and can write only a clean, detached,
   remote-free clone of the exact integration SHA; its Git common directory is
   independent of the source repository. It may run only exact frozen test
-  commands. Forbidden publication, destructive Git, shell chaining, dynamic
-  command launchers, and permission escalation are cancelled. The command gate
+  commands. Every coordinator-started turn uses approval policy `never`, so no
+  participant action waits for interactive user confirmation. Forbidden
+  publication, destructive Git, shell chaining, dynamic command launchers, and
+  permission escalation reject acceptance when observed in authoritative event
+  evidence. The command gate
   removes at most one App Server-generated known-shell wrapper before checking
   the exact inner command; nested shells, subcommand callbacks, and non-local
-  environments remain denied. Every turn
+  environments fail the Run. The offline, pinned writable-root sandbox is the
+  preventive boundary; unattended mode intentionally does not provide a human
+  pre-execution checkpoint inside those roots. Every turn
   explicitly disables inherited sticky execution environments.
 - Both source refs and SHAs are frozen and revalidated. Integration may occur
   only on a unique new local branch.

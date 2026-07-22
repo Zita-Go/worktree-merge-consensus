@@ -208,22 +208,22 @@ reported cwd, contract, plan, and review turns supply the explicitly bound
 absolute role worktree, one runtime workspace root, a read-only sandbox, network
 disabled, and approval policy `never`. The authorized primary integration turn
 supplies only the primary worktree and source Git common directory as writable
-roots, disables network and temporary-directory writes, and uses approval
-policy `untrusted`; the daemon accepts only a narrow set of branch creation,
-exact-SHA merge, staging, commit, and read-only Git commands. The primary
-verification turn supplies only the isolated clone as a writable root, remains
-offline, uses approval policy `untrusted`, and accepts only exact frozen tests.
-App Server may attach a `proposedExecpolicyAmendment` to a one-time command
-approval. The coordinator ignores that proposal and returns plain `accept`; it
-never applies or persists the amendment. Additional filesystem, network, and
-network-policy requests are still cancelled. A unified-exec approval reports
+roots and disables network and temporary-directory writes. The primary
+verification turn supplies only the isolated clone as a writable root and
+remains offline. Both write-capable turns also use approval policy `never`, so
+the workflow never waits for interactive command or file approval. The daemon
+admits a result only when persisted command evidence contains the narrow set of
+branch creation, exact-SHA merge, staging, commit, read-only Git, and exact
+frozen-test commands allowed for that phase. Additional filesystem, network,
+and network-policy requests are still rejected. A unified-exec item reports
 one shell-joined wrapper such as `/bin/bash -lc '<script>'`; the coordinator
 removes exactly one known-shell `-c` or `-lc` wrapper and applies the same
 allowlist to the inner script. Nested dynamic launchers, non-null subcommand
-`approvalId` callbacks, and non-`local` execution environments are cancelled.
+`approvalId` callbacks, and non-`local` execution environments fail the Run.
 Publication, destructive Git operations, shell chaining, wrong-directory
-execution, and added permission requests are cancelled at the App Server
-request boundary.
+execution, and added permission requests cannot be accepted. The pinned offline
+sandbox is the preventive boundary; `never` intentionally removes interactive
+pre-execution review inside those writable roots.
 
 ## Durability and delivery
 

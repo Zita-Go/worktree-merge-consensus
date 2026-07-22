@@ -771,7 +771,7 @@ fn turn_policy_params(
             Ok((
                 json!(cwd),
                 json!([cwd]),
-                json!("untrusted"),
+                json!("never"),
                 json!({
                     "type": "workspaceWrite",
                     "writableRoots": [cwd, git_common_dir],
@@ -786,7 +786,7 @@ fn turn_policy_params(
             Ok((
                 json!(cwd),
                 json!([cwd]),
-                json!("untrusted"),
+                json!("never"),
                 json!({
                     "type": "workspaceWrite",
                     "writableRoots": [cwd],

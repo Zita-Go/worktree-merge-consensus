@@ -62,6 +62,10 @@ the evidence below.
    diagnostics. Exercise one nonzero command and confirm the same Run returns
    to a controlled integration correction, verifies the new SHA, and proceeds
    to result review only after every frozen command passes.
+   Confirm every coordinator-started turn sends `approvalPolicy: "never"` and
+   neither task asks the user to approve a command, file operation, or internal
+   controlled patch. Confirm the writable roots and offline network policy are
+   unchanged despite the unattended approval policy.
    On an App Server whose completed `thread/read` history omits command or MCP
    items, confirm the daemon has persisted matching `item/started`,
    `item/completed`, and `turn/completed` evidence in private SQLite and still
@@ -140,6 +144,7 @@ Replace `NOT_RECORDED` only with reproducible, redacted evidence.
 | Source refs unchanged | `NOT_RECORDED` |
 | Required tests | `NOT_RECORDED` |
 | Verification clone / command-item evidence | `NOT_RECORDED` |
+| Unattended turns / no user approval prompts | `NOT_RECORDED` |
 | App Server proxy reconnection | `NOT_RECORDED` |
 | Controlled-patch approval configuration/recovery | `NOT_RECORDED` |
 | Restart recovery | `NOT_RECORDED` |

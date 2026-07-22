@@ -39,15 +39,21 @@ into an existing branch, update either source ref, rebase, reset, delete, or
 clean up worktrees.
 
 This is enforced beyond prompt text: review turns are read-only and offline;
-the primary integration turn is offline, has bounded source-repository writable
-roots, and can run only a narrow Git command set. The separate verification
-turn can write only inside the isolated clone and can run only the exact frozen
-test commands. Each command must appear exactly once as a successful App Server
+the primary integration turn is offline and has bounded source-repository
+writable roots. The separate verification turn can write only inside the
+isolated clone. Every coordinator-started turn uses App Server approval policy
+`never`, so the two participant tasks do not pause for interactive command or
+file approvals. Each accepted integration command must remain in the narrow Git
+allowlist, and each frozen test must run exactly once. Every command must appear
+exactly once as a successful App Server
 `commandExecution` item with the expected cwd; a model's self-reported success
 is not evidence. Frozen tests must be direct non-Git commands; Git executables,
 shell control, and dynamic shell or interpreter launchers are rejected.
-Deterministic approval rules cancel publication, destructive Git, shell
-chaining, wrong-directory commands, and permission escalation.
+The coordinator rejects acceptance when event evidence contains publication,
+destructive Git, shell chaining, wrong-directory commands, or permission
+escalation. The offline, run-scoped sandbox remains the preventive boundary;
+because approval policy `never` deliberately removes interactive pre-execution
+review, use unattended runs only with trusted tasks and repository contents.
 Conflict scanning uses Git's actual primary-to-result diff, including large
 text files, rather than the task's file list.
 
@@ -146,6 +152,12 @@ for the exact prior sequence of an empty verification attempt followed by one
 `CARGO_UNAVAILABLE` recovery and then missing persisted command evidence. It
 never repeats a patch, branch creation, merge, or source-ref update.
 
+Version 0.2.4 makes all coordinator-started turns fully unattended by sending
+App Server approval policy `never` for integration and isolated verification as
+well as read-only review. This removes per-command human confirmation without
+changing the pinned writable roots, offline sandbox, exact command-evidence
+checks, source-ref validation, or the request-bound patch-tool approval.
+
 Read [the v2 participant protocol](docs/protocol-v2.md), the
 [legacy v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
@@ -174,8 +186,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.3-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.3-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.4-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.4-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or

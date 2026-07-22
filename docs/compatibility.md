@@ -146,21 +146,23 @@ Every `turn/start` also carries the pinned role-specific cwd, runtime workspace
 roots, approval policy, a same-host `local` environment selection with that
 cwd, and one of three sandbox profiles: offline read-only
 review, offline primary integration with source worktree/Git-common writes, or
-offline primary verification with only the isolated clone writable. The
-App Server may include a `proposedExecpolicyAmendment` in an approval request;
-the coordinator's plain one-time `accept` does not apply that proposal. The
-proposal therefore does not by itself fail the command gate, while actual
-additional filesystem or network permissions still fail closed. App Server
-reports a unified-exec command as a shell-joined argument vector, normally one
+offline primary verification with only the isolated clone writable. All three
+profiles send approval policy `never`, so participant turns are fully
+unattended and do not surface per-command human approval. Actual additional
+filesystem or network permissions still fail closed. App Server reports a
+unified-exec command as a shell-joined argument vector, normally one
 known shell followed by `-c` or `-lc` and the model's script. The coordinator
 removes exactly that one wrapper before applying its existing allowlist to the
-inner command. Nested launchers, non-null subcommand `approvalId` values, and
-non-`local` execution environments remain denied. Target-existence preflight is
+inner command evidence. Nested launchers, non-null subcommand `approvalId`
+values, and non-`local` execution environments reject the Run. Target-existence preflight is
 limited to `git show-ref --verify` with the exact frozen integration ref or
 `git branch --list` with the exact frozen integration branch; no other form of
 either subcommand is accepted. The
 integration profile disables temporary-directory writes; the verification
 profile permits temporary build artifacts but has no source Git-common root.
+With interactive approval disabled, these offline writable-root boundaries are
+the preventive sandbox; command evidence and frozen-ref checks determine
+whether the result may be accepted.
 These fields are part of the checked-in `supported-methods` fixture and are
 process-tested. An adapter change must revalidate their semantics and the
 `commandExecution` item fields (`id`, `command`, `cwd`, `status`, `exitCode`,

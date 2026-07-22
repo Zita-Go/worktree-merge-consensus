@@ -78,14 +78,14 @@
       "networkAccess": false
     },
     "primaryIntegrationWorkspaceWrite": {
-      "approvalPolicy": "untrusted",
+      "approvalPolicy": "never",
       "writableRootRoles": ["primaryWorktree", "sourceGitCommonDirectory"],
       "networkAccess": false,
       "excludeSlashTmp": true,
       "excludeTmpdirEnvVar": true
     },
     "primaryVerificationWorkspaceWrite": {
-      "approvalPolicy": "untrusted",
+      "approvalPolicy": "never",
       "writableRootRoles": ["isolatedVerificationClone"],
       "networkAccess": false,
       "excludeSlashTmp": false,

@@ -119,6 +119,12 @@ one exact empty-verification plus `CARGO_UNAVAILABLE` recovery sequence may be
 followed by one side-effect-free evidence-compatibility retry; SQLite records
 that allowance so it cannot repeat.
 
+Release 0.2.4 makes coordinator-started participant turns fully unattended.
+Every `turn/start` sends approval policy `never`, including integration and
+isolated verification, while retaining the pinned offline sandbox, writable
+roots, exact event evidence, and frozen-source checks. No participant command
+or file operation should wait for interactive user approval.
+
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the
 [legacy v1 protocol](protocol-v1.md).

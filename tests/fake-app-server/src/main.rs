@@ -443,11 +443,7 @@ fn validate_turn_policy(
     {
         return Err("turn/start local execution environment is not pinned".to_owned());
     }
-    let expected_approval = if integration || verification {
-        "untrusted"
-    } else {
-        "never"
-    };
+    let expected_approval = "never";
     if params.get("approvalPolicy") != Some(&json!(expected_approval)) {
         return Err("turn/start approval policy is not fail-closed".to_owned());
     }
