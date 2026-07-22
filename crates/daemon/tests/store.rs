@@ -1,6 +1,10 @@
 use std::path::PathBuf;
 
-use consensus_core::state::{NextAction, Role, RunDiagnostic, RunFacts, RunState, RunStatus};
+use consensus_core::{
+    canonical_json_hash,
+    protocol::validate_message,
+    state::{NextAction, Role, RunDiagnostic, RunFacts, RunState, RunStatus},
+};
 use consensus_daemon::store::{SqliteRunStore, VerificationCommandClaim};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
@@ -310,6 +314,138 @@ fn completed_read_only_retry_reactivates_a_legacy_blocked_run_atomically() {
         store.insert_run(&competing).unwrap_err().code(),
         "ACTIVE_RUN_EXISTS"
     );
+}
+
+#[test]
+fn unattended_verification_migration_is_atomic_and_bounded_to_one_retry() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    let message_hash = "legacy-verification-request";
+    let (blocked, resumed) = seed_legacy_verification_compatibility_retry(&store, message_hash);
+    store
+        .record_successful_patch(RUN_ID, "integration-request", "patch-hash")
+        .unwrap();
+
+    store
+        .reactivate_blocked_run_with_unattended_verification_retry(
+            &blocked,
+            &resumed,
+            message_hash,
+            "primary-thread",
+            "turn-4",
+            "completed",
+        )
+        .unwrap();
+
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), resumed);
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    assert!(pending.thread_id.is_none());
+    assert!(pending.turn_id.is_none());
+    assert_eq!(migration_statuses(&path, message_hash), vec![
+        "completed",
+        "completed",
+        "completed-evidence-unavailable",
+        "completed-unattended-verification-migration",
+    ]);
+    assert!(
+        store
+            .successful_patch_recorded(RUN_ID, "integration-request")
+            .unwrap()
+    );
+
+    let mut blocked_again = resumed.clone();
+    record_missing_verification_diagnostic(&mut blocked_again);
+    blocked_again.block("TEST_FAILURE");
+    store.save_state(&blocked_again).unwrap();
+    store
+        .record_turn_started(RUN_ID, message_hash, "primary-thread", "turn-5")
+        .unwrap();
+    let mut resumed_again = blocked_again.clone();
+    resumed_again
+        .retry_blocked_verification_without_execution()
+        .unwrap();
+
+    let error = store
+        .reactivate_blocked_run_with_unattended_verification_retry(
+            &blocked_again,
+            &resumed_again,
+            message_hash,
+            "primary-thread",
+            "turn-5",
+            "completed",
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "TERMINAL_TURN_NOT_RETRYABLE");
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), blocked_again);
+    assert_eq!(
+        store
+            .pending_send(RUN_ID)
+            .unwrap()
+            .unwrap()
+            .turn_id
+            .as_deref(),
+        Some("turn-5")
+    );
+    assert_eq!(migration_statuses(&path, message_hash).len(), 4);
+}
+
+#[test]
+fn unattended_verification_migration_rejects_changed_identity_without_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    let message_hash = "legacy-verification-request";
+    let (blocked, resumed) = seed_legacy_verification_compatibility_retry(&store, message_hash);
+
+    let wrong_turn = store
+        .reactivate_blocked_run_with_unattended_verification_retry(
+            &blocked,
+            &resumed,
+            message_hash,
+            "primary-thread",
+            "turn-5",
+            "completed",
+        )
+        .unwrap_err();
+    let mut changed_sha = resumed.clone();
+    changed_sha.integration_sha = Some("dddddddddddddddddddddddddddddddddddddddd".into());
+    let changed_state = store
+        .reactivate_blocked_run_with_unattended_verification_retry(
+            &blocked,
+            &changed_sha,
+            message_hash,
+            "primary-thread",
+            "turn-4",
+            "completed",
+        )
+        .unwrap_err();
+    let wrong_status = store
+        .reactivate_blocked_run_with_unattended_verification_retry(
+            &blocked,
+            &resumed,
+            message_hash,
+            "primary-thread",
+            "turn-4",
+            "failed",
+        )
+        .unwrap_err();
+
+    assert_eq!(wrong_turn.code(), "TERMINAL_TURN_NOT_RETRYABLE");
+    assert_eq!(changed_state.code(), "TERMINAL_TURN_NOT_RETRYABLE");
+    assert_eq!(wrong_status.code(), "TERMINAL_TURN_NOT_RETRYABLE");
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), blocked);
+    assert_eq!(
+        store
+            .pending_send(RUN_ID)
+            .unwrap()
+            .unwrap()
+            .turn_id
+            .as_deref(),
+        Some("turn-4")
+    );
+    assert_eq!(migration_statuses(&path, message_hash).len(), 3);
 }
 
 #[test]
@@ -663,6 +799,172 @@ fn fixture_run(run_id: &str, common_dir: &str) -> RunState {
         primary_ref: Some("refs/heads/primary".into()),
         reviewer_ref: Some("refs/heads/reviewer".into()),
     })
+}
+
+fn seed_legacy_verification_compatibility_retry(
+    store: &SqliteRunStore,
+    message_hash: &str,
+) -> (RunState, RunState) {
+    let mut blocked = fixture_integrated_run();
+    record_missing_verification_diagnostic(&mut blocked);
+    blocked.block("TEST_FAILURE");
+    store.insert_run(&blocked).unwrap();
+    store
+        .record_pending_send(RUN_ID, "PRIMARY", "VERIFY", blocked.round, message_hash)
+        .unwrap();
+    for turn_id in ["turn-1", "turn-2"] {
+        store
+            .record_turn_started(RUN_ID, message_hash, "primary-thread", turn_id)
+            .unwrap();
+        store
+            .reset_completed_read_only_turn_for_retry(
+                RUN_ID,
+                message_hash,
+                "primary-thread",
+                turn_id,
+                "completed",
+            )
+            .unwrap();
+    }
+    store
+        .record_turn_started(RUN_ID, message_hash, "primary-thread", "turn-3")
+        .unwrap();
+    let mut compatibility_resumed = blocked.clone();
+    compatibility_resumed
+        .retry_blocked_verification_without_execution()
+        .unwrap();
+    store
+        .reactivate_blocked_run_with_verification_evidence_retry(
+            &blocked,
+            &compatibility_resumed,
+            message_hash,
+            "primary-thread",
+            "turn-3",
+            "completed",
+        )
+        .unwrap();
+
+    let mut final_blocked = compatibility_resumed;
+    record_missing_verification_diagnostic(&mut final_blocked);
+    final_blocked.block("TEST_FAILURE");
+    store.save_state(&final_blocked).unwrap();
+    store
+        .record_turn_started(RUN_ID, message_hash, "primary-thread", "turn-4")
+        .unwrap();
+    let mut resumed = final_blocked.clone();
+    resumed
+        .retry_blocked_verification_without_execution()
+        .unwrap();
+    (final_blocked, resumed)
+}
+
+fn fixture_integrated_run() -> RunState {
+    let mut state = fixture_run(RUN_ID, "/repo/.git");
+    state
+        .configure_integration("consensus/test-run", vec!["cargo test".into()])
+        .unwrap();
+    for (role, goal) in [("PRIMARY", "primary"), ("REVIEWER", "reviewer")] {
+        state
+            .apply_message(store_message(json!({
+                "message_type": "CONTRACT_READY",
+                "phase": "CONTRACT",
+                "round": 1,
+                "plan_revision": null,
+                "integration_branch": null,
+                "integration_sha": null,
+                "reason_code": null,
+                "payload": {
+                    "role": role,
+                    "contract": {"goal": goal, "tests": ["cargo test"]}
+                }
+            })))
+            .unwrap();
+    }
+    state
+        .record_plan(json!({
+            "revision": 1,
+            "coverage": ["primary", "reviewer"],
+            "test_commands": ["cargo test"]
+        }))
+        .unwrap();
+    let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
+    state
+        .apply_message(store_message(json!({
+            "message_type": "APPROVED_PLAN",
+            "phase": "PLAN_REVIEW",
+            "round": 1,
+            "plan_revision": 1,
+            "integration_branch": null,
+            "integration_sha": null,
+            "reason_code": null,
+            "payload": {
+                "approved_plan_revision": 1,
+                "approved_primary_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "approved_reviewer_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "approved_plan_hash": plan_hash,
+                "uncovered_items": []
+            }
+        })))
+        .unwrap();
+    state
+        .apply_message(store_message(json!({
+            "message_type": "INTEGRATION_READY",
+            "phase": "INTEGRATE",
+            "round": 1,
+            "plan_revision": 1,
+            "integration_branch": "consensus/test-run",
+            "integration_sha": "cccccccccccccccccccccccccccccccccccccccc",
+            "reason_code": null,
+            "payload": {
+                "changed_files": ["combined.txt"],
+                "integration_evidence": {"summary": "created"}
+            }
+        })))
+        .unwrap();
+    state.verification_worktree = Some(PathBuf::from("/state/verification/run"));
+    state
+}
+
+fn record_missing_verification_diagnostic(state: &mut RunState) {
+    state.record_error(RunDiagnostic {
+        code: "TEST_FAILURE".into(),
+        detail: "verification must execute each frozen command exactly once and no other command"
+            .into(),
+        operation: None,
+        action: NextAction::RequestPrimaryVerification,
+        role: Some(Role::Primary),
+        thread_id: Some("primary-thread".into()),
+    });
+}
+
+fn store_message(fields: Value) -> consensus_core::protocol::ProtocolMessage {
+    let mut value = json!({
+        "protocol": "worktree-merge-consensus/v1",
+        "run_id": RUN_ID,
+        "primary_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "reviewer_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    });
+    value
+        .as_object_mut()
+        .unwrap()
+        .extend(fields.as_object().unwrap().clone());
+    validate_message(value).unwrap()
+}
+
+fn migration_statuses(path: &std::path::Path, message_hash: &str) -> Vec<String> {
+    let connection = Connection::open(path).unwrap();
+    let mut statement = connection
+        .prepare(
+            "SELECT terminal_status FROM turn_attempts
+             WHERE run_id = ?1 AND message_hash = ?2
+             ORDER BY id ASC",
+        )
+        .unwrap();
+    statement
+        .query_map(params![RUN_ID, message_hash], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
 }
 
 fn verification_command_row_count(path: &std::path::Path) -> i64 {

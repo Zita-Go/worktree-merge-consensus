@@ -982,6 +982,100 @@ impl SqliteRunStore {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn reactivate_blocked_run_with_unattended_verification_retry(
+        &self,
+        blocked_state: &RunState,
+        resumed_state: &RunState,
+        message_hash: &str,
+        thread_id: &str,
+        turn_id: &str,
+        observed_status: &str,
+    ) -> Result<(), StoreError> {
+        let mut expected_resumed_state = blocked_state.clone();
+        if expected_resumed_state
+            .retry_blocked_verification_without_execution()
+            .is_err()
+            || expected_resumed_state != *resumed_state
+            || thread_id != blocked_state.facts.primary_thread_id
+            || observed_status != "completed"
+        {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "unattended verification migration identity or status is invalid".into(),
+            ));
+        }
+
+        let run_id = blocked_state.facts.run_id.to_string();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let current_json = transaction
+            .query_row(
+                "SELECT state_json FROM runs WHERE run_id = ?1",
+                [&run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::RunNotFound(run_id.clone()))?;
+        let current_state = deserialize_state(&current_json)?;
+        if current_state != *blocked_state {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "run {run_id} changed while preparing unattended verification migration"
+            )));
+        }
+        let (compatibility_retry_count, migration_retry_count) = transaction.query_row(
+            "SELECT
+                COALESCE(SUM(CASE WHEN terminal_status = 'completed-evidence-unavailable' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN terminal_status = 'completed-unattended-verification-migration' THEN 1 ELSE 0 END), 0)
+             FROM turn_attempts
+             WHERE run_id = ?1 AND message_hash = ?2",
+            params![run_id, message_hash],
+            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)),
+        )?;
+        if compatibility_retry_count != 1 || migration_retry_count != 0 {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "unattended verification migration requires one prior evidence compatibility retry and no prior migration"
+                    .into(),
+            ));
+        }
+
+        let common_dir = resumed_state.facts.git_common_dir.to_string_lossy();
+        match transaction.execute(
+            "INSERT INTO locks (repository_id, run_id, primary_worktree, acquired_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                common_dir.as_ref(),
+                run_id,
+                resumed_state
+                    .facts
+                    .primary_worktree
+                    .to_string_lossy()
+                    .as_ref(),
+                now_unix(),
+            ],
+        ) {
+            Ok(_) => {}
+            Err(error) if is_constraint(&error) => {
+                return Err(StoreError::ActiveRunExists(format!(
+                    "repository {} already has an active run",
+                    resumed_state.facts.git_common_dir.display()
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        archive_and_reset_turn(
+            &transaction,
+            &run_id,
+            message_hash,
+            thread_id,
+            turn_id,
+            "SENT",
+            "completed-unattended-verification-migration",
+        )?;
+        update_run_row(&transaction, &run_id, resumed_state)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn reactivate_blocked_run_with_interrupted_forbidden_operation_retry(
         &self,
         blocked_state: &RunState,
