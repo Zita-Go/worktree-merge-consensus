@@ -3464,6 +3464,13 @@ where
         let source_thread_id = state.facts.primary_thread_id.as_str();
         self.verify_thread_identity(state, Role::Primary, source)?;
         require_idle_thread(source, "Source Primary before participant fork")?;
+        let goal = self.get_thread_goal_with_retry(source_thread_id).await?;
+        if goal.is_some() {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "Source Primary has an active goal and cannot be forked safely",
+            ));
+        }
 
         let policy = ThreadForkPolicy::EphemeralParticipant(self.participant_mcp_config());
         let forked = self
@@ -3483,13 +3490,6 @@ where
         }
         verify_full_history_fork(source, &forked)?;
         require_idle_thread(&forked, "ephemeral Primary fork")?;
-        let goal = self.get_thread_goal_with_retry(effective_thread_id).await?;
-        if goal.is_some() {
-            return Err(CoordinatorError::operational(
-                "HISTORY_UNAVAILABLE",
-                "ephemeral Primary fork unexpectedly inherited an active goal",
-            ));
-        }
         let statuses = self
             .list_mcp_server_status_for_preflight(effective_thread_id)
             .await?;

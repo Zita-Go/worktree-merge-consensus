@@ -160,11 +160,15 @@ it is `notLoaded`, the coordinator loads it with the task-scoped
 **Effective Primary**. A preloaded Source Primary with exactly
 `consensus_apply_patch` also binds directly. A preloaded Source Primary without
 that tool is represented by a `thread/fork` created with `ephemeral: true` and
-`excludeTurns: false`. The fork is accepted only if it is an idle, ephemeral
-full-history mirror with the same canonical turn-ID sequence,
-`thread/goal/get` returns null, and its complete MCP inventory is exact. It
+`excludeTurns: false`, producing an ephemeral full-history mirror. Before the
+fork, `thread/goal/get` on the Source Primary
+must return null, and the fork request must not carry or continue a goal. The
+fork is accepted only if it is an idle, ephemeral full-history mirror with the
+same canonical turn-ID sequence and an exact complete MCP inventory. It
 represents the Source Primary rather than becoming a third source or reviewer,
-and it carries no active Source goal.
+and it carries no active Source goal. The coordinator does not query
+`thread/goal/get` on the ephemeral mirror because supported Codex runtimes may
+reject goal operations for ephemeral tasks.
 
 Before every Primary turn, the coordinator resumes the Effective Primary and
 fully paginates `mcpServerStatus/list` before `turn/start`. The only accepted

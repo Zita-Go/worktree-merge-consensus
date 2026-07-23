@@ -563,6 +563,21 @@ async fn loaded_primary_uses_one_full_history_ephemeral_mirror() {
             .filter(|request| request.contains("REQUEST_REVIEWER"))
             .all(|request| request.starts_with("reviewer:"))
     );
+    let methods = app.method_order();
+    let source_goal = methods
+        .iter()
+        .position(|method| method == "thread/goal/get:primary")
+        .unwrap();
+    let fork = methods
+        .iter()
+        .position(|method| method == "thread/fork:primary:primary-consensus-mirror-1")
+        .unwrap();
+    assert!(source_goal < fork);
+    assert!(
+        methods
+            .iter()
+            .all(|method| method != "thread/goal/get:primary-consensus-mirror-1")
+    );
     assert_primary_turns_have_exact_preflight(&app, "primary-consensus-mirror-1");
     assert_eq!(app.turn_ids("primary"), source_turn_ids);
     assert!(
@@ -605,7 +620,7 @@ async fn invalid_primary_mirror_fails_before_any_model_turn() {
             "reviewer-id" => base.with_fork_identity(ForkIdentity::Reviewer),
             "missing-history" => base.with_fork_history(ForkHistory::MissingLast),
             "reordered-history" => base.with_fork_history(ForkHistory::Reversed),
-            "goal" => base.with_fork_goal(json!({"status": "active"})),
+            "goal" => base.with_source_goal(json!({"status": "active"})),
             "active" => base.with_fork_runtime_status(ThreadRuntimeStatus::Active),
             "missing-tool" => base.with_participant_inventory(ParticipantInventory::MissingTool),
             "expanded-inventory" => {
@@ -642,7 +657,11 @@ async fn invalid_primary_mirror_fails_before_any_model_turn() {
             Some(expected_reason),
             "case={case}"
         );
-        assert_eq!(app.forks().len(), 1, "case={case}");
+        assert_eq!(
+            app.forks().len(),
+            usize::from(case != "goal"),
+            "case={case}"
+        );
         assert!(app.request_order().is_empty(), "case={case}");
         assert!(
             safety
@@ -4948,7 +4967,6 @@ struct FakeAppServer {
     fork_identity: ForkIdentity,
     fork_history: ForkHistory,
     fork_runtime_status: ThreadRuntimeStatus,
-    fork_goal: Option<Value>,
     participant_status_calls: AtomicUsize,
     participant_failure_after_status_calls: Option<usize>,
     remove_mirror_after_request: Option<usize>,
@@ -5056,7 +5074,6 @@ impl FakeAppServer {
             fork_identity: ForkIdentity::Mirror,
             fork_history: ForkHistory::Exact,
             fork_runtime_status: ThreadRuntimeStatus::Idle,
-            fork_goal: None,
             participant_status_calls: AtomicUsize::new(0),
             participant_failure_after_status_calls: None,
             remove_mirror_after_request: None,
@@ -5124,8 +5141,11 @@ impl FakeAppServer {
         self
     }
 
-    fn with_fork_goal(mut self, goal: Value) -> Self {
-        self.fork_goal = Some(goal);
+    fn with_source_goal(self, goal: Value) -> Self {
+        self.goals
+            .lock()
+            .unwrap()
+            .insert("primary".to_owned(), Some(goal));
         self
     }
 
@@ -5624,12 +5644,6 @@ impl AppServer for FakeAppServer {
             .lock()
             .unwrap()
             .insert(effective_thread_id.clone());
-        if let Some(goal) = &self.fork_goal {
-            self.goals
-                .lock()
-                .unwrap()
-                .insert(effective_thread_id.clone(), Some(goal.clone()));
-        }
         self.forks.lock().unwrap().push((
             source_thread_id.to_owned(),
             effective_thread_id.clone(),

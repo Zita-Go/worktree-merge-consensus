@@ -340,12 +340,12 @@ fn thread_goal(config: &Config, params: &Value) -> Result<Value, String> {
         .get("threadId")
         .and_then(Value::as_str)
         .ok_or_else(|| "thread/goal/get threadId is missing".to_owned())?;
-    if active_primary_mirror(config).as_deref() != Some(thread_id) {
+    if thread_id != config.primary_thread {
         return Err(format!(
-            "thread/goal/get requested unknown mirror {thread_id}"
+            "thread/goal/get must inspect the Source Primary before forking: {thread_id}"
         ));
     }
-    let goal = if config.scenario == "mirror_goal_present" {
+    let goal = if config.scenario == "source_goal_present" {
         json!({"id": "unexpected-active-goal"})
     } else {
         Value::Null
@@ -610,7 +610,7 @@ fn participant_is_available(config: &Config, thread_id: &str) -> bool {
             config.scenario.as_str(),
             "primary_not_loaded"
                 | "primary_loaded_without_participant"
-                | "mirror_goal_present"
+                | "source_goal_present"
                 | "mirror_history_mismatch"
         )
 }

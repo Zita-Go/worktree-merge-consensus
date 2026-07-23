@@ -127,10 +127,12 @@ App Server `command/exec` 完成的协调器自有验证。结构化命令结果
 任务作用域的 `worktreeMergeConsensusParticipant` 配置加载它，并把 **Effective Primary**
 直接绑定到同一任务；已加载且已经精确暴露 `consensus_apply_patch` 的 Source Primary 也直接
 绑定。若已加载的 Source Primary 缺少该精确工具，协调器不会试图原地改变它，而会调用
-`thread/fork`，传入 `ephemeral: true`、`excludeTurns: false` 和参与配置。只有 turn ID
-完整历史完全一致、状态为空闲、`thread/goal/get` 返回 null、分页 MCP 清单精确时，才接受这个
-ephemeral 完整历史镜像。作为 Effective Primary 的镜像只代表 Source Primary，不是第三个源
-任务或复核任务，也不会继承活动 goal。
+Source Primary 的 `thread/goal/get`，并要求结果为 null，随后才调用 `thread/fork`，传入
+`ephemeral: true`、`excludeTurns: false` 和参与配置；fork 请求不会携带或继续 goal。只有
+turn ID 完整历史完全一致、镜像状态为空闲、分页 MCP 清单精确时，才接受这个 ephemeral
+完整历史镜像。作为 Effective Primary 的镜像只代表 Source Primary，不是第三个源任务或
+复核任务，也不会继承活动 goal。部分受支持的 Codex 运行时会拒绝对 ephemeral 任务查询
+goal，因此协调器不会对镜像调用 `thread/goal/get`。
 
 在每个主修动作（契约、方案、集成和验证）之前，协调器都会恢复 Effective Primary，并在
 `turn/start` 前读取 `mcpServerStatus/list` 的全部页面；参与服务必须只暴露

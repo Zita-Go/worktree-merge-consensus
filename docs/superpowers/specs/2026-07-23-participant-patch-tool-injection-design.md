@@ -174,19 +174,17 @@ are frozen but before the first Primary `turn/start`.
    - if the exact participant capability is present, bind directly;
    - if it is absent, create a mirror instead of retrying an ineffective
      resume override.
-4. Create the mirror with `thread/fork` using:
+4. Call `thread/goal/get` for the Source Primary and require no current goal.
+   Supported Codex runtimes may reject goal operations for ephemeral tasks, so
+   this check must occur before the fork.
+5. Create the mirror with `thread/fork` using:
    - the Source Primary task ID;
    - the complete history, with no last-turn cutoff and no excluded turns;
    - `ephemeral: true`;
    - the exact participant MCP override;
    - no goal-carry or automatic-continuation option.
-5. Require the returned mirror ID to be nonempty and different from both
+6. Require the returned mirror ID to be nonempty and different from both
    selected source task IDs.
-6. Call `thread/goal/get` for the mirror and require no current goal. This
-   postcondition is mandatory on every supported Codex version and avoids
-   relying on version-specific goal defaults. The coordinator deliberately
-   does not use `deferGoalContinuation`, so it remains compatible with
-   `0.144.1`.
 7. Require the mirror to be idle and pass capability preflight.
 8. Atomically persist the binding before starting any Primary turn.
 
@@ -338,9 +336,11 @@ verification evidence, or uncertain pending turn remains terminal.
   server: `PATCH_TOOL_UNAVAILABLE`, before `turn/start`.
 - Loaded Source Primary lacks the exact server: attempt one mirror binding for
   that generation.
-- Mirror creation, identity, idle-state, or no-goal postcondition fails:
-  `PATCH_TOOL_UNAVAILABLE` or `COMMUNICATION_FAILURE`, according to whether the
-  failure is a capability or transport failure, before `turn/start`.
+- Source Primary has an active goal: `HISTORY_UNAVAILABLE` before
+  `thread/fork`.
+- Mirror creation, identity, history, or idle-state validation fails:
+  the corresponding identity, history, or communication error before
+  `turn/start`.
 - MCP inventory is incomplete, cyclic, duplicated, malformed, or lacks the
   exact participant tool: `PATCH_TOOL_UNAVAILABLE`, before `turn/start`.
 - App Server lacks `thread/fork`, `thread/goal/get`, or
@@ -382,7 +382,8 @@ from Codex `0.144.1`. There remains no maximum Codex version gate.
   fork with the exact configuration.
 - An active Source Primary is never forked.
 - A mirror with an empty, colliding, or Reviewer task ID is rejected.
-- A mirror with a current goal is rejected before `turn/start`.
+- A Source Primary with a current goal is rejected before `thread/fork`.
+- No goal operation is attempted on an ephemeral mirror.
 - No request uses `deferGoalContinuation`.
 - Multi-page inventory succeeds only after all pages are validated.
 - Cursor cycles, duplicate participant entries, malformed pages, and bounds

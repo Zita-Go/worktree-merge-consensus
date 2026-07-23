@@ -650,26 +650,28 @@ cargo test --locked -p consensus-daemon --test coordinator loaded_primary_uses_o
 cargo test --locked -p consensus-daemon --test coordinator invalid_primary_mirror_fails_before_any_model_turn
 ```
 
-Expected: compilation or assertion failure because `thread/fork`, goal
-postcondition, and Effective Primary routing are not implemented.
+Expected: compilation or assertion failure because `thread/fork`, the Source
+goal precondition, and Effective Primary routing are not implemented.
 
-- [ ] **Step 6: Implement mirror creation and history/goal postconditions**
+- [ ] **Step 6: Implement mirror creation and Source goal precondition**
 
 `create_ephemeral_primary_binding` must:
 
 1. re-read and verify the exact Source Primary;
 2. require Source runtime `idle`;
-3. call non-retrying `thread/fork` once;
-4. reject an empty, Source, or Reviewer ID;
-5. compare the source and fork turn ID sequences exactly;
-6. require mirror runtime `idle`;
-7. call `thread/goal/get` and require `None`;
+3. call `thread/goal/get` on the Source Primary and require `None`;
+4. call non-retrying `thread/fork` once;
+5. reject an empty, Source, or Reviewer ID;
+6. compare the source and fork turn ID sequences exactly;
+7. require mirror runtime `idle`;
 8. require the exact participant server and patch tool;
 9. atomically activate the new binding;
 10. return only after the store can reload the same binding.
 
-Do not send `deferGoalContinuation`. Do not call `thread/goal/clear`; a carried
-goal is a failed postcondition, not a state the coordinator may mutate.
+Do not send `deferGoalContinuation`. Do not call `thread/goal/get` or
+`thread/goal/clear` on an ephemeral mirror; supported Codex runtimes may reject
+goal operations for ephemeral tasks. A Source goal is a failed precondition,
+not state the coordinator may mutate.
 
 - [ ] **Step 7: Add Source/Effective identity to every Primary prompt**
 
@@ -920,7 +922,7 @@ git commit -m "fix: bind primary recovery and patches to execution provenance"
 - Consumes the final AppServer and coordinator interfaces.
 - Adds process scenarios:
   `primary_not_loaded`, `primary_loaded_without_participant`,
-  `primary_loaded_with_participant`, `mirror_goal_present`,
+  `primary_loaded_with_participant`, `source_goal_present`,
   `mirror_history_mismatch`, and `participant_status_paginated`.
 
 - [ ] **Step 1: Write failing process-level acceptance tests**
@@ -971,7 +973,7 @@ fn preloaded_primary_uses_ephemeral_full_history_binding() {
     let mirror = "primary-thread-consensus-mirror-1";
     let binding_event =
         format!("primary-binding primary-thread {mirror} EPHEMERAL_FORK 1");
-    let goal_event = format!("method thread/goal/get {mirror} null");
+    let goal_event = "method thread/goal/get primary-thread null";
 
     assert_eq!(accepted["status"], "ACCEPTED", "{events}");
     assert_eq!(accepted["accepted_result"]["tests"][0]["exit_code"], 0);
@@ -1019,7 +1021,8 @@ The loaded case must additionally require:
 - a configured `thread/resume` on the loaded Source does not alter its MCP
   inventory;
 - exactly one `thread/fork`;
-- exactly one null `thread/goal/get`;
+- exactly one null `thread/goal/get` on the Source Primary before the fork;
+- no goal operation on the ephemeral mirror;
 - all Primary `turn/start` events use the mirror;
 - all Reviewer events use the selected Reviewer;
 - the Source Primary receives no coordinator turn.
@@ -1046,7 +1049,8 @@ Persist task runtime metadata under the fake state directory. Implement:
 - `thread/fork` copying every Source turn, assigning
   `primary-thread-consensus-mirror-1`, applying participant config, and marking
   it ephemeral;
-- `thread/goal/get` returning the scenario's null or object goal;
+- `thread/goal/get` on the Source Primary returning the scenario's null or
+  object goal before any fork;
 - paginated `mcpServerStatus/list` with required `nextCursor`;
 - turn policy accepting the Effective Primary ID while retaining the frozen
   Source Primary worktree as cwd.
@@ -1056,9 +1060,9 @@ do not depend on timing.
 
 - [ ] **Step 4: Add fail-closed end-to-end scenarios**
 
-For `mirror_goal_present` and `mirror_history_mismatch`, assert:
+For `source_goal_present` and `mirror_history_mismatch`, assert:
 
-- reason is `PATCH_TOOL_UNAVAILABLE` or `HISTORY_UNAVAILABLE`, respectively;
+- reason is `HISTORY_UNAVAILABLE`;
 - no `turn/start` occurs;
 - the integration branch remains absent;
 - both source refs and worktrees remain unchanged.

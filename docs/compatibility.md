@@ -167,12 +167,15 @@ Source Primary is resumed with the task-scoped
 `worktreeMergeConsensusParticipant` configuration and becomes the **Effective
 Primary** directly. A preloaded Source Primary with the exact participant
 inventory also binds directly. A preloaded Source Primary without that tool is
-not reconfigured in place: the coordinator calls `thread/fork` with
-`threadId`, `config`, `ephemeral: true`, and `excludeTurns: false`. It accepts
-the ephemeral full-history mirror only when every canonical turn ID matches
-the Source, the mirror is idle, `thread/goal/get` returns null, and the
-participant inventory is exact. The mirror represents the Source Primary; it
-is not an additional source or reviewer and no active Source goal is carried.
+not reconfigured in place: the coordinator first calls `thread/goal/get` on the
+Source Primary and requires null, then calls `thread/fork` with `threadId`,
+`config`, `ephemeral: true`, and `excludeTurns: false`, without carrying or
+continuing a goal. It accepts the ephemeral full-history mirror only when every
+canonical turn ID matches the Source, the mirror is idle, and the participant
+inventory is exact. The mirror represents the Source Primary; it is not an
+additional source or reviewer and no active Source goal is carried. Because
+supported Codex runtimes may reject goal queries for ephemeral tasks, the
+mirror itself is never passed to `thread/goal/get`.
 
 Before every Primary action, the coordinator resumes the Effective Primary and
 fully paginates `mcpServerStatus/list` using `threadId`, `detail:

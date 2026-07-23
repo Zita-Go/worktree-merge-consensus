@@ -191,12 +191,16 @@ selected task is the **Source Primary**. If App Server reports it as
 Primary** directly to that same task. A preloaded Source Primary that already
 has exactly `consensus_apply_patch` also binds directly. A preloaded Source
 Primary without that exact tool is not mutated in place: the coordinator calls
+`thread/goal/get` on the Source Primary and requires null before it calls
 `thread/fork` with `ephemeral: true`, `excludeTurns: false`, and the participant
-configuration, then accepts the ephemeral full-history mirror only after its
-complete turn-ID sequence matches, it is idle, `thread/goal/get` returns null,
-and its paginated MCP inventory is exact. The Effective Primary mirror
-represents the Source Primary; it is not a third source or reviewer and carries
-no active Source goal.
+configuration. In other words, a preloaded Source Primary without the tool uses
+an ephemeral full-history mirror. The fork request does not carry or continue a
+goal. The coordinator accepts the ephemeral full-history mirror only after its
+complete turn-ID sequence matches, it is idle, and its paginated MCP inventory
+is exact. The Effective Primary mirror represents the Source Primary; it is not
+a third source or reviewer and carries no active Source goal. Supported Codex
+runtimes may reject goal queries on ephemeral tasks, so the coordinator never
+calls `thread/goal/get` on the mirror.
 
 Before every Primary action, including contract, plan, integration, and
 verification, the coordinator resumes the Effective Primary and consumes every

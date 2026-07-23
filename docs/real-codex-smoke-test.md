@@ -83,11 +83,13 @@ the evidence below.
    Source Primary, and no `thread/fork` occurs. Then use a preloaded Source
    Primary without the participant tool; confirm one non-retried
    `thread/fork` creates an `ephemeral: true`, `excludeTurns: false`,
-   full-history Effective Primary mirror, the complete Source turn-ID sequence
-   matches, and `thread/goal/get` returns null. Confirm the mirror carries no
-   active Source goal, receives every Primary action, and is not treated as a
-   third source or reviewer. Reviewer routing must remain unchanged, and both
-   selected source task IDs, refs, SHAs, and worktrees must stay frozen.
+   full-history Effective Primary mirror only after `thread/goal/get` on the
+   Source Primary returns null. Confirm the fork request does not carry or
+   continue a goal, the complete Source turn-ID sequence matches, the mirror is
+   idle, and no goal query is sent to the ephemeral mirror. Confirm the mirror
+   receives every Primary action and is not treated as a third source or
+   reviewer. Reviewer routing must remain unchanged, and both selected source
+   task IDs, refs, SHAs, and worktrees must stay frozen.
    Before every Primary `turn/start`, confirm the coordinator resumes the
    Effective Primary and consumes all `mcpServerStatus/list` pages until it
    finds exactly `consensus_apply_patch`.

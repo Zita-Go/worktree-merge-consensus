@@ -45,10 +45,13 @@ the **Effective Primary**. A preloaded Source Primary with the exact tool also
 binds directly. A preloaded Source Primary without that capability is not
 mutated in place: `thread/fork` creates an `ephemeral: true`,
 `excludeTurns: false` full-history mirror with the participant configuration.
-The coordinator requires matching canonical turn IDs, idle status,
-`thread/goal/get: null`, and an exact inventory before using that mirror. The
-mirror represents the Source Primary; it is not a third source or reviewer and
-does not carry an active Source goal.
+Before forking, the coordinator requires `thread/goal/get: null` on the Source
+Primary and omits goal carry or continuation from the fork request. It then
+requires matching canonical turn IDs, idle mirror status, and an exact
+inventory before using that mirror. The mirror represents the Source Primary;
+it is not a third source or reviewer and does not carry an active Source goal.
+The coordinator never queries a goal on the ephemeral mirror because supported
+Codex runtimes may reject goal operations for ephemeral tasks.
 
 Before every Primary turn, the coordinator resumes the Effective Primary and
 fully paginates `mcpServerStatus/list` before `turn/start`. The only accepted

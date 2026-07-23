@@ -503,7 +503,7 @@ fn preloaded_primary_uses_ephemeral_full_history_binding() {
     let events = fixture.events();
     let mirror = "primary-thread-consensus-mirror-1";
     let binding_event = format!("primary-binding primary-thread {mirror} EPHEMERAL_FORK 1");
-    let goal_event = format!("method thread/goal/get {mirror} null");
+    let goal_event = "method thread/goal/get primary-thread null";
 
     assert_eq!(accepted["status"], "ACCEPTED", "{events}");
     assert_eq!(accepted["accepted_result"]["tests"][0]["exit_code"], 0);
@@ -529,13 +529,7 @@ fn preloaded_primary_uses_ephemeral_full_history_binding() {
             .count(),
         1
     );
-    assert_eq!(
-        events
-            .lines()
-            .filter(|line| *line == goal_event.as_str())
-            .count(),
-        1
-    );
+    assert_eq!(events.lines().filter(|line| *line == goal_event).count(), 1);
     assert!(
         events
             .lines()
@@ -561,7 +555,7 @@ fn preloaded_primary_uses_ephemeral_full_history_binding() {
 #[test]
 fn invalid_mirror_postconditions_fail_before_any_turn_or_git_write() {
     for (scenario, reason) in [
-        ("mirror_goal_present", "HISTORY_UNAVAILABLE"),
+        ("source_goal_present", "HISTORY_UNAVAILABLE"),
         ("mirror_history_mismatch", "HISTORY_UNAVAILABLE"),
     ] {
         let fixture = AcceptanceFixture::new(scenario, false);
@@ -579,6 +573,14 @@ fn invalid_mirror_postconditions_fail_before_any_turn_or_git_write() {
         );
         assert!(!events.lines().any(|line| line.starts_with("turn ")));
         assert!(!events.lines().any(|line| line.starts_with("git ")));
+        assert_eq!(
+            events
+                .lines()
+                .filter(|line| line.starts_with("method thread/fork "))
+                .count(),
+            usize::from(scenario != "source_goal_present"),
+            "scenario={scenario}\n{events}"
+        );
         fixture.assert_source_refs_unchanged();
         fixture.assert_source_worktrees_clean_and_at_frozen_heads();
         fixture.assert_branch_absent();
