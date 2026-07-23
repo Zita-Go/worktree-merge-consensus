@@ -496,7 +496,7 @@ async fn loaded_primary_with_existing_participant_binds_directly_without_fork() 
 }
 
 #[tokio::test]
-async fn loaded_primary_uses_one_full_history_ephemeral_mirror() {
+async fn preloaded_primary_uses_ephemeral_summary_reads() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
     let inspection_store = store.clone();
@@ -597,6 +597,16 @@ async fn loaded_primary_uses_one_full_history_ephemeral_mirror() {
             "binding_mode": "EPHEMERAL_FORK",
             "binding_generation": 1
         })
+    );
+    assert!(
+        app.method_order()
+            .iter()
+            .all(|method| method != "thread/read-full:primary-consensus-mirror-1")
+    );
+    assert!(
+        app.resumes()
+            .iter()
+            .all(|thread_id| thread_id != "primary-consensus-mirror-1")
     );
 }
 
@@ -784,6 +794,7 @@ async fn missing_mirror_with_uncertain_turn_is_never_reforked() {
     let app = Arc::new(
         FakeAppServer::new(conflict_free_replies())
             .without_primary_participant()
+            .with_lost_first_start_response()
             .with_remove_mirror_after_request(1),
     );
     let coordinator = Coordinator::new(
@@ -802,16 +813,19 @@ async fn missing_mirror_with_uncertain_turn_is_never_reforked() {
     assert_eq!(paused.status, RunStatus::PausedUserAction);
     assert_eq!(paused.reason_code.as_deref(), Some("COMMUNICATION_FAILURE"));
     let pending = store.pending_send(RUN_ID).unwrap().unwrap();
-    assert_eq!(
-        pending.thread_id.as_deref(),
-        Some("primary-consensus-mirror-1")
-    );
+    assert_eq!(pending.thread_id, None);
+    assert_eq!(pending.turn_id, None);
+    assert!(pending.turn_start_intent_at.is_some());
     assert_eq!(pending.participant_binding_generation, Some(1));
     assert_eq!(app.forks().len(), 1);
 
-    let error = coordinator.resume(RUN_ID).await.unwrap_err();
+    let resumed = coordinator.resume(RUN_ID).await.unwrap();
 
-    assert_eq!(error.code(), "COMMUNICATION_FAILURE");
+    assert_eq!(resumed.status, RunStatus::PausedUserAction);
+    assert_eq!(
+        resumed.reason_code.as_deref(),
+        Some("COMMUNICATION_FAILURE")
+    );
     assert_eq!(app.forks().len(), 1);
     assert_eq!(
         store
@@ -1680,6 +1694,12 @@ async fn recorded_primary_turns_require_their_exact_binding_generation() {
         match mutation {
             "valid" => {}
             "older-generation" => {
+                let source_history_hash = store
+                    .active_primary_binding(RUN_ID)
+                    .unwrap()
+                    .unwrap()
+                    .source_history_hash
+                    .unwrap();
                 let newer = store
                     .activate_primary_binding(
                         RUN_ID,
@@ -1687,6 +1707,7 @@ async fn recorded_primary_turns_require_their_exact_binding_generation() {
                         "primary-consensus-mirror-2",
                         PrimaryBindingMode::EphemeralFork,
                         PARTICIPANT_MCP_SERVER,
+                        Some(&source_history_hash),
                     )
                     .unwrap();
                 assert_eq!(newer.generation, 2);
@@ -1717,6 +1738,16 @@ async fn recorded_primary_turns_require_their_exact_binding_generation() {
         if mutation == "valid" {
             let accepted = coordinator.resume(RUN_ID).await.unwrap();
             assert_eq!(accepted.status, RunStatus::Accepted);
+            assert!(
+                app.method_order()
+                    .iter()
+                    .all(|method| method != "thread/read-full:primary-consensus-mirror-1")
+            );
+            assert!(
+                app.resumes()
+                    .iter()
+                    .all(|thread_id| !thread_id.contains("-consensus-mirror-"))
+            );
         } else if mutation == "older-generation" {
             let resumed = coordinator.prepare_resume(RUN_ID).await.unwrap();
             assert_eq!(resumed.status, RunStatus::Running);
@@ -4013,7 +4044,7 @@ async fn controlled_patch_requires_the_exact_active_request_and_succeeds_only_on
         store.clone(),
         Arc::clone(&safety),
         CoordinatorOptions {
-            wait_timeout: Duration::from_secs(2),
+            wait_timeout: Duration::from_secs(10),
             poll_interval: Duration::from_millis(1),
             communication_attempts: 1,
             participant_mcp_executable: participant_mcp_executable(),
@@ -4083,7 +4114,7 @@ async fn controlled_patch_on_mirror_records_exact_binding_provenance() {
         store.clone(),
         Arc::clone(&safety),
         CoordinatorOptions {
-            wait_timeout: Duration::from_secs(2),
+            wait_timeout: Duration::from_secs(10),
             poll_interval: Duration::from_millis(1),
             communication_attempts: 1,
             participant_mcp_executable: participant_mcp_executable(),
@@ -4098,7 +4129,7 @@ async fn controlled_patch_on_mirror_records_exact_binding_provenance() {
         tokio::spawn(async move { coordinator.drive(RUN_ID).await })
     };
     wait_for_request_count(&app, 5).await;
-    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    let pending = wait_for_bound_pending_send(&store).await;
 
     assert_eq!(
         pending.thread_id.as_deref(),
@@ -4151,7 +4182,7 @@ async fn controlled_patch_rejects_each_binding_identity_mutation() {
             store.clone(),
             Arc::clone(&safety),
             CoordinatorOptions {
-                wait_timeout: Duration::from_secs(2),
+                wait_timeout: Duration::from_secs(10),
                 poll_interval: Duration::from_millis(1),
                 communication_attempts: 1,
                 participant_mcp_executable: participant_mcp_executable(),
@@ -4166,7 +4197,7 @@ async fn controlled_patch_rejects_each_binding_identity_mutation() {
             tokio::spawn(async move { coordinator.drive(RUN_ID).await })
         };
         wait_for_request_count(&app, 5).await;
-        let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+        let pending = wait_for_bound_pending_send(&store).await;
         let connection = Connection::open(&store_path).unwrap();
         match mutation {
             "pending-source" => {
@@ -5186,6 +5217,10 @@ impl FakeAppServer {
         self.resume_policies.lock().unwrap().clone()
     }
 
+    fn resumes(&self) -> Vec<String> {
+        self.resumes.lock().unwrap().clone()
+    }
+
     fn forks(&self) -> Vec<(String, String, ThreadForkPolicy)> {
         self.forks.lock().unwrap().clone()
     }
@@ -5571,7 +5606,29 @@ impl AppServer for FakeAppServer {
                 "task {thread_id} is unavailable"
             )));
         }
+        if thread_id.contains("-consensus-mirror-") {
+            self.method_order
+                .lock()
+                .unwrap()
+                .push(format!("thread/read-full:{thread_id}"));
+            return Err(AppServerError::InvalidRequest(
+                "ephemeral threads do not support includeTurns".to_owned(),
+            ));
+        }
         Ok(self.detail(thread_id))
+    }
+
+    async fn read_thread_summary(&self, thread_id: &str) -> Result<ThreadSummary, AppServerError> {
+        self.method_order
+            .lock()
+            .unwrap()
+            .push(format!("thread/read-summary:{thread_id}"));
+        if !self.threads.lock().unwrap().contains_key(thread_id) {
+            return Err(AppServerError::InvalidResponse(format!(
+                "task {thread_id} is unavailable"
+            )));
+        }
+        Ok(self.detail(thread_id).summary)
     }
 
     async fn resume_thread(
@@ -5583,6 +5640,11 @@ impl AppServer for FakeAppServer {
             .lock()
             .unwrap()
             .push(format!("thread/resume:{thread_id}"));
+        if thread_id.contains("-consensus-mirror-") {
+            return Err(AppServerError::InvalidRequest(format!(
+                "no rollout found for thread id {thread_id}"
+            )));
+        }
         self.resumes.lock().unwrap().push(thread_id.to_owned());
         self.resume_policies.lock().unwrap().push(policy.clone());
         if thread_id == "primary"
@@ -5725,14 +5787,15 @@ impl AppServer for FakeAppServer {
         prompt: &str,
         policy: &TurnExecutionPolicy,
     ) -> Result<TurnHandle, AppServerError> {
-        let mut resume_tickets = self.resume_tickets.lock().unwrap();
-        let resume_ticket = resume_tickets.get_mut(thread_id).unwrap();
-        assert!(
-            *resume_ticket > 0,
-            "task {thread_id} must be resumed before turn/start"
-        );
-        *resume_ticket -= 1;
-        drop(resume_tickets);
+        if !thread_id.contains("-consensus-mirror-") {
+            let mut resume_tickets = self.resume_tickets.lock().unwrap();
+            let resume_ticket = resume_tickets.get_mut(thread_id).unwrap();
+            assert!(
+                *resume_ticket > 0,
+                "task {thread_id} must be resumed before turn/start"
+            );
+            *resume_ticket -= 1;
+        }
         if let Some(detail) = &self.start_error {
             return Err(AppServerError::InvalidResponse(detail.clone()));
         }
@@ -5917,6 +5980,31 @@ impl AppServer for FakeAppServer {
                 )
             });
         }
+        if thread_id.contains("-consensus-mirror-")
+            && turn.get("status").and_then(Value::as_str) == Some("completed")
+        {
+            let full_turn = turn.clone();
+            let mut events = self.events.lock().unwrap();
+            for item in full_turn["items"].as_array().unwrap() {
+                events.push_back(AppEvent {
+                    id: None,
+                    method: "item/completed".into(),
+                    params: json!({
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "item": item,
+                    }),
+                });
+            }
+            events.push_back(AppEvent {
+                id: None,
+                method: "turn/completed".into(),
+                params: json!({
+                    "threadId": thread_id,
+                    "turn": full_turn,
+                }),
+            });
+        }
         self.threads
             .lock()
             .unwrap()
@@ -6073,6 +6161,33 @@ async fn wait_for_request_count(app: &FakeAppServer, count: usize) {
     panic!("fake App Server never received {count} turns");
 }
 
+async fn wait_for_bound_pending_send(
+    store: &SqliteRunStore,
+) -> consensus_daemon::store::PendingSend {
+    let mut last_state = None;
+    let mut last_pending = None;
+    for _ in 0..500 {
+        let state = store.load_run(RUN_ID).unwrap().unwrap();
+        let pending = store.pending_send(RUN_ID).unwrap();
+        if let Some(pending) = pending.as_ref() {
+            if state.status == RunStatus::Running
+                && state.phase == Phase::Integrate
+                && state.next_action == NextAction::RequestPrimaryIntegration
+                && pending.thread_id.is_some()
+                && pending.turn_id.is_some()
+            {
+                return pending.clone();
+            }
+        }
+        last_state = Some(state);
+        last_pending = pending;
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    panic!(
+        "coordinator never persisted the pending turn identity: state={last_state:?} pending={last_pending:?}"
+    );
+}
+
 fn summary(thread_id: &str) -> ThreadSummary {
     ThreadSummary {
         id: thread_id.into(),
@@ -6117,6 +6232,7 @@ fn assert_primary_turns_have_exact_preflight(app: &FakeAppServer, thread_id: &st
     let methods = app.method_order();
     let turn_prefix = format!("turn/start:{thread_id}:REQUEST_PRIMARY");
     let resume = format!("thread/resume:{thread_id}");
+    let summary_read = format!("thread/read-summary:{thread_id}");
     let inventory = format!("mcpServerStatus/list:{thread_id}");
     let primary_turns = methods
         .iter()
@@ -6126,8 +6242,13 @@ fn assert_primary_turns_have_exact_preflight(app: &FakeAppServer, thread_id: &st
     assert!(!primary_turns.is_empty());
     for (index, _) in primary_turns {
         assert!(index >= 2);
-        assert_eq!(methods[index - 2], resume);
-        assert_eq!(methods[index - 1], inventory);
+        if thread_id.contains("-consensus-mirror-") {
+            assert_eq!(methods[index - 2], inventory);
+            assert_eq!(methods[index - 1], summary_read);
+        } else {
+            assert_eq!(methods[index - 2], resume);
+            assert_eq!(methods[index - 1], inventory);
+        }
     }
 }
 

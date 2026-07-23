@@ -533,6 +533,21 @@ fn preloaded_primary_uses_ephemeral_full_history_binding() {
     assert!(
         events
             .lines()
+            .any(|line| line == format!("method thread/read-summary {mirror}"))
+    );
+    assert!(
+        !events
+            .lines()
+            .any(|line| line == format!("method thread/read-full {mirror}"))
+    );
+    assert!(
+        !events
+            .lines()
+            .any(|line| line == format!("method thread/resume {mirror}"))
+    );
+    assert!(
+        events
+            .lines()
             .filter(|line| line.starts_with(&format!("turn {mirror} ")))
             .count()
             >= 4

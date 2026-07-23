@@ -86,6 +86,19 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
         )
         .await;
 
+        let summary_read = read_request(&mut lines).await;
+        assert_eq!(summary_read["method"], "thread/read");
+        assert_eq!(
+            summary_read["params"],
+            json!({"threadId": "fork-1", "includeTurns": false})
+        );
+        respond(
+            &mut server_write,
+            &summary_read,
+            json!({"thread": thread_with_id("fork-1")}),
+        )
+        .await;
+
         let resume = read_request(&mut lines).await;
         assert_eq!(resume["method"], "thread/resume");
         assert_eq!(resume["params"], json!({"threadId": "t-1"}));
@@ -314,6 +327,9 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
     assert_eq!(page.next_cursor.as_deref(), Some("next-page"));
     let detail = client.read_thread("t-1").await.unwrap();
     assert_eq!(detail.turns.len(), 1);
+    let summary = client.read_thread_summary("fork-1").await.unwrap();
+    assert_eq!(summary.id, "fork-1");
+    assert_eq!(summary.runtime_status().unwrap(), ThreadRuntimeStatus::Idle);
     client
         .resume_thread("t-1", &ThreadResumePolicy::Default)
         .await

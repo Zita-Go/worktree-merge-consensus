@@ -10,7 +10,7 @@ use app_server_client::{
     AppEvent, AppServer, AppServerError, CONTROLLED_PATCH_APPROVAL_KEY,
     CONTROLLED_PATCH_APPROVAL_MODE, CommandExecRequest, McpServerStatus, PARTICIPANT_MCP_SERVER,
     PARTICIPANT_PATCH_TOOL, ParticipantMcpConfig, ThreadDetail, ThreadForkPolicy,
-    ThreadResumePolicy, ThreadRuntimeStatus, TurnExecutionPolicy,
+    ThreadResumePolicy, ThreadRuntimeStatus, ThreadSummary, TurnExecutionPolicy,
 };
 use consensus_core::{
     canonical_json_hash,
@@ -1257,44 +1257,70 @@ where
             pending.participant_binding_generation,
         )?;
 
-        let detail = self.read_thread_with_retry(thread_id).await?;
-        verify_requested_thread_identity(thread_id, &detail)?;
-        let turn = find_turn(&detail, turn_id).ok_or_else(|| {
-            CoordinatorError::operational(
-                "HISTORY_UNAVAILABLE",
-                "persisted pending turn is absent from canonical task history",
-            )
-        })?;
+        let ephemeral = self.recorded_role_thread_is_ephemeral(
+            state,
+            role,
+            pending.participant_binding_generation,
+            "persisted pending turn",
+        )?;
+        let (detail, turn) = if ephemeral {
+            let turn = self
+                .completed_turn_from_event_evidence(state, thread_id, turn_id)?
+                .ok_or_else(|| {
+                    CoordinatorError::operational(
+                        "HISTORY_UNAVAILABLE",
+                        "ephemeral pending turn has no durable terminal event evidence; automatic resend is unsafe",
+                    )
+                })?;
+            (None, turn)
+        } else {
+            let detail = self.read_thread_with_retry(thread_id).await?;
+            verify_requested_thread_identity(thread_id, &detail)?;
+            let turn = find_turn(&detail, turn_id).cloned().ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "persisted pending turn is absent from canonical task history",
+                )
+            })?;
+            (Some(detail), turn)
+        };
         let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
                 "persisted pending turn has no canonical status",
             )
         })?;
-        if !turn_contains_request_hash(turn, &pending.message_hash) {
+        if !turn_contains_request_hash(&turn, &pending.message_hash) {
             return Err(CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
                 "persisted pending turn lacks its deterministic request marker",
             ));
         }
-        if status == "inProgress"
-            && self
+        if status == "inProgress" {
+            let detail = detail.as_ref().ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "ephemeral in-progress turn cannot be recovered without durable terminal event evidence",
+                )
+            })?;
+            if self
                 .prepare_pending_controlled_patch_approval_retry(
                     state,
                     &pending.message_hash,
                     thread_id,
                     turn_id,
-                    &detail,
-                    turn,
+                    detail,
+                    &turn,
                 )
                 .await?
-        {
-            return Ok(());
+            {
+                return Ok(());
+            }
         }
         if !matches!(status, "failed" | "interrupted") {
             return Ok(());
         }
-        if let Some(blocker) = terminal_turn_retry_blocker(turn) {
+        if let Some(blocker) = terminal_turn_retry_blocker(&turn) {
             return Err(CoordinatorError::operational(
                 "TERMINAL_TURN_RETRY_UNSAFE",
                 format!("terminal turn {turn_id} cannot be retried automatically: {blocker}"),
@@ -1347,14 +1373,14 @@ where
         let retry_failed_patch_sha = if let Some(blocker) =
             pending_controlled_patch_approval_blocker(
                 state,
-                detail,
+                Some(&detail.summary),
                 turn,
                 message_hash,
                 &["inProgress"],
             ) {
             if pending_controlled_patch_approval_blocker(
                 state,
-                detail,
+                Some(&detail.summary),
                 turn,
                 message_hash,
                 &["failed"],
@@ -1441,7 +1467,7 @@ where
                         }
                     } else if let Some(blocker) = pending_controlled_patch_approval_blocker(
                         state,
-                        &current,
+                        Some(&current.summary),
                         current_turn,
                         message_hash,
                         &["inProgress", "failed", "declined", "interrupted"],
@@ -1520,7 +1546,7 @@ where
         }
         if let Some(blocker) = pending_controlled_patch_approval_blocker(
             state,
-            detail,
+            Some(&detail.summary),
             turn,
             message_hash,
             &["failed"],
@@ -1539,7 +1565,12 @@ where
             .any(|item| item.get("type").and_then(Value::as_str) == Some("agentMessage"));
         if has_agent_message {
             return self
-                .verify_patch_not_authorized_retry_turn(state, detail, turn, message_hash)
+                .verify_patch_not_authorized_retry_turn(
+                    state,
+                    Some(&detail.summary),
+                    turn,
+                    message_hash,
+                )
                 .await;
         }
 
@@ -1585,14 +1616,16 @@ where
             pending.participant_binding_generation,
         )?;
 
-        let detail = self.read_thread_with_retry(thread_id).await?;
-        verify_requested_thread_identity(thread_id, &detail)?;
-        let turn = find_turn(&detail, turn_id).ok_or_else(|| {
-            CoordinatorError::operational(
-                "HISTORY_UNAVAILABLE",
-                "completed controlled-patch blocker is absent from canonical task history",
+        let turn = self
+            .recorded_completed_turn(
+                state,
+                Role::Primary,
+                thread_id,
+                turn_id,
+                pending.participant_binding_generation,
+                "completed controlled-patch blocker",
             )
-        })?;
+            .await?;
         let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
@@ -1602,21 +1635,21 @@ where
         if status != "completed" {
             return Ok(None);
         }
-        if !turn_contains_request_hash(turn, &pending.message_hash) {
+        if !turn_contains_request_hash(&turn, &pending.message_hash) {
             return Err(CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
                 "completed controlled-patch blocker lacks its deterministic request marker",
             ));
         }
 
-        let raw_response = final_agent_json(turn)?;
+        let raw_response = final_agent_json(&turn)?;
         let message = validate_message(raw_response).map_err(|error| {
             CoordinatorError::operational("INVALID_RESPONSE", error.to_string())
         })?;
         if message.envelope.reason_code.as_deref() != Some("PATCH_NOT_AUTHORIZED") {
             return Ok(None);
         }
-        self.verify_patch_not_authorized_retry_turn(state, &detail, turn, &pending.message_hash)
+        self.verify_patch_not_authorized_retry_turn(state, None, &turn, &pending.message_hash)
             .await?;
 
         Ok(Some(RetryableCompletedTurn {
@@ -1630,7 +1663,7 @@ where
     async fn verify_patch_not_authorized_retry_turn(
         &self,
         state: &RunState,
-        detail: &ThreadDetail,
+        summary: Option<&ThreadSummary>,
         turn: &Value,
         message_hash: &str,
     ) -> Result<String, CoordinatorError> {
@@ -1646,7 +1679,7 @@ where
         }
         if let Some(blocker) = pending_controlled_patch_approval_blocker(
             state,
-            detail,
+            summary,
             turn,
             message_hash,
             &["failed"],
@@ -1710,14 +1743,16 @@ where
             pending.participant_binding_generation,
         )?;
 
-        let detail = self.read_thread_with_retry(thread_id).await?;
-        verify_requested_thread_identity(thread_id, &detail)?;
-        let turn = find_turn(&detail, turn_id).ok_or_else(|| {
-            CoordinatorError::operational(
-                "HISTORY_UNAVAILABLE",
-                "completed file-change blocker is absent from canonical task history",
+        let turn = self
+            .recorded_completed_turn(
+                state,
+                Role::Primary,
+                thread_id,
+                turn_id,
+                pending.participant_binding_generation,
+                "completed file-change blocker",
             )
-        })?;
+            .await?;
         let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
@@ -1727,21 +1762,21 @@ where
         if status != "completed" {
             return Ok(None);
         }
-        if !turn_contains_request_hash(turn, &pending.message_hash) {
+        if !turn_contains_request_hash(&turn, &pending.message_hash) {
             return Err(CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
                 "completed file-change blocker lacks its deterministic request marker",
             ));
         }
 
-        let raw_response = final_agent_json(turn)?;
+        let raw_response = final_agent_json(&turn)?;
         let message = validate_message(raw_response).map_err(|error| {
             CoordinatorError::operational("INVALID_RESPONSE", error.to_string())
         })?;
         if message.envelope.reason_code.as_deref() != Some("FILE_CHANGE_TOOL_UNAVAILABLE") {
             return Ok(None);
         }
-        if let Some(blocker) = terminal_turn_retry_blocker(turn) {
+        if let Some(blocker) = terminal_turn_retry_blocker(&turn) {
             return Err(CoordinatorError::operational(
                 "TERMINAL_TURN_RETRY_UNSAFE",
                 format!("completed file-change blocker cannot be retried: {blocker}"),
@@ -1809,10 +1844,10 @@ where
                 "integration invalid-response turn does not match the bound primary request",
             ));
         }
-        if pending.capability_generation.is_none()
+        let legacy_pre_binding = pending.capability_generation.is_none()
             && pending.participant_binding_generation.is_none()
-            && thread_id == state.facts.primary_thread_id
-        {
+            && thread_id == state.facts.primary_thread_id;
+        if legacy_pre_binding {
             // Exact pre-binding invalid-integration recovery retained for legacy databases.
         } else {
             self.validate_recorded_role_thread(
@@ -1823,21 +1858,33 @@ where
             )?;
         }
 
-        let detail = self.read_thread_with_retry(thread_id).await?;
-        verify_requested_thread_identity(thread_id, &detail)?;
-        let turn = find_turn(&detail, turn_id).ok_or_else(|| {
-            CoordinatorError::operational(
-                "HISTORY_UNAVAILABLE",
-                "integration invalid-response turn is absent from canonical task history",
+        let turn = if legacy_pre_binding {
+            let detail = self.read_thread_with_retry(thread_id).await?;
+            verify_requested_thread_identity(thread_id, &detail)?;
+            find_turn(&detail, turn_id).cloned().ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "integration invalid-response turn is absent from canonical task history",
+                )
+            })?
+        } else {
+            self.recorded_completed_turn(
+                state,
+                Role::Primary,
+                thread_id,
+                turn_id,
+                pending.participant_binding_generation,
+                "integration invalid-response turn",
             )
-        })?;
+            .await?
+        };
         let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
                 "integration invalid-response turn has no canonical status",
             )
         })?;
-        if status != "completed" || !turn_contains_request_hash(turn, &pending.message_hash) {
+        if status != "completed" || !turn_contains_request_hash(&turn, &pending.message_hash) {
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
                 "integration invalid-response recovery requires the exact completed request turn",
@@ -1865,7 +1912,7 @@ where
         };
         if let Some(blocker) = recoverable_integration_turn_blocker(
             state,
-            turn,
+            &turn,
             &pending.message_hash,
             &successful_patch_hash,
             allow_legacy_server,
@@ -1953,14 +2000,16 @@ where
             pending.participant_binding_generation,
         )?;
 
-        let detail = self.read_thread_with_retry(thread_id).await?;
-        verify_requested_thread_identity(thread_id, &detail)?;
-        let turn = find_turn(&detail, turn_id).ok_or_else(|| {
-            CoordinatorError::operational(
-                "HISTORY_UNAVAILABLE",
-                "persisted invalid model-response turn is absent from canonical task history",
+        let turn = self
+            .recorded_completed_turn(
+                state,
+                role,
+                thread_id,
+                turn_id,
+                pending.participant_binding_generation,
+                "persisted invalid model-response turn",
             )
-        })?;
+            .await?;
         let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
@@ -1973,13 +2022,13 @@ where
                 format!("invalid model-response turn has unexpected status {status}"),
             ));
         }
-        if !turn_contains_request_hash(turn, &pending.message_hash) {
+        if !turn_contains_request_hash(&turn, &pending.message_hash) {
             return Err(CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
                 "persisted invalid model-response turn lacks its deterministic request marker",
             ));
         }
-        if let Some(blocker) = completed_read_only_turn_retry_blocker(turn) {
+        if let Some(blocker) = completed_read_only_turn_retry_blocker(&turn) {
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
                 format!("completed pre-integration turn {turn_id} cannot be retried: {blocker}"),
@@ -2039,8 +2088,6 @@ where
             thread_id,
             pending.participant_binding_generation,
         )?;
-        let detail = self.read_thread_with_retry(thread_id).await?;
-        verify_requested_thread_identity(thread_id, &detail)?;
         let archived_attempts = self
             .store
             .archived_turn_attempts(&run_id, &pending.message_hash)?;
@@ -2055,13 +2102,17 @@ where
         let mut archived_sequence = Vec::with_capacity(archived_attempts.len());
         for archived_attempt in &archived_attempts {
             let archived_turn_id = &archived_attempt.turn_id;
-            let archived = find_turn(&detail, archived_turn_id).ok_or_else(|| {
-                CoordinatorError::operational(
-                    "HISTORY_UNAVAILABLE",
-                    format!("archived verification turn {archived_turn_id} is absent"),
+            let archived = self
+                .recorded_completed_turn(
+                    state,
+                    Role::Primary,
+                    thread_id,
+                    archived_turn_id,
+                    pending.participant_binding_generation,
+                    "archived verification turn",
                 )
-            })?;
-            if !turn_contains_request_hash(archived, &pending.message_hash) {
+                .await?;
+            if !turn_contains_request_hash(&archived, &pending.message_hash) {
                 return Err(CoordinatorError::operational(
                     "HISTORY_UNAVAILABLE",
                     format!(
@@ -2069,7 +2120,7 @@ where
                     ),
                 ));
             }
-            if let Some(blocker) = terminal_turn_retry_blocker(archived) {
+            if let Some(blocker) = terminal_turn_retry_blocker(&archived) {
                 return Err(CoordinatorError::operational(
                     "MODEL_RESPONSE_RETRY_UNSAFE",
                     format!(
@@ -2078,7 +2129,7 @@ where
                 ));
             }
             let response = parse_participant_response(
-                final_agent_text(archived)?.trim(),
+                final_agent_text(&archived)?.trim(),
                 allowed_participant_signals(NextAction::RequestPrimaryVerification),
             )
             .map_err(|error| {
@@ -2129,32 +2180,36 @@ where
                 "verification evidence compatibility recovery requires exact archived verification history and is limited to one retry",
             ));
         };
-        let turn = find_turn(&detail, turn_id).ok_or_else(|| {
-            CoordinatorError::operational(
-                "HISTORY_UNAVAILABLE",
-                "persisted verification turn is absent from canonical task history",
+        let turn = self
+            .recorded_completed_turn(
+                state,
+                Role::Primary,
+                thread_id,
+                turn_id,
+                pending.participant_binding_generation,
+                "persisted verification turn",
             )
-        })?;
+            .await?;
         let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
                 "persisted verification turn has no canonical status",
             )
         })?;
-        if status != "completed" || !turn_contains_request_hash(turn, &pending.message_hash) {
+        if status != "completed" || !turn_contains_request_hash(&turn, &pending.message_hash) {
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
                 "verification recovery requires the exact completed request turn",
             ));
         }
-        if let Some(blocker) = verification_without_execution_retry_blocker(turn) {
+        if let Some(blocker) = verification_without_execution_retry_blocker(&turn) {
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
                 blocker,
             ));
         }
         let final_response = parse_participant_response(
-            final_agent_text(turn)?.trim(),
+            final_agent_text(&turn)?.trim(),
             allowed_participant_signals(NextAction::RequestPrimaryVerification),
         )
         .map_err(|error| CoordinatorError::operational("HISTORY_UNAVAILABLE", error.to_string()))?;
@@ -2217,20 +2272,22 @@ where
             accepted.participant_binding_generation,
         )?;
 
-        let detail = self.read_thread_with_retry(&accepted.thread_id).await?;
-        verify_requested_thread_identity(&accepted.thread_id, &detail)?;
         for archived_turn_id in self
             .store
             .archived_turn_ids(&run_id, &accepted.message_hash)?
         {
-            let archived = find_turn(&detail, &archived_turn_id).ok_or_else(|| {
-                CoordinatorError::operational(
-                    "HISTORY_UNAVAILABLE",
-                    format!("archived verification turn {archived_turn_id} is absent"),
+            let archived = self
+                .recorded_completed_turn(
+                    state,
+                    Role::Primary,
+                    &accepted.thread_id,
+                    &archived_turn_id,
+                    accepted.participant_binding_generation,
+                    "archived verification turn",
                 )
-            })?;
+                .await?;
             let archived_response = parse_participant_response(
-                final_agent_text(archived)?.trim(),
+                final_agent_text(&archived)?.trim(),
                 allowed_participant_signals(NextAction::RequestPrimaryVerification),
             )
             .map_err(|error| {
@@ -2246,25 +2303,29 @@ where
             }
         }
 
-        let turn = find_turn(&detail, &accepted.turn_id).ok_or_else(|| {
-            CoordinatorError::operational(
-                "HISTORY_UNAVAILABLE",
-                "accepted verification environment blocker is absent from canonical task history",
+        let turn = self
+            .recorded_completed_turn(
+                state,
+                Role::Primary,
+                &accepted.thread_id,
+                &accepted.turn_id,
+                accepted.participant_binding_generation,
+                "accepted verification environment blocker",
             )
-        })?;
+            .await?;
         let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
                 "verification environment blocker has no canonical status",
             )
         })?;
-        if status != "completed" || !turn_contains_request_hash(turn, &accepted.message_hash) {
+        if status != "completed" || !turn_contains_request_hash(&turn, &accepted.message_hash) {
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
                 "verification environment recovery requires the exact completed request turn",
             ));
         }
-        if let Some(blocker) = terminal_turn_retry_blocker(turn) {
+        if let Some(blocker) = terminal_turn_retry_blocker(&turn) {
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
                 format!("verification environment blocker cannot be retried: {blocker}"),
@@ -2272,7 +2333,7 @@ where
         }
 
         let parsed = parse_participant_response(
-            final_agent_text(turn)?.trim(),
+            final_agent_text(&turn)?.trim(),
             allowed_participant_signals(NextAction::RequestPrimaryVerification),
         )
         .map_err(|error| CoordinatorError::operational("INVALID_RESPONSE", error.to_string()))?;
@@ -2353,14 +2414,16 @@ where
             pending.participant_binding_generation,
         )?;
 
-        let detail = self.read_thread_with_retry(thread_id).await?;
-        verify_requested_thread_identity(thread_id, &detail)?;
-        let turn = find_turn(&detail, turn_id).ok_or_else(|| {
-            CoordinatorError::operational(
-                "HISTORY_UNAVAILABLE",
-                "forbidden-operation turn is absent from canonical task history",
+        let turn = self
+            .recorded_completed_turn(
+                state,
+                Role::Primary,
+                thread_id,
+                turn_id,
+                pending.participant_binding_generation,
+                "forbidden-operation turn",
             )
-        })?;
+            .await?;
         let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
@@ -2373,13 +2436,13 @@ where
                 format!("forbidden-operation turn has unexpected status {status}"),
             ));
         }
-        if !turn_contains_request_hash(turn, &pending.message_hash) {
+        if !turn_contains_request_hash(&turn, &pending.message_hash) {
             return Err(CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
                 "forbidden-operation turn lacks its deterministic request marker",
             ));
         }
-        if let Some(blocker) = interrupted_forbidden_operation_retry_blocker(state, turn) {
+        if let Some(blocker) = interrupted_forbidden_operation_retry_blocker(state, &turn) {
             return Err(CoordinatorError::operational(
                 "TERMINAL_TURN_RETRY_UNSAFE",
                 format!("forbidden-operation turn cannot be retried: {blocker}"),
@@ -2431,14 +2494,16 @@ where
             accepted.participant_binding_generation,
         )?;
 
-        let detail = self.read_thread_with_retry(&accepted.thread_id).await?;
-        verify_requested_thread_identity(&accepted.thread_id, &detail)?;
-        let turn = find_turn(&detail, &accepted.turn_id).ok_or_else(|| {
-            CoordinatorError::operational(
-                "HISTORY_UNAVAILABLE",
-                "accepted execution-tool blocker is absent from canonical task history",
+        let turn = self
+            .recorded_completed_turn(
+                state,
+                Role::Primary,
+                &accepted.thread_id,
+                &accepted.turn_id,
+                accepted.participant_binding_generation,
+                "accepted execution-tool blocker",
             )
-        })?;
+            .await?;
         let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
@@ -2451,20 +2516,20 @@ where
                 format!("execution-tool blocker has unexpected status {status}"),
             ));
         }
-        if !turn_contains_request_hash(turn, &accepted.message_hash) {
+        if !turn_contains_request_hash(&turn, &accepted.message_hash) {
             return Err(CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
                 "accepted execution-tool blocker lacks its deterministic request marker",
             ));
         }
-        if let Some(blocker) = terminal_turn_retry_blocker(turn) {
+        if let Some(blocker) = terminal_turn_retry_blocker(&turn) {
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
                 format!("accepted execution-tool blocker cannot be retried: {blocker}"),
             ));
         }
 
-        let raw_response = final_agent_json(turn)?;
+        let raw_response = final_agent_json(&turn)?;
         if canonical_json_hash(&raw_response) != accepted.response_hash {
             return Err(CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
@@ -2685,11 +2750,26 @@ where
             ));
         }
 
-        let current_detail = self.read_thread_with_retry(&thread_id).await?;
-        let archived_turn_ids = self.store.archived_turn_ids(&run_id, &request_hash)?;
-        let recovered_turn = pending.turn_id.clone().or_else(|| {
-            find_turn_by_request_hash(&current_detail, &request_hash, &archived_turn_ids)
-        });
+        let ephemeral = primary_binding
+            .as_ref()
+            .is_some_and(|binding| binding.mode == PrimaryBindingMode::EphemeralFork);
+        let current_detail = if ephemeral {
+            None
+        } else {
+            Some(self.read_thread_with_retry(&thread_id).await?)
+        };
+        let recovered_turn = if ephemeral {
+            pending.turn_id.clone()
+        } else {
+            let archived_turn_ids = self.store.archived_turn_ids(&run_id, &request_hash)?;
+            pending.turn_id.clone().or_else(|| {
+                find_turn_by_request_hash(
+                    current_detail.as_ref().expect("stored task detail"),
+                    &request_hash,
+                    &archived_turn_ids,
+                )
+            })
+        };
         let turn_id = if let Some(turn_id) = recovered_turn {
             self.store.record_recovered_turn_started(
                 &run_id,
@@ -2699,7 +2779,24 @@ where
             )?;
             turn_id
         } else {
-            if current_detail.summary.is_active() {
+            if ephemeral && pending.turn_start_intent_at.is_some() {
+                return Err(CoordinatorError::operational(
+                    "COMMUNICATION_FAILURE",
+                    "ephemeral Primary turn delivery is uncertain after turn/start intent; automatic resend is forbidden",
+                ));
+            }
+            let active = if ephemeral {
+                let summary = self.read_thread_summary_with_retry(&thread_id).await?;
+                verify_requested_thread_summary_identity(&thread_id, &summary)?;
+                summary.is_active()
+            } else {
+                current_detail
+                    .as_ref()
+                    .expect("stored task detail")
+                    .summary
+                    .is_active()
+            };
+            if active {
                 return Err(CoordinatorError::operational(
                     "HISTORY_UNAVAILABLE",
                     "task became active after pending-send without a recoverable request marker",
@@ -2722,7 +2819,7 @@ where
         };
 
         let completed = self
-            .wait_for_turn_response(state, &thread_id, &turn_id)
+            .wait_for_turn_response(state, &thread_id, &turn_id, ephemeral)
             .await?;
         if action == NextAction::RequestPrimaryVerification {
             verify_marker_only_verification_turn(&completed.turn)?;
@@ -3344,37 +3441,38 @@ where
             }
             self.store
                 .bind_unsent_primary_pending_to_active_binding(&run_id)?;
-            match self
-                .read_thread_with_retry(&binding.effective_primary_thread_id)
-                .await
-            {
-                Ok(detail) => {
-                    verify_requested_thread_identity(
-                        &binding.effective_primary_thread_id,
-                        &detail,
-                    )?;
-                    return Ok(binding);
-                }
-                Err(error)
-                    if binding.mode == PrimaryBindingMode::EphemeralFork
-                        && error.code() == "COMMUNICATION_FAILURE" =>
+            if binding.mode == PrimaryBindingMode::Direct {
+                let detail = self
+                    .read_thread_with_retry(&binding.effective_primary_thread_id)
+                    .await?;
+                verify_requested_thread_identity(&binding.effective_primary_thread_id, &detail)?;
+                return Ok(binding);
+            }
+            if binding.source_history_hash.is_some() {
+                match self
+                    .read_thread_summary_with_retry(&binding.effective_primary_thread_id)
+                    .await
                 {
-                    if self.store.pending_send(&run_id)?.is_some() {
+                    Ok(summary) => {
+                        verify_requested_thread_summary_identity(
+                            &binding.effective_primary_thread_id,
+                            &summary,
+                        )?;
+                        return Ok(binding);
+                    }
+                    Err(error) if error.code() != "COMMUNICATION_FAILURE" => return Err(error),
+                    Err(error) if self.store.pending_send(&run_id)?.is_some() => {
                         return Err(error);
                     }
-                    let source_thread_id = state.facts.primary_thread_id.clone();
-                    let source = self.read_thread_with_retry(&source_thread_id).await?;
-                    self.verify_thread_identity(state, Role::Primary, &source)?;
-                    let source = if source.summary.is_active() {
-                        self.wait_until_idle(state, &source_thread_id).await?
-                    } else {
-                        source
-                    };
-                    require_idle_thread(&source, "Source Primary before safe mirror recreation")?;
-                    return self.create_ephemeral_primary_binding(state, &source).await;
+                    Err(_) => {}
                 }
-                Err(error) => return Err(error),
+            } else if self.store.pending_send(&run_id)?.is_some() {
+                return Err(CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "legacy ephemeral Primary binding has no frozen source-history fingerprint while a turn is pending",
+                ));
             }
+            return self.recreate_ephemeral_primary_binding(state).await;
         }
 
         let source_thread_id = state.facts.primary_thread_id.clone();
@@ -3452,6 +3550,7 @@ where
                 source_thread_id,
                 PrimaryBindingMode::Direct,
                 PARTICIPANT_MCP_SERVER,
+                None,
             )
             .map_err(Into::into)
     }
@@ -3489,6 +3588,7 @@ where
             ));
         }
         verify_full_history_fork(source, &forked)?;
+        let source_history_hash = source_history_fingerprint(source)?;
         require_idle_thread(&forked, "ephemeral Primary fork")?;
         let statuses = self
             .list_mcp_server_status_for_preflight(effective_thread_id)
@@ -3501,8 +3601,25 @@ where
                 effective_thread_id,
                 PrimaryBindingMode::EphemeralFork,
                 PARTICIPANT_MCP_SERVER,
+                Some(&source_history_hash),
             )
             .map_err(Into::into)
+    }
+
+    async fn recreate_ephemeral_primary_binding(
+        &self,
+        state: &mut RunState,
+    ) -> Result<PrimaryParticipantBinding, CoordinatorError> {
+        let source_thread_id = state.facts.primary_thread_id.clone();
+        let source = self.read_thread_with_retry(&source_thread_id).await?;
+        self.verify_thread_identity(state, Role::Primary, &source)?;
+        let source = if source.summary.is_active() {
+            self.wait_until_idle(state, &source_thread_id).await?
+        } else {
+            source
+        };
+        require_idle_thread(&source, "Source Primary before safe mirror recreation")?;
+        self.create_ephemeral_primary_binding(state, &source).await
     }
 
     async fn prepare_action_thread(
@@ -3519,6 +3636,24 @@ where
             .as_ref()
             .map(|binding| binding.effective_primary_thread_id.clone())
             .unwrap_or_else(|| state.facts.reviewer_thread_id.clone());
+        if binding
+            .as_ref()
+            .is_some_and(|binding| binding.mode == PrimaryBindingMode::EphemeralFork)
+        {
+            let summary = self.wait_until_idle_summary(state, &thread_id).await?;
+            require_idle_thread_summary(
+                &summary,
+                "ephemeral task prepared for coordinator action",
+            )?;
+            let statuses = self
+                .list_mcp_server_status_for_preflight(&thread_id)
+                .await?;
+            verify_participant_patch_capability(&thread_id, &statuses)?;
+            return Ok(PreparedActionThread {
+                thread_id,
+                primary_binding: binding,
+            });
+        }
         let detail = self.wait_until_idle(state, &thread_id).await?;
         let resume_policy = match (role, runtime_status(&detail)?) {
             (Role::Primary, ThreadRuntimeStatus::NotLoaded) => {
@@ -3612,12 +3747,62 @@ where
         }
     }
 
+    async fn wait_until_idle_summary(
+        &self,
+        state: &mut RunState,
+        thread_id: &str,
+    ) -> Result<ThreadSummary, CoordinatorError> {
+        let mut idle_deadline = tokio::time::Instant::now() + self.options.wait_timeout;
+        let mut last_progress = None;
+        loop {
+            let persisted = self.required_run(&state.facts.run_id.to_string())?;
+            if persisted.status == RunStatus::Cancelled {
+                *state = persisted;
+                return Err(CoordinatorError::operational(
+                    "CANCELLED",
+                    "run was cancelled while waiting for an ephemeral task to become idle",
+                ));
+            }
+            let summary = self.read_thread_summary_with_retry(thread_id).await?;
+            verify_requested_thread_summary_identity(thread_id, &summary)?;
+            let progress = canonical_json_hash(&summary.status);
+            if last_progress.as_deref() != Some(progress.as_str()) {
+                last_progress = Some(progress);
+                idle_deadline = tokio::time::Instant::now() + self.options.wait_timeout;
+            }
+            if !summary.is_active() {
+                if state.status == RunStatus::WaitingThread {
+                    state.thread_became_idle()?;
+                    self.store.save_state(state)?;
+                }
+                return Ok(summary);
+            }
+            if state.status == RunStatus::Running {
+                state.wait_for_thread()?;
+                self.store.save_state(state)?;
+            }
+            if tokio::time::Instant::now() >= idle_deadline {
+                return Err(CoordinatorError::operational(
+                    "COMMUNICATION_FAILURE",
+                    "ephemeral task remained active without canonical status progress beyond the bounded idle wait",
+                ));
+            }
+            tokio::time::sleep(self.options.poll_interval).await;
+        }
+    }
+
     async fn wait_for_turn_response(
         &self,
         state: &mut RunState,
         thread_id: &str,
         turn_id: &str,
+        ephemeral: bool,
     ) -> Result<CompletedTurn, CoordinatorError> {
+        if ephemeral {
+            return self
+                .wait_for_ephemeral_turn_response(state, thread_id, turn_id)
+                .await;
+        }
         let mut idle_deadline = tokio::time::Instant::now() + self.options.wait_timeout;
         let mut last_progress = None;
         loop {
@@ -3670,6 +3855,78 @@ where
                 }
                 Ok(None) => tokio::time::sleep(self.options.poll_interval).await,
                 _ => {}
+            }
+        }
+    }
+
+    async fn wait_for_ephemeral_turn_response(
+        &self,
+        state: &mut RunState,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<CompletedTurn, CoordinatorError> {
+        let mut idle_deadline = tokio::time::Instant::now() + self.options.wait_timeout;
+        let mut last_status = None;
+        loop {
+            let persisted = self.required_run(&state.facts.run_id.to_string())?;
+            if persisted.status == RunStatus::Cancelled {
+                *state = persisted;
+                return Err(CoordinatorError::operational(
+                    "CANCELLED",
+                    "run was cancelled while its ephemeral task turn was active",
+                ));
+            }
+            if let Some(turn) =
+                self.completed_turn_from_event_evidence(state, thread_id, turn_id)?
+            {
+                return match turn.get("status").and_then(Value::as_str) {
+                    Some("completed") => Ok(CompletedTurn {
+                        response: final_agent_text(&turn)?.to_owned(),
+                        turn,
+                    }),
+                    Some("failed" | "interrupted") => Err(CoordinatorError::operational(
+                        "COMMUNICATION_FAILURE",
+                        "ephemeral task turn did not complete successfully",
+                    )),
+                    _ => Err(CoordinatorError::operational(
+                        "HISTORY_UNAVAILABLE",
+                        "ephemeral turn/completed evidence has no terminal status",
+                    )),
+                };
+            }
+            if tokio::time::Instant::now() >= idle_deadline {
+                return Err(CoordinatorError::operational(
+                    "COMMUNICATION_FAILURE",
+                    "ephemeral task turn produced no durable completion evidence within the bounded wait",
+                ));
+            }
+            match tokio::time::timeout(self.options.poll_interval, self.app.next_event()).await {
+                Ok(Some(event)) if event_matches_turn(&event, thread_id, turn_id) => {
+                    self.consume_turn_event(state, thread_id, turn_id, &event)
+                        .await?;
+                    idle_deadline = tokio::time::Instant::now() + self.options.wait_timeout;
+                    continue;
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => tokio::time::sleep(self.options.poll_interval).await,
+                Err(_) => {}
+            }
+            let summary = self.read_thread_summary_with_retry(thread_id).await?;
+            verify_requested_thread_summary_identity(thread_id, &summary)?;
+            let status = canonical_json_hash(&summary.status);
+            if last_status.as_deref() != Some(status.as_str()) {
+                last_status = Some(status);
+                idle_deadline = tokio::time::Instant::now() + self.options.wait_timeout;
+            }
+            if summary
+                .runtime_status()
+                .map_err(|detail| CoordinatorError::operational("HISTORY_UNAVAILABLE", detail))?
+                == ThreadRuntimeStatus::SystemError
+            {
+                return Err(CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "ephemeral task entered systemError before durable turn completion",
+                ));
             }
         }
     }
@@ -3777,6 +4034,89 @@ where
         )
     }
 
+    fn completed_turn_from_event_evidence(
+        &self,
+        state: &RunState,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<Value>, CoordinatorError> {
+        let Some(evidence) =
+            self.store
+                .turn_event_evidence(&state.facts.run_id.to_string(), thread_id, turn_id)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(merge_completed_turn_evidence(
+            &evidence.completed_turn,
+            &evidence.completed_turn,
+            evidence.completed_items,
+        )?))
+    }
+
+    async fn recorded_completed_turn(
+        &self,
+        state: &RunState,
+        role: Role,
+        thread_id: &str,
+        turn_id: &str,
+        participant_binding_generation: Option<u32>,
+        description: &str,
+    ) -> Result<Value, CoordinatorError> {
+        let ephemeral = self.recorded_role_thread_is_ephemeral(
+            state,
+            role,
+            participant_binding_generation,
+            description,
+        )?;
+        if ephemeral {
+            return self
+                .completed_turn_from_event_evidence(state, thread_id, turn_id)?
+                .ok_or_else(|| {
+                    CoordinatorError::operational(
+                        "HISTORY_UNAVAILABLE",
+                        format!("{description} has no durable ephemeral completion evidence"),
+                    )
+                });
+        }
+        let detail = self.read_thread_with_retry(thread_id).await?;
+        verify_requested_thread_identity(thread_id, &detail)?;
+        let persisted_turn = find_turn(&detail, turn_id).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                format!("{description} is absent from canonical task history"),
+            )
+        })?;
+        self.completed_turn_with_event_evidence(state, thread_id, turn_id, persisted_turn)
+    }
+
+    fn recorded_role_thread_is_ephemeral(
+        &self,
+        state: &RunState,
+        role: Role,
+        participant_binding_generation: Option<u32>,
+        description: &str,
+    ) -> Result<bool, CoordinatorError> {
+        if role != Role::Primary {
+            return Ok(false);
+        }
+        let generation = participant_binding_generation.ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                format!("{description} has no Primary binding generation"),
+            )
+        })?;
+        let binding = self
+            .store
+            .primary_binding(&state.facts.run_id.to_string(), generation)?
+            .ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    format!("{description} references unknown Primary binding generation"),
+                )
+            })?;
+        Ok(binding.mode == PrimaryBindingMode::EphemeralFork)
+    }
+
     async fn handle_execution_request(
         &self,
         state: &RunState,
@@ -3876,6 +4216,32 @@ where
             Some(thread_id),
             last_error.unwrap_or_else(|| {
                 AppServerError::InvalidResponse("thread read failed without an error".into())
+            }),
+        ))
+    }
+
+    async fn read_thread_summary_with_retry(
+        &self,
+        thread_id: &str,
+    ) -> Result<ThreadSummary, CoordinatorError> {
+        let attempts = self.options.communication_attempts.max(1);
+        let mut last_error = None;
+        for attempt in 0..attempts {
+            match self.app.read_thread_summary(thread_id).await {
+                Ok(summary) => return Ok(summary),
+                Err(error) => last_error = Some(error),
+            }
+            if attempt + 1 < attempts {
+                tokio::time::sleep(self.options.poll_interval).await;
+            }
+        }
+        Err(communication_error(
+            "thread/read summary",
+            Some(thread_id),
+            last_error.unwrap_or_else(|| {
+                AppServerError::InvalidResponse(
+                    "thread summary read failed without an error".into(),
+                )
             }),
         ))
     }
@@ -4164,11 +4530,43 @@ fn require_idle_thread(detail: &ThreadDetail, description: &str) -> Result<(), C
     Ok(())
 }
 
+fn require_idle_thread_summary(
+    summary: &ThreadSummary,
+    description: &str,
+) -> Result<(), CoordinatorError> {
+    if summary.runtime_status().map_err(|detail| {
+        CoordinatorError::operational(
+            "HISTORY_UNAVAILABLE",
+            format!("task has an unsupported runtime status: {detail}"),
+        )
+    })? != ThreadRuntimeStatus::Idle
+    {
+        return Err(CoordinatorError::operational(
+            "HISTORY_UNAVAILABLE",
+            format!("{description} is not idle"),
+        ));
+    }
+    Ok(())
+}
+
 fn verify_requested_thread_identity(
     requested_thread_id: &str,
     detail: &ThreadDetail,
 ) -> Result<(), CoordinatorError> {
     if detail.summary.id != requested_thread_id {
+        return Err(CoordinatorError::operational(
+            "AMBIGUOUS_THREAD",
+            "App Server returned a different task than requested",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_requested_thread_summary_identity(
+    requested_thread_id: &str,
+    summary: &ThreadSummary,
+) -> Result<(), CoordinatorError> {
+    if summary.id != requested_thread_id {
         return Err(CoordinatorError::operational(
             "AMBIGUOUS_THREAD",
             "App Server returned a different task than requested",
@@ -4190,6 +4588,11 @@ fn verify_full_history_fork(
         ));
     }
     Ok(())
+}
+
+fn source_history_fingerprint(source: &ThreadDetail) -> Result<String, CoordinatorError> {
+    let turn_ids = canonical_turn_id_sequence(source, "Source Primary")?;
+    Ok(canonical_json_hash(&json!(turn_ids)))
 }
 
 fn canonical_turn_id_sequence(
@@ -4745,21 +5148,23 @@ fn controlled_patch_mcp_identity_blocker_for_recovery(
 
 fn pending_controlled_patch_approval_blocker(
     state: &RunState,
-    detail: &ThreadDetail,
+    summary: Option<&ThreadSummary>,
     turn: &Value,
     request_hash: &str,
     allowed_patch_statuses: &[&str],
 ) -> Option<String> {
-    let waiting_on_approval = detail
-        .summary
-        .status
-        .get("activeFlags")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .any(|flag| flag.as_str() == Some("waitingOnApproval"));
-    if turn.get("status").and_then(Value::as_str) == Some("inProgress") && !waiting_on_approval {
-        return Some("active controlled patch turn is not canonically waiting on approval".into());
+    if turn.get("status").and_then(Value::as_str) == Some("inProgress") {
+        let waiting_on_approval = summary
+            .and_then(|summary| summary.status.get("activeFlags"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|flag| flag.as_str() == Some("waitingOnApproval"));
+        if !waiting_on_approval {
+            return Some(
+                "active controlled patch turn is not canonically waiting on approval".into(),
+            );
+        }
     }
     let Some(items) = turn.get("items").and_then(Value::as_array) else {
         return Some("canonical items are unavailable".into());

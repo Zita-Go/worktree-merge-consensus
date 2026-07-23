@@ -32,6 +32,7 @@ pub struct PrimaryParticipantBinding {
     pub mode: PrimaryBindingMode,
     pub generation: u32,
     pub participant_server: String,
+    pub source_history_hash: Option<String>,
     pub created_at: i64,
     pub verified_at: i64,
 }

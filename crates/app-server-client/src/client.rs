@@ -83,6 +83,7 @@ pub trait AppServer: Send + Sync {
         limit: u32,
     ) -> Result<ThreadPage, AppServerError>;
     async fn read_thread(&self, thread_id: &str) -> Result<ThreadDetail, AppServerError>;
+    async fn read_thread_summary(&self, thread_id: &str) -> Result<ThreadSummary, AppServerError>;
     async fn resume_thread(
         &self,
         thread_id: &str,
@@ -555,6 +556,19 @@ impl AppServer for ReconnectingCodexAppServer {
         }
     }
 
+    async fn read_thread_summary(&self, thread_id: &str) -> Result<ThreadSummary, AppServerError> {
+        let mut client = self.inner.lock().await;
+        match client.read_thread_summary(thread_id).await {
+            Ok(summary) => Ok(summary),
+            Err(error) if reconnectable(&error) => {
+                self.reconnect_locked(&mut client, "thread/read summary", &error)
+                    .await?;
+                client.read_thread_summary(thread_id).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     async fn resume_thread(
         &self,
         thread_id: &str,
@@ -745,6 +759,16 @@ impl AppServer for CodexAppServer {
             )
             .await?;
         parse_thread_response(raw)
+    }
+
+    async fn read_thread_summary(&self, thread_id: &str) -> Result<ThreadSummary, AppServerError> {
+        let raw = self
+            .rpc_request(
+                "thread/read",
+                json!({"threadId": thread_id, "includeTurns": false}),
+            )
+            .await?;
+        Ok(parse_thread_response(raw)?.summary)
     }
 
     async fn resume_thread(

@@ -31,12 +31,14 @@ fn primary_binding_generations_are_atomic_and_auditable() {
             "primary-thread",
             PrimaryBindingMode::Direct,
             "worktreeMergeConsensusParticipant",
+            None,
         )
         .unwrap();
     assert_eq!(direct.generation, 1);
     assert_eq!(direct.mode, PrimaryBindingMode::Direct);
     assert_eq!(direct.source_primary_thread_id, "primary-thread");
     assert_eq!(direct.effective_primary_thread_id, "primary-thread");
+    assert_eq!(direct.source_history_hash, None);
 
     let repeated = store
         .activate_primary_binding(
@@ -45,6 +47,7 @@ fn primary_binding_generations_are_atomic_and_auditable() {
             "primary-thread",
             PrimaryBindingMode::Direct,
             "worktreeMergeConsensusParticipant",
+            None,
         )
         .unwrap();
     assert_eq!(repeated, direct);
@@ -56,9 +59,14 @@ fn primary_binding_generations_are_atomic_and_auditable() {
             "primary-mirror-1",
             PrimaryBindingMode::EphemeralFork,
             "worktreeMergeConsensusParticipant",
+            Some("source-history-a"),
         )
         .unwrap();
     assert_eq!(mirror.generation, 2);
+    assert_eq!(
+        mirror.source_history_hash.as_deref(),
+        Some("source-history-a")
+    );
     assert_eq!(
         store.active_primary_binding(RUN_ID).unwrap(),
         Some(mirror.clone())
@@ -89,10 +97,51 @@ fn primary_binding_generations_are_atomic_and_auditable() {
             "primary-mirror-2",
             PrimaryBindingMode::EphemeralFork,
             "worktreeMergeConsensusParticipant",
+            Some("source-history-a"),
         )
         .unwrap_err();
     assert_eq!(error.code(), "INCOMPATIBLE_STATE");
     assert_eq!(store.active_primary_binding(RUN_ID).unwrap(), Some(mirror));
+}
+
+#[test]
+fn ephemeral_primary_binding_rejects_changed_source_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+    store
+        .activate_primary_binding(
+            RUN_ID,
+            "primary-thread",
+            "primary-mirror-1",
+            PrimaryBindingMode::EphemeralFork,
+            "worktreeMergeConsensusParticipant",
+            Some("source-history-a"),
+        )
+        .unwrap();
+
+    let error = store
+        .activate_primary_binding(
+            RUN_ID,
+            "primary-thread",
+            "primary-mirror-2",
+            PrimaryBindingMode::EphemeralFork,
+            "worktreeMergeConsensusParticipant",
+            Some("source-history-b"),
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "INCOMPATIBLE_STATE");
+    assert_eq!(
+        store
+            .active_primary_binding(RUN_ID)
+            .unwrap()
+            .unwrap()
+            .effective_primary_thread_id,
+        "primary-mirror-1"
+    );
 }
 
 #[test]
@@ -109,6 +158,7 @@ fn turn_and_patch_records_preserve_binding_generation() {
             "primary-mirror-1",
             PrimaryBindingMode::EphemeralFork,
             "worktreeMergeConsensusParticipant",
+            Some("source-history-a"),
         )
         .unwrap();
 
@@ -133,6 +183,14 @@ fn turn_and_patch_records_preserve_binding_generation() {
     store
         .record_turn_start_intent(RUN_ID, "request-hash")
         .unwrap();
+    assert!(
+        store
+            .pending_send(RUN_ID)
+            .unwrap()
+            .unwrap()
+            .turn_start_intent_at
+            .is_some()
+    );
     store
         .record_turn_started(RUN_ID, "request-hash", "primary-mirror-1", "turn-1")
         .unwrap();
@@ -320,6 +378,14 @@ fn new_turn_start_intent_survives_crash_and_recovered_binding_as_current_generat
     drop(store);
 
     let reopened = SqliteRunStore::open(&path).unwrap();
+    assert!(
+        reopened
+            .pending_send(RUN_ID)
+            .unwrap()
+            .unwrap()
+            .turn_start_intent_at
+            .is_some()
+    );
     reopened
         .record_recovered_turn_started(RUN_ID, "request-hash", "primary-thread", "turn-new")
         .unwrap();

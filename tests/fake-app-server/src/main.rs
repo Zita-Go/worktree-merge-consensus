@@ -94,7 +94,7 @@ fn serve_proxy() -> Result<(), String> {
                 serde_json::to_string(&response).map_err(|error| error.to_string())?,
             ))
             .map_err(|error| format!("write response: {error}"))?;
-        for notification in emit_post_response(&config, method, &result)? {
+        for notification in emit_post_response(&config, method, &params, &result)? {
             websocket
                 .send(Message::Text(
                     serde_json::to_string(&notification).map_err(|error| error.to_string())?,
@@ -153,13 +153,37 @@ fn handle_request(config: &Config, method: &str, params: &Value) -> Result<Value
                 .get("threadId")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "threadId is missing".to_owned())?;
-            Ok(json!({"thread": thread_detail(config, thread_id)?}))
+            let include_turns = params
+                .get("includeTurns")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| "thread/read includeTurns is missing".to_owned())?;
+            if active_primary_mirror(config).as_deref() == Some(thread_id) {
+                if include_turns {
+                    append_event(config, &format!("method thread/read-full {thread_id}"))?;
+                    return Err("ephemeral threads do not support includeTurns".to_owned());
+                }
+                append_event(config, &format!("method thread/read-summary {thread_id}"))?;
+                let mut summary = thread_summary(config, thread_id)?;
+                summary["turns"] = json!([]);
+                return Ok(json!({"thread": summary}));
+            }
+            if include_turns {
+                Ok(json!({"thread": thread_detail(config, thread_id)?}))
+            } else {
+                let mut summary = thread_summary(config, thread_id)?;
+                summary["turns"] = json!([]);
+                Ok(json!({"thread": summary}))
+            }
         }
         "thread/resume" => {
             let thread_id = params
                 .get("threadId")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "threadId is missing".to_owned())?;
+            if active_primary_mirror(config).as_deref() == Some(thread_id) {
+                append_event(config, &format!("method thread/resume {thread_id}"))?;
+                return Err(format!("no rollout found for thread id {thread_id}"));
+            }
             mark_thread_resumed(config, thread_id, params)?;
             Ok(json!({"thread": thread_detail(config, thread_id)?}))
         }
@@ -376,12 +400,15 @@ fn start_turn(config: &Config, params: &Value) -> Result<Value, String> {
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| "prompt action is missing".to_owned())?;
-    let resume_mode = consume_thread_resume(config, thread_id)?;
-    let expected_resume_mode = "default";
-    if resume_mode != expected_resume_mode {
-        return Err(format!(
-            "{action} used {resume_mode} resume instead of {expected_resume_mode}"
-        ));
+    let ephemeral = active_primary_mirror(config).as_deref() == Some(thread_id);
+    if !ephemeral {
+        let resume_mode = consume_thread_resume(config, thread_id)?;
+        let expected_resume_mode = "default";
+        if resume_mode != expected_resume_mode {
+            return Err(format!(
+                "{action} used {resume_mode} resume instead of {expected_resume_mode}"
+            ));
+        }
     }
     if let Err(error) = validate_turn_policy(config, action, thread_id, params, &payload) {
         append_event(
@@ -1022,7 +1049,12 @@ fn pending_path(config: &Config, turn_id: &str) -> PathBuf {
         .join(format!("pending-{turn_id}.json"))
 }
 
-fn emit_post_response(config: &Config, method: &str, result: &Value) -> Result<Vec<Value>, String> {
+fn emit_post_response(
+    config: &Config,
+    method: &str,
+    params: &Value,
+    result: &Value,
+) -> Result<Vec<Value>, String> {
     let mut notifications = Vec::new();
     if method != "turn/start" {
         return Ok(notifications);
@@ -1032,6 +1064,10 @@ fn emit_post_response(config: &Config, method: &str, result: &Value) -> Result<V
         .and_then(|turn| turn.get("id"))
         .and_then(Value::as_str)
         .ok_or_else(|| "turn/start response is missing turn id".to_owned())?;
+    let thread_id = params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "turn/start request is missing thread id".to_owned())?;
     let status = result["turn"]["status"].as_str().unwrap_or_default();
     if config.scenario == "user_input_pause" && status == "inProgress" {
         notifications.push(json!({
@@ -1050,12 +1086,43 @@ fn emit_post_response(config: &Config, method: &str, result: &Value) -> Result<V
         let notification = json!({
             "jsonrpc": "2.0",
             "method": "turn/completed",
-            "params": {"threadId": config.primary_thread, "turn": turn}
+            "params": {"threadId": thread_id, "turn": turn}
         });
         for _ in 0..2 {
             notifications.push(notification.clone());
             append_event(config, "duplicate notification")?;
         }
+    }
+    if active_primary_mirror(config).as_deref() == Some(thread_id) && status == "completed" {
+        let turn = load_turns(config, thread_id)?
+            .into_iter()
+            .find(|turn| turn.get("id").and_then(Value::as_str) == Some(turn_id))
+            .ok_or_else(|| format!("completed ephemeral turn {turn_id} is missing"))?;
+        for item in turn
+            .get("items")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            notifications.push(json!({
+                "jsonrpc": "2.0",
+                "method": "item/completed",
+                "params": {
+                    "threadId": thread_id,
+                    "turnId": turn_id,
+                    "item": item
+                }
+            }));
+        }
+        notifications.push(json!({
+            "jsonrpc": "2.0",
+            "method": "turn/completed",
+            "params": {"threadId": thread_id, "turn": turn}
+        }));
+        append_event(
+            config,
+            &format!("ephemeral completion events {thread_id} {turn_id}"),
+        )?;
     }
     Ok(notifications)
 }

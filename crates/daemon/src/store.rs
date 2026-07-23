@@ -34,6 +34,7 @@ pub struct PendingSend {
     pub full_prompt: Option<String>,
     pub capability_generation: Option<String>,
     pub participant_binding_generation: Option<u32>,
+    pub turn_start_intent_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -455,6 +456,7 @@ impl SqliteRunStore {
         effective_primary_thread_id: &str,
         mode: PrimaryBindingMode,
         participant_server: &str,
+        source_history_hash: Option<&str>,
     ) -> Result<PrimaryParticipantBinding, StoreError> {
         if source_primary_thread_id.trim().is_empty()
             || effective_primary_thread_id.trim().is_empty()
@@ -487,6 +489,11 @@ impl SqliteRunStore {
                     "run {run_id} direct Primary binding must use the Source Primary task"
                 )));
             }
+            PrimaryBindingMode::Direct if source_history_hash.is_some() => {
+                return Err(StoreError::IncompatibleState(format!(
+                    "run {run_id} direct Primary binding cannot carry an ephemeral source-history hash"
+                )));
+            }
             PrimaryBindingMode::EphemeralFork
                 if effective_primary_thread_id == source_primary_thread_id
                     || effective_primary_thread_id == frozen_reviewer =>
@@ -495,7 +502,32 @@ impl SqliteRunStore {
                     "run {run_id} ephemeral Primary binding must differ from both frozen source tasks"
                 )));
             }
+            PrimaryBindingMode::EphemeralFork
+                if !source_history_hash.is_some_and(|hash| !hash.trim().is_empty()) =>
+            {
+                return Err(StoreError::IncompatibleState(format!(
+                    "run {run_id} ephemeral Primary binding requires a nonempty source-history hash"
+                )));
+            }
             _ => {}
+        }
+        if mode == PrimaryBindingMode::EphemeralFork {
+            let previous_hash = transaction
+                .query_row(
+                    "SELECT source_history_hash
+                     FROM primary_participant_bindings
+                     WHERE run_id = ?1 AND mode = 'EPHEMERAL_FORK'
+                       AND source_history_hash IS NOT NULL
+                     ORDER BY generation ASC LIMIT 1",
+                    [run_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if previous_hash.as_deref() != None && previous_hash.as_deref() != source_history_hash {
+                return Err(StoreError::IncompatibleState(format!(
+                    "run {run_id} Source Primary history changed between ephemeral binding generations"
+                )));
+            }
         }
 
         let pending_count = transaction.query_row(
@@ -515,6 +547,7 @@ impl SqliteRunStore {
                 && active.effective_primary_thread_id == effective_primary_thread_id
                 && active.mode == mode
                 && active.participant_server == participant_server
+                && active.source_history_hash.as_deref() == source_history_hash
             {
                 transaction.commit()?;
                 return Ok(active);
@@ -537,8 +570,8 @@ impl SqliteRunStore {
             "INSERT INTO primary_participant_bindings (
                 run_id, generation, source_primary_thread_id,
                 effective_primary_thread_id, mode, participant_server,
-                active, created_at, verified_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?7)",
+                source_history_hash, active, created_at, verified_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?8)",
             params![
                 run_id,
                 generation,
@@ -546,6 +579,7 @@ impl SqliteRunStore {
                 effective_primary_thread_id,
                 mode.as_database_value(),
                 participant_server,
+                source_history_hash,
                 timestamp,
             ],
         )?;
@@ -557,6 +591,7 @@ impl SqliteRunStore {
             mode,
             generation,
             participant_server: participant_server.to_owned(),
+            source_history_hash: source_history_hash.map(str::to_owned),
             created_at: timestamp,
             verified_at: timestamp,
         })
@@ -651,8 +686,8 @@ impl SqliteRunStore {
             "INSERT INTO primary_participant_bindings (
                 run_id, generation, source_primary_thread_id,
                 effective_primary_thread_id, mode, participant_server,
-                active, created_at, verified_at
-             ) VALUES (?1, ?2, ?3, ?3, 'DIRECT', ?4, 1, ?5, ?5)",
+                source_history_hash, active, created_at, verified_at
+             ) VALUES (?1, ?2, ?3, ?3, 'DIRECT', ?4, NULL, 1, ?5, ?5)",
             params![
                 run_id,
                 generation,
@@ -681,6 +716,7 @@ impl SqliteRunStore {
             mode: PrimaryBindingMode::Direct,
             generation,
             participant_server: participant_server.to_owned(),
+            source_history_hash: None,
             created_at: timestamp,
             verified_at: timestamp,
         })
@@ -813,7 +849,8 @@ impl SqliteRunStore {
         connection
             .query_row(
                 "SELECT run_id, role, phase, round, message_hash, thread_id, turn_id,
-                        capability_generation, participant_binding_generation
+                        capability_generation, participant_binding_generation,
+                        turn_start_intent_at
                  FROM turns
                  WHERE run_id = ?1 AND delivery_state IN ('PENDING', 'SENT')
                  ORDER BY id DESC LIMIT 1",
@@ -830,6 +867,7 @@ impl SqliteRunStore {
                         full_prompt: None,
                         capability_generation: row.get(7)?,
                         participant_binding_generation: row.get(8)?,
+                        turn_start_intent_at: row.get(9)?,
                     })
                 },
             )
@@ -886,11 +924,17 @@ impl SqliteRunStore {
         let transaction = connection.transaction()?;
         let changed = transaction.execute(
             "UPDATE turns
-             SET capability_generation = ?1
-             WHERE run_id = ?2 AND message_hash = ?3
+             SET capability_generation = ?1,
+                 turn_start_intent_at = COALESCE(turn_start_intent_at, ?2)
+             WHERE run_id = ?3 AND message_hash = ?4
                AND delivery_state IN ('PENDING', 'SENT')
                AND thread_id IS NULL AND turn_id IS NULL",
-            params![PARTICIPANT_CAPABILITY_GENERATION, run_id, message_hash],
+            params![
+                PARTICIPANT_CAPABILITY_GENERATION,
+                now_unix(),
+                run_id,
+                message_hash
+            ],
         )?;
         if changed != 1 {
             return Err(StoreError::PendingSendNotFound(run_id.to_owned()));
@@ -2380,7 +2424,17 @@ impl SqliteRunStore {
     }
 }
 
-type PrimaryBindingRow = (String, u32, String, String, String, String, i64, i64);
+type PrimaryBindingRow = (
+    String,
+    u32,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    i64,
+    i64,
+);
 
 fn query_active_primary_binding(
     connection: &Connection,
@@ -2390,7 +2444,7 @@ fn query_active_primary_binding(
         .query_row(
             "SELECT run_id, generation, source_primary_thread_id,
                     effective_primary_thread_id, mode, participant_server,
-                    created_at, verified_at
+                    source_history_hash, created_at, verified_at
              FROM primary_participant_bindings
              WHERE run_id = ?1 AND active = 1",
             [run_id],
@@ -2409,7 +2463,7 @@ fn query_primary_binding(
         .query_row(
             "SELECT run_id, generation, source_primary_thread_id,
                     effective_primary_thread_id, mode, participant_server,
-                    created_at, verified_at
+                    source_history_hash, created_at, verified_at
              FROM primary_participant_bindings
              WHERE run_id = ?1 AND generation = ?2",
             params![run_id, generation],
@@ -2449,6 +2503,7 @@ fn primary_binding_row(row: &rusqlite::Row<'_>) -> Result<PrimaryBindingRow, rus
         row.get(5)?,
         row.get(6)?,
         row.get(7)?,
+        row.get(8)?,
     ))
 }
 
@@ -2460,6 +2515,7 @@ fn decode_primary_binding(row: PrimaryBindingRow) -> Result<PrimaryParticipantBi
         effective_primary_thread_id,
         mode,
         participant_server,
+        source_history_hash,
         created_at,
         verified_at,
     ) = row;
@@ -2475,6 +2531,7 @@ fn decode_primary_binding(row: PrimaryBindingRow) -> Result<PrimaryParticipantBi
         mode,
         generation,
         participant_server,
+        source_history_hash,
         created_at,
         verified_at,
     })
@@ -2692,6 +2749,7 @@ fn v025_verification_completion_collision_candidate(
             full_prompt: None,
             capability_generation: capability_generation.clone(),
             participant_binding_generation: *participant_binding_generation,
+            turn_start_intent_at: None,
         },
         stale_turn_id,
         turn_record_id: *turn_record_id,
@@ -2751,7 +2809,7 @@ fn archive_and_reset_turn(
         "UPDATE turns
          SET delivery_state = 'PENDING', thread_id = NULL, turn_id = NULL,
              response_hash = NULL, accepted_at = NULL,
-             capability_generation = ?1
+             capability_generation = ?1, turn_start_intent_at = NULL
          WHERE id = ?2 AND delivery_state = ?3
            AND thread_id = ?4 AND turn_id = ?5",
         params![
@@ -2810,6 +2868,7 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             effective_primary_thread_id TEXT NOT NULL,
             mode TEXT NOT NULL CHECK(mode IN ('DIRECT', 'EPHEMERAL_FORK')),
             participant_server TEXT NOT NULL,
+            source_history_hash TEXT,
             active INTEGER NOT NULL CHECK(active IN (0, 1)),
             created_at INTEGER NOT NULL,
             verified_at INTEGER NOT NULL,
@@ -2830,6 +2889,7 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             turn_id TEXT,
             capability_generation TEXT,
             participant_binding_generation INTEGER,
+            turn_start_intent_at INTEGER,
             created_at INTEGER NOT NULL,
             accepted_at INTEGER,
             UNIQUE(run_id, role, phase, round, message_hash)
@@ -2929,6 +2989,22 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
     if !table_has_column(connection, "turns", "participant_binding_generation")? {
         connection.execute(
             "ALTER TABLE turns ADD COLUMN participant_binding_generation INTEGER",
+            [],
+        )?;
+    }
+    if !table_has_column(connection, "turns", "turn_start_intent_at")? {
+        connection.execute(
+            "ALTER TABLE turns ADD COLUMN turn_start_intent_at INTEGER",
+            [],
+        )?;
+    }
+    if !table_has_column(
+        connection,
+        "primary_participant_bindings",
+        "source_history_hash",
+    )? {
+        connection.execute(
+            "ALTER TABLE primary_participant_bindings ADD COLUMN source_history_hash TEXT",
             [],
         )?;
     }
