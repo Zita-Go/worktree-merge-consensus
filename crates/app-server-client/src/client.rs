@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt, io,
     path::PathBuf,
     pin::Pin,
@@ -27,8 +27,9 @@ use crate::{
     compat::{check_compatibility, parse_managed_user_agent},
     transport::{JsonRpcTransport, RpcError},
     types::{
-        AppEvent, CommandExecRequest, CommandExecResult, InitializeInfo, ThreadDetail, ThreadPage,
-        ThreadSummary, TurnExecutionPolicy, TurnHandle,
+        AppEvent, CommandExecRequest, CommandExecResult, InitializeInfo, McpServerStatus,
+        ThreadDetail, ThreadPage, ThreadResumePolicy, ThreadSummary, TurnExecutionPolicy,
+        TurnHandle,
     },
 };
 
@@ -36,6 +37,8 @@ const STDERR_TAIL_LINES: usize = 40;
 const PROXY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const CONTROLLED_PATCH_APPROVAL_KEY: &str = "plugins.worktree-merge-consensus.mcp_servers.worktreeMergeConsensus.tools.consensus_apply_patch.approval_mode";
 pub const CONTROLLED_PATCH_APPROVAL_MODE: &str = "approve";
+pub const PARTICIPANT_MCP_SERVER: &str = "worktreeMergeConsensusParticipant";
+pub const PARTICIPANT_PATCH_TOOL: &str = "consensus_apply_patch";
 
 #[derive(Debug, Clone)]
 pub struct ConnectOptions {
@@ -77,7 +80,15 @@ pub trait AppServer: Send + Sync {
         limit: u32,
     ) -> Result<ThreadPage, AppServerError>;
     async fn read_thread(&self, thread_id: &str) -> Result<ThreadDetail, AppServerError>;
-    async fn resume_thread(&self, thread_id: &str) -> Result<ThreadDetail, AppServerError>;
+    async fn resume_thread(
+        &self,
+        thread_id: &str,
+        policy: &ThreadResumePolicy,
+    ) -> Result<ThreadDetail, AppServerError>;
+    async fn list_mcp_server_status(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<McpServerStatus>, AppServerError>;
     async fn start_turn(
         &self,
         thread_id: &str,
@@ -535,14 +546,34 @@ impl AppServer for ReconnectingCodexAppServer {
         }
     }
 
-    async fn resume_thread(&self, thread_id: &str) -> Result<ThreadDetail, AppServerError> {
+    async fn resume_thread(
+        &self,
+        thread_id: &str,
+        policy: &ThreadResumePolicy,
+    ) -> Result<ThreadDetail, AppServerError> {
         let mut client = self.inner.lock().await;
-        match client.resume_thread(thread_id).await {
+        match client.resume_thread(thread_id, policy).await {
             Ok(detail) => Ok(detail),
             Err(error) if reconnectable(&error) => {
                 self.reconnect_locked(&mut client, "thread/resume", &error)
                     .await?;
-                client.resume_thread(thread_id).await
+                client.resume_thread(thread_id, policy).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn list_mcp_server_status(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<McpServerStatus>, AppServerError> {
+        let mut client = self.inner.lock().await;
+        match client.list_mcp_server_status(thread_id).await {
+            Ok(status) => Ok(status),
+            Err(error) if reconnectable(&error) => {
+                self.reconnect_locked(&mut client, "mcpServerStatus/list", &error)
+                    .await?;
+                client.list_mcp_server_status(thread_id).await
             }
             Err(error) => Err(error),
         }
@@ -680,11 +711,27 @@ impl AppServer for CodexAppServer {
         parse_thread_response(raw)
     }
 
-    async fn resume_thread(&self, thread_id: &str) -> Result<ThreadDetail, AppServerError> {
-        let raw = self
-            .rpc_request("thread/resume", json!({"threadId": thread_id}))
-            .await?;
+    async fn resume_thread(
+        &self,
+        thread_id: &str,
+        policy: &ThreadResumePolicy,
+    ) -> Result<ThreadDetail, AppServerError> {
+        let params = resume_params(thread_id, policy)?;
+        let raw = self.rpc_request("thread/resume", params).await?;
         parse_thread_response(raw)
+    }
+
+    async fn list_mcp_server_status(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<McpServerStatus>, AppServerError> {
+        let raw = self
+            .rpc_request(
+                "mcpServerStatus/list",
+                json!({"threadId": thread_id, "detail": "toolsAndAuthOnly"}),
+            )
+            .await?;
+        parse_mcp_server_status_response(raw)
     }
 
     async fn start_turn(
@@ -832,6 +879,39 @@ fn turn_policy_params(
     }
 }
 
+fn resume_params(thread_id: &str, policy: &ThreadResumePolicy) -> Result<Value, AppServerError> {
+    match policy {
+        ThreadResumePolicy::Default => Ok(json!({"threadId": thread_id})),
+        ThreadResumePolicy::PrimaryIntegration {
+            participant_executable,
+        } => {
+            if !participant_executable.is_absolute() {
+                return Err(invalid_request(
+                    "participant executable must be an absolute path",
+                ));
+            }
+            Ok(json!({
+                "threadId": thread_id,
+                "config": {
+                    "mcp_servers": {
+                        PARTICIPANT_MCP_SERVER: {
+                            "command": participant_executable,
+                            "args": ["participant-mcp-server"],
+                            "required": true,
+                            "enabled_tools": [PARTICIPANT_PATCH_TOOL],
+                            "startup_timeout_sec": 10,
+                            "tool_timeout_sec": 300,
+                            "tools": {
+                                PARTICIPANT_PATCH_TOOL: {"approval_mode": "approve"}
+                            }
+                        }
+                    }
+                }
+            }))
+        }
+    }
+}
+
 fn validate_command_exec_request(request: &CommandExecRequest) -> Result<(), AppServerError> {
     if request.command.is_empty() {
         return Err(invalid_request("command argv must not be empty"));
@@ -908,6 +988,44 @@ fn parse_thread_response(raw: Value) -> Result<ThreadDetail, AppServerError> {
         turns,
         raw: thread,
     })
+}
+
+fn parse_mcp_server_status_response(raw: Value) -> Result<Vec<McpServerStatus>, AppServerError> {
+    let data = raw
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("mcpServerStatus/list result is missing data"))?;
+    let mut names = BTreeSet::new();
+    data.iter()
+        .map(|status| {
+            let status = status
+                .as_object()
+                .ok_or_else(|| invalid("MCP server status must be an object"))?;
+            let name = status
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("MCP server name must be a string"))?
+                .to_owned();
+            if !names.insert(name.clone()) {
+                return Err(invalid(format!("duplicate MCP server name: {name}")));
+            }
+            let tools = status
+                .get("tools")
+                .and_then(Value::as_object)
+                .ok_or_else(|| invalid("MCP server tools must be an object"))?
+                .iter()
+                .map(|(tool_name, definition)| {
+                    if !definition.is_object() {
+                        return Err(invalid(format!(
+                            "MCP tool definition must be an object: {tool_name}"
+                        )));
+                    }
+                    Ok((tool_name.clone(), definition.clone()))
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
+            Ok(McpServerStatus { name, tools })
+        })
+        .collect()
 }
 
 fn optional_string(value: &Value, key: &str) -> Result<Option<String>, AppServerError> {

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -31,6 +31,12 @@ pub enum TurnExecutionPolicy {
     PrimaryVerification {
         cwd: PathBuf,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThreadResumePolicy {
+    Default,
+    PrimaryIntegration { participant_executable: PathBuf },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +95,12 @@ pub struct ThreadPage {
     pub data: Vec<ThreadSummary>,
     pub next_cursor: Option<String>,
     pub backwards_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpServerStatus {
+    pub name: String,
+    pub tools: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

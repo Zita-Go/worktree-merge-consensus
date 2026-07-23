@@ -3,7 +3,7 @@
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 
 use app_server_client::{
-    AppServer, CodexAppServer, ReconnectingCodexAppServer, TurnExecutionPolicy,
+    AppServer, CodexAppServer, ReconnectingCodexAppServer, ThreadResumePolicy, TurnExecutionPolicy,
     client::ConnectOptions,
 };
 
@@ -187,7 +187,7 @@ async fn unsupported_websocket_frame_reports_the_protocol_cause() {
 async fn reconnecting_client_replaces_a_proxy_closed_by_an_app_server_restart() {
     let temp = tempfile::tempdir().unwrap();
     let log = temp.path().join("calls.log");
-    let binary = fake_codex_that_resets_once(temp.path(), &log, "0.144.5");
+    let binary = fake_codex_that_resets_once(temp.path(), &log, "0.144.5", None);
 
     let client = ReconnectingCodexAppServer::connect(ConnectOptions {
         codex_binary: binary,
@@ -207,6 +207,56 @@ async fn reconnecting_client_replaces_a_proxy_closed_by_an_app_server_restart() 
             .filter(|line| *line == "app-server proxy")
             .count(),
         2
+    );
+}
+
+#[tokio::test]
+async fn reconnecting_client_preserves_participant_resume_policy() {
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("calls.log");
+    let resume_log = temp.path().join("resume.log");
+    let binary = fake_codex_that_resets_once(temp.path(), &log, "0.144.5", Some(&resume_log));
+
+    let client = ReconnectingCodexAppServer::connect(ConnectOptions {
+        codex_binary: binary,
+        control_socket: None,
+        start_daemon: true,
+    })
+    .await
+    .unwrap();
+
+    client
+        .resume_thread(
+            "thread-1",
+            &ThreadResumePolicy::PrimaryIntegration {
+                participant_executable: std::path::PathBuf::from("/opt/codex-consensus"),
+            },
+        )
+        .await
+        .unwrap();
+
+    let resumed: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(resume_log).unwrap()).unwrap();
+    assert_eq!(
+        resumed,
+        serde_json::json!({
+            "threadId": "thread-1",
+            "config": {
+                "mcp_servers": {
+                    "worktreeMergeConsensusParticipant": {
+                        "command": "/opt/codex-consensus",
+                        "args": ["participant-mcp-server"],
+                        "required": true,
+                        "enabled_tools": ["consensus_apply_patch"],
+                        "startup_timeout_sec": 10,
+                        "tool_timeout_sec": 300,
+                        "tools": {
+                            "consensus_apply_patch": {"approval_mode": "approve"}
+                        }
+                    }
+                }
+            }
+        })
     );
 }
 
@@ -316,7 +366,12 @@ exit 2
     binary
 }
 
-fn fake_codex_that_resets_once(directory: &Path, log: &Path, version: &str) -> std::path::PathBuf {
+fn fake_codex_that_resets_once(
+    directory: &Path,
+    log: &Path,
+    version: &str,
+    resume_log: Option<&Path>,
+) -> std::path::PathBuf {
     let binary = directory.join("codex");
     let proxy = directory.join("fake_proxy.py");
     let counter = directory.join("proxy-count");
@@ -326,6 +381,7 @@ fn fake_codex_that_resets_once(directory: &Path, log: &Path, version: &str) -> s
 LOG='{}'
 PROXY='{}'
 COUNTER='{}'
+RESUME_LOG='{}'
 printf '%s\n' "$*" >> "$LOG"
 if [ "$1" = "--version" ]; then
   printf 'codex-cli {}\n'
@@ -346,13 +402,14 @@ if [ "$1 $2" = "app-server proxy" ]; then
   else
     mode='recover-second'
   fi
-  exec /usr/bin/env python3 "$PROXY" 'codex-cli/{}' "$mode"
+  exec /usr/bin/env python3 "$PROXY" 'codex-cli/{}' "$mode" "$RESUME_LOG"
 fi
 exit 2
 "#,
         log.display(),
         proxy.display(),
         counter.display(),
+        resume_log.map_or("", |path| path.to_str().unwrap()),
         version,
         version,
     );
@@ -422,6 +479,7 @@ sys.stdout.buffer.flush()
 
 user_agent = sys.argv[1]
 mode = sys.argv[2]
+resume_log = sys.argv[3] if len(sys.argv) > 3 else ''
 while True:
     try:
         first, second = read_exact(2)
@@ -456,6 +514,17 @@ while True:
         response = {
             'id': request['id'],
             'result': {'data': [], 'nextCursor': None},
+        }
+        send_frame(1, json.dumps(response, separators=(',', ':')).encode('utf-8'))
+        continue
+
+    if method == 'thread/resume' and 'id' in request:
+        if resume_log:
+            with open(resume_log, 'w') as output:
+                json.dump(request['params'], output, separators=(',', ':'))
+        response = {
+            'id': request['id'],
+            'result': {'thread': {'id': request['params']['threadId']}},
         }
         send_frame(1, json.dumps(response, separators=(',', ':')).encode('utf-8'))
         continue

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use app_server_client::{
     AppServer, CONTROLLED_PATCH_APPROVAL_KEY, CodexAppServer, CommandExecRequest,
-    TurnExecutionPolicy, transport::JsonRpcTransport,
+    ThreadResumePolicy, TurnExecutionPolicy, transport::JsonRpcTransport,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex, split};
@@ -91,6 +91,36 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
         respond(
             &mut server_write,
             &resume,
+            json!({"thread": thread_with_turns()}),
+        )
+        .await;
+
+        let participant_resume = read_request(&mut lines).await;
+        assert_eq!(participant_resume["method"], "thread/resume");
+        assert_eq!(
+            participant_resume["params"],
+            json!({
+                "threadId": "t-1",
+                "config": {
+                    "mcp_servers": {
+                        "worktreeMergeConsensusParticipant": {
+                            "command": "/opt/codex-consensus",
+                            "args": ["participant-mcp-server"],
+                            "required": true,
+                            "enabled_tools": ["consensus_apply_patch"],
+                            "startup_timeout_sec": 10,
+                            "tool_timeout_sec": 300,
+                            "tools": {
+                                "consensus_apply_patch": {"approval_mode": "approve"}
+                            }
+                        }
+                    }
+                }
+            })
+        );
+        respond(
+            &mut server_write,
+            &participant_resume,
             json!({"thread": thread_with_turns()}),
         )
         .await;
@@ -247,7 +277,19 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
     assert_eq!(page.next_cursor.as_deref(), Some("next-page"));
     let detail = client.read_thread("t-1").await.unwrap();
     assert_eq!(detail.turns.len(), 1);
-    client.resume_thread("t-1").await.unwrap();
+    client
+        .resume_thread("t-1", &ThreadResumePolicy::Default)
+        .await
+        .unwrap();
+    client
+        .resume_thread(
+            "t-1",
+            &ThreadResumePolicy::PrimaryIntegration {
+                participant_executable: PathBuf::from("/opt/codex-consensus"),
+            },
+        )
+        .await
+        .unwrap();
     let turn = client
         .start_turn(
             "t-1",
@@ -432,6 +474,70 @@ async fn execute_command_rejects_invalid_requests_before_sending() {
             .to_string()
             .contains("command output_bytes_cap must be greater than zero")
     );
+}
+
+#[tokio::test]
+async fn mcp_server_status_list_is_bounded_and_validated() {
+    let responses = vec![
+        json!({
+            "data": [{
+                "name": "worktreeMergeConsensusParticipant",
+                "tools": {
+                    "consensus_apply_patch": {"description": "Apply an approved patch"}
+                }
+            }]
+        }),
+        json!({}),
+        json!({
+            "data": [
+                {"name": "duplicate", "tools": {}},
+                {"name": "duplicate", "tools": {}}
+            ]
+        }),
+        json!({"data": [{"name": "bad-tools", "tools": []}]}),
+        json!({
+            "data": [{
+                "name": "bad-definition",
+                "tools": {"consensus_apply_patch": "not-an-object"}
+            }]
+        }),
+    ];
+    let (client_side, server_side) = duplex(16 * 1024);
+    let (client_read, client_write) = split(client_side);
+    let client = CodexAppServer::from_transport(JsonRpcTransport::new(client_read, client_write));
+    let (server_read, mut server_write) = split(server_side);
+    let mut lines = BufReader::new(server_read).lines();
+
+    let server = tokio::spawn(async move {
+        for response in responses {
+            let request = read_request(&mut lines).await;
+            assert_eq!(request["method"], "mcpServerStatus/list");
+            assert_eq!(
+                request["params"],
+                json!({"threadId": "t-1", "detail": "toolsAndAuthOnly"})
+            );
+            respond(&mut server_write, &request, response).await;
+        }
+    });
+
+    let statuses = client.list_mcp_server_status("t-1").await.unwrap();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].name, "worktreeMergeConsensusParticipant");
+    assert_eq!(
+        statuses[0].tools.get("consensus_apply_patch"),
+        Some(&json!({"description": "Apply an approved patch"}))
+    );
+
+    for expected in [
+        "mcpServerStatus/list result is missing data",
+        "duplicate MCP server name",
+        "MCP server tools must be an object",
+        "MCP tool definition must be an object",
+    ] {
+        let error = client.list_mcp_server_status("t-1").await.unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+    server.await.unwrap();
 }
 
 fn thread_with_turns() -> Value {
