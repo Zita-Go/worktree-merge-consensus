@@ -67,11 +67,20 @@ coordinator binds the frozen Source Primary either directly (including a
 `notLoaded` task that it loads with participant configuration) or through an
 ephemeral full-history `thread/fork` when a preloaded task lacks the exact
 tool. The fork becomes the Effective Primary only after history, idle state,
-null goal, and MCP inventory checks. Before every Primary turn, the coordinator
-resumes that Effective Primary and fully paginates `mcpServerStatus/list`
-before `turn/start`; the participant server must expose exactly
-`consensus_apply_patch`. Reviewer routing and both frozen source identities are
-unchanged. A pending or uncertain turn is never reforked or resent.
+null goal, and MCP inventory checks.
+
+Release 0.2.8 makes execution mode-aware. A direct Effective Primary retains
+stored-history reads and `thread/resume`. An ephemeral Effective Primary is
+checked only with `thread/read(includeTurns: false)`, is never passed to
+`thread/read(includeTurns: true)`, `thread/turns/list`, or `thread/resume`, and
+completes turns only from durable `item/*` and `turn/completed` event evidence.
+Before every Primary turn, the coordinator fully paginates
+`mcpServerStatus/list`; the participant server must expose exactly
+`consensus_apply_patch`. This preflight completes before `turn/start`. A frozen
+Source-history hash prevents a replacement mirror from silently diverging.
+Persisted start intent prevents uncertain delivery from being resent. Reviewer
+routing and both frozen source identities are unchanged. A pending or
+uncertain turn is never reforked or resent.
 
 The launcher may call only the operator-facing `consensus_*` tools listed
 above. It must never ask the invoking task to find, install, expose, or call
@@ -270,7 +279,7 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   continues the same Run during startup; observe it with `consensus_status`.
   Every near-match remains blocked without mutation.
 - If the exact post-v0.2.6 production Run is `BLOCKED` with
-  `CONTROLLED_PATCH_TOOL_UNAVAILABLE`, install matching v0.2.7 binary and
+  `CONTROLLED_PATCH_TOOL_UNAVAILABLE`, install matching v0.2.8 binary and
   plugin artifacts, then explicitly call `consensus_resume`. The Run, round,
   branch, old SHA, and failed verification evidence must match; the coordinator
   archives only the empty correction turn, reacquires the lock, preflights the

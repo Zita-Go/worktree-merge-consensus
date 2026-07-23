@@ -76,7 +76,7 @@ while waiting.
 
 For legacy v1 Runs, version 0.2.7 permits only the exact post-0.2.6
 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` correction recovery. Explicit resume after
-a matching 0.2.7 deployment preserves the same Run, round, integration branch,
+a matching 0.2.8 deployment preserves the same Run, round, integration branch,
 old SHA, and failed frozen verification evidence; archives only the empty
 side-effect-free correction turn; reacquires the lock; repeats participant
 preflight; and permits one request-bound corrective patch and commit. The

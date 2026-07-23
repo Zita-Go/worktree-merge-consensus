@@ -142,11 +142,18 @@ goal，因此协调器不会对镜像调用 `thread/goal/get`。
 （refork），也不会重发（resent）。由于 `thread/fork` 非幂等，响应不确定时绝不会自动重试。
 该契约要求 Codex CLI `>=0.144.1`。
 
-部署匹配的 0.2.7 后，必须显式调用 `consensus_resume`，才可能恢复精确的 post-0.2.6
+部署匹配的 0.2.8 后，必须显式调用 `consensus_resume`，才可能恢复精确的 post-0.2.6
 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` 修正阻塞。恢复保留同一 Run、轮次、分支、旧 SHA 与失败的
 冻结验证证据；只归档空的修正 turn，重新获取锁、再次预检参与服务并重试一次绑定请求的修正补丁。
 只允许一次修正 commit。新 SHA 必须前进，全部冻结验证命令会重新执行。仅安装或启用操作者插件
 绝不会改变阻塞 Run。
+
+0.2.8 适配 Codex 0.145.0 的 App Server ephemeral 任务约束。协调器只用
+`thread/read(includeTurns: false)` 检查 ephemeral Effective Primary，绝不会对它调用
+`thread/resume`，并从已持久化的 `item/*` 与 `turn/completed` 实时事件重建完成 turn。
+fork 前会冻结 Source Primary 的 turn ID 序列哈希，发送前会先持久化 turn-start intent；
+因此启动响应丢失时不会重发，终态事件缺失时也会故障关闭，而不会查询不受支持的 ephemeral
+历史。持久化的 Source、Reviewer 与 direct Primary 仍使用规范完整历史恢复。
 
 精确边界见 [v2 参与任务协议](docs/protocol-v2.md)、[旧版 v1 协议](docs/protocol-v1.md)、
 [兼容性策略](docs/compatibility.md)与[安全策略](SECURITY.md)。
@@ -170,8 +177,8 @@ goal，因此协调器不会对镜像调用 `thread/goal/get`。
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.7-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.7-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.8-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.8-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 v0.1.0 的 GNU 产物要求 GLIBC 2.39，现已停止推荐；受支持的 Linux 主机请使用

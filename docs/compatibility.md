@@ -195,17 +195,30 @@ Version 0.2.7 also permits explicit recovery of only the exact production
 blocker left after the 0.2.6 recovery: the same blocked Run, correction round,
 integration branch, prior integration SHA, and failed frozen verification
 evidence, with `CONTROLLED_PATCH_TOOL_UNAVAILABLE` and an otherwise empty,
-side-effect-free correction turn. After a matching 0.2.7 deployment, explicit
+side-effect-free correction turn. After a matching 0.2.8 deployment, explicit
 `consensus_resume` archives only that correction turn, atomically reacquires
 the Run lock, preflights the participant server, and retries the same request.
 At most one request-bound corrective patch and commit are allowed; the
 integration SHA must advance and every frozen verification command runs again.
 Installing or enabling the operator plugin alone never mutates a blocked Run.
 
+Version 0.2.8 distinguishes persisted tasks from ephemeral participant forks.
+For an ephemeral Effective Primary, the coordinator uses
+`thread/read(includeTurns: false)` only, never calls `thread/turns/list` or
+`thread/resume`, and reconstructs terminal turns from SQLite-journaled
+`item/started`, `item/completed`, and `turn/completed` events. It persists the
+Source Primary turn-ID-sequence hash with every ephemeral binding and writes a
+turn-start intent before dispatch. Missing terminal evidence and uncertain
+delivery therefore fail closed without a second `turn/start` or replacement
+fork. Stored Source, Reviewer, and direct Primary tasks keep the canonical
+full-history path.
+
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
-fixed task ID. `thread/read` can return persisted history for a `notLoaded`
-task, but it does not load that task for model execution; starting a turn after
-only reading history can produce a completed user-message-only turn.
+fixed task ID for persisted direct and Reviewer tasks. Ephemeral Effective
+Primary tasks are already loaded and must not be resumed. `thread/read` can
+return persisted history for a `notLoaded` task, but it does not load that task
+for model execution; starting a turn after only reading history can produce a
+completed user-message-only turn.
 
 Every `turn/start` also carries the pinned role-specific cwd, runtime workspace
 roots, approval policy, and a same-host `local` environment selection with that

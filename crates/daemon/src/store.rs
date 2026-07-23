@@ -523,7 +523,7 @@ impl SqliteRunStore {
                     |row| row.get::<_, String>(0),
                 )
                 .optional()?;
-            if previous_hash.as_deref() != None && previous_hash.as_deref() != source_history_hash {
+            if previous_hash.is_some() && previous_hash.as_deref() != source_history_hash {
                 return Err(StoreError::IncompatibleState(format!(
                     "run {run_id} Source Primary history changed between ephemeral binding generations"
                 )));

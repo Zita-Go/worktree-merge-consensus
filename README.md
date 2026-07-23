@@ -214,7 +214,7 @@ pending or uncertain; a pending or uncertain turn is never reforked or resent.
 Because `thread/fork` is non-idempotent, an uncertain fork response is never
 automatically repeated. This contract requires Codex CLI `>=0.144.1`.
 
-After a matching 0.2.7 deployment, explicit `consensus_resume` may recover
+After a matching 0.2.8 deployment, explicit `consensus_resume` may recover
 only the exact post-0.2.6 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` correction
 blocker. It preserves the same Run, round, branch, old SHA, and failed frozen
 verification evidence; archives only the empty correction turn; reacquires the
@@ -222,6 +222,16 @@ lock; repeats participant preflight; and retries one request-bound correction
 patch and correction commit. The new SHA must advance and every frozen
 verification command reruns.
 Installing or enabling the operator plugin alone never mutates the blocked Run.
+
+Version 0.2.8 adapts ephemeral Effective Primary execution to the App Server
+contract used by Codex 0.145.0. Ephemeral tasks are checked with
+`thread/read(includeTurns: false)`, are never passed to `thread/resume`, and
+complete turns from durably journaled `item/*` and `turn/completed` events.
+The coordinator freezes a hash of the Source Primary turn-ID sequence before
+forking and records turn-start intent before dispatch. A lost start response is
+therefore never resent, and a missing terminal event fails closed instead of
+querying unsupported ephemeral history. Stored Source, Reviewer, and direct
+Primary tasks retain canonical full-history recovery.
 
 Read [the v2 participant protocol](docs/protocol-v2.md), the
 [legacy v1 protocol](docs/protocol-v1.md),
@@ -251,8 +261,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.7-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.7-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.8-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.8-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or

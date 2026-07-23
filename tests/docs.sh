@@ -86,6 +86,8 @@ for document in "${binding_documents[@]}"; do
     grep -Fq "$marker" "$document" ||
       fail "$document is missing the Primary participant binding marker: $marker"
   done
+  grep -Fq 'includeTurns: false' "$document" ||
+    fail "$document is missing the ephemeral summary-read contract"
   if grep -Fq 'only when resuming a Primary integration task' "$document"; then
     fail "$document still contains the obsolete integration-only injection contract"
   fi
@@ -204,7 +206,7 @@ for path in semantic_documents:
         r"(?:before every.{0,80}(?:turn/start|such turn)|before.{0,80}turn/start)",
     ])
     require(path, "matching deployment and explicit resume", [
-        r"(?:matching.{0,80}0\.2\.7|0\.2\.7.{0,80}matching)",
+        r"(?:matching.{0,80}0\.2\.8|0\.2\.8.{0,80}matching)",
         r"explicit.{0,80}resume|consensus_resume",
     ])
     require(path, "same recovery identity", [
@@ -233,7 +235,7 @@ for path in semantic_documents:
 recovery_claims = [
     ("exact recovery blocker", [r"CONTROLLED_PATCH_TOOL_UNAVAILABLE"]),
     ("matching deployment and explicit resume", [
-        r"(?:matching.{0,80}0\.2\.7|0\.2\.7.{0,80}matching)",
+        r"(?:matching.{0,80}0\.2\.8|0\.2\.8.{0,80}matching)",
         r"explicit.{0,80}(?:consensus_resume|resume)",
     ]),
     ("same recovery identity", [
@@ -271,7 +273,7 @@ for path in semantic_documents:
 chinese_recovery = recovery_window("README.zh-CN.md")
 chinese_claims = [
     ("exact recovery blocker", [r"CONTROLLED_PATCH_TOOL_UNAVAILABLE"]),
-    ("matching deployment and explicit resume", [r"部署匹配的 0\.2\.7.{0,80}显式调用.{0,80}consensus_resume"]),
+    ("matching deployment and explicit resume", [r"部署匹配的 0\.2\.8.{0,80}显式调用.{0,80}consensus_resume"]),
     ("same recovery identity", [r"同一 Run.{0,80}轮次.{0,80}分支.{0,80}旧 SHA.{0,100}失败.{0,80}冻结验证证据"]),
     ("only the empty correction attempt is archived", [r"只归档空的修正 turn"]),
     ("repository lock reacquisition", [r"重新获取锁"]),

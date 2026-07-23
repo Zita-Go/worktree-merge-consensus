@@ -181,7 +181,7 @@ resent, and an uncertain non-idempotent `thread/fork` is never automatically
 repeated. This protocol depends on the experimental Codex CLI `>=0.144.1` App
 Server surface.
 
-After a matching 0.2.7 deployment, explicit resume may recover only the exact
+After a matching 0.2.8 deployment, explicit resume may recover only the exact
 post-0.2.6 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` correction blocker: the same
 Run, round, branch, old integration SHA, and failed frozen verification
 evidence, with one otherwise empty side-effect-free correction turn. Recovery
@@ -190,6 +190,17 @@ and retries the same request. It permits one request-bound corrective patch and
 commit only; the integration SHA must advance and all frozen verification is
 rerun. Installing or enabling the operator plugin alone never mutates or
 recovers a blocked Run.
+
+Release 0.2.8 routes an ephemeral Effective Primary through the App Server
+surface that ephemeral tasks actually support. The coordinator checks identity
+and liveness with `thread/read(includeTurns: false)`, never calls
+`thread/read(includeTurns: true)`, `thread/turns/list`, or `thread/resume` for
+that binding, and accepts a terminal turn only from durable matching
+`item/started`, `item/completed`, and `turn/completed` events. The binding
+stores a hash of the frozen Source Primary turn-ID sequence. Every send stores
+turn-start intent before dispatch; if delivery becomes uncertain without a
+turn ID, automatic resend and refork are forbidden. Stored Source, Reviewer,
+and direct Primary histories continue to use canonical full-history reads.
 
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the

@@ -192,8 +192,17 @@ the same Run, round, integration branch, old SHA, and failed frozen verification
 evidence; archives only the empty side-effect-free correction turn; reacquires
 the lock; and repeats participant preflight. One request-bound correction patch
 and commit may advance the SHA, after which every frozen verification command
-runs again. Matching 0.2.7 installation alone does not mutate the blocked Run;
+runs again. Matching 0.2.8 installation alone does not mutate the blocked Run;
 explicit resume is required and every near-match remains terminal.
+
+Release 0.2.8 makes ephemeral Primary execution summary- and event-backed.
+The coordinator never requests full history, turn lists, or resume for an
+ephemeral binding. It uses `thread/read(includeTurns: false)` for liveness,
+persists all matching item and terminal-turn events, and reconstructs the
+canonical terminal turn from that journal. The frozen Source-history hash and
+pre-dispatch start intent prevent changed-history reforks and duplicate sends.
+Missing terminal evidence fails closed. Stored Source, Reviewer, and direct
+Primary tasks retain full-history recovery.
 
 The same release contains one migration only for the exact legacy 0.2.4
 blocked-verification history: the same Run, Primary task, request, round,
