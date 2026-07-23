@@ -11,6 +11,7 @@ pub use client::{
     ReconnectingCodexAppServer,
 };
 pub use types::{
-    AppEvent, CommandExecRequest, CommandExecResult, InitializeInfo, McpServerStatus, ThreadDetail,
-    ThreadPage, ThreadResumePolicy, ThreadSummary, TurnExecutionPolicy, TurnHandle,
+    AppEvent, CommandExecRequest, CommandExecResult, InitializeInfo, McpServerStatus,
+    ParticipantMcpConfig, ThreadDetail, ThreadForkPolicy, ThreadPage, ThreadResumePolicy,
+    ThreadRuntimeStatus, ThreadSummary, TurnExecutionPolicy, TurnHandle,
 };

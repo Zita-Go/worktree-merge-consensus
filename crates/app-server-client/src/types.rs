@@ -34,9 +34,31 @@ pub enum TurnExecutionPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParticipantMcpConfig {
+    pub participant_executable: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThreadResumePolicy {
     Default,
-    PrimaryIntegration { participant_executable: PathBuf },
+    Participant(ParticipantMcpConfig),
+    #[doc(hidden)]
+    PrimaryIntegration {
+        participant_executable: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThreadForkPolicy {
+    EphemeralParticipant(ParticipantMcpConfig),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadRuntimeStatus {
+    NotLoaded,
+    Idle,
+    Active,
+    SystemError,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,7 +101,18 @@ pub struct ThreadSummary {
 
 impl ThreadSummary {
     pub fn is_active(&self) -> bool {
-        self.status.get("type").and_then(Value::as_str) == Some("active")
+        self.runtime_status() == Ok(ThreadRuntimeStatus::Active)
+    }
+
+    pub fn runtime_status(&self) -> Result<ThreadRuntimeStatus, String> {
+        match self.status.get("type").and_then(Value::as_str) {
+            Some("notLoaded") => Ok(ThreadRuntimeStatus::NotLoaded),
+            Some("idle") => Ok(ThreadRuntimeStatus::Idle),
+            Some("active") => Ok(ThreadRuntimeStatus::Active),
+            Some("systemError") => Ok(ThreadRuntimeStatus::SystemError),
+            Some(status) => Err(format!("unsupported thread status: {status}")),
+            None => Err("thread status is missing a string type".to_owned()),
+        }
     }
 }
 

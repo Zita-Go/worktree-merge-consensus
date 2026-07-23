@@ -3,8 +3,8 @@
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 
 use app_server_client::{
-    AppServer, CodexAppServer, ReconnectingCodexAppServer, ThreadResumePolicy, TurnExecutionPolicy,
-    client::ConnectOptions,
+    AppServer, CodexAppServer, ParticipantMcpConfig, ReconnectingCodexAppServer, ThreadForkPolicy,
+    ThreadResumePolicy, TurnExecutionPolicy, client::ConnectOptions,
 };
 
 #[tokio::test]
@@ -302,6 +302,51 @@ async fn reconnecting_client_does_not_repeat_an_uncertain_turn_start() {
     );
 }
 
+#[tokio::test]
+async fn reconnecting_client_does_not_repeat_an_uncertain_thread_fork() {
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("calls.log");
+    let request_log = temp.path().join("requests.log");
+    let binary = fake_codex_that_drops_fork(temp.path(), &log, &request_log, "0.144.5");
+    let client = ReconnectingCodexAppServer::connect(ConnectOptions {
+        codex_binary: binary,
+        control_socket: None,
+        start_daemon: true,
+    })
+    .await
+    .unwrap();
+
+    let error = client
+        .fork_thread(
+            "thread-1",
+            &ThreadForkPolicy::EphemeralParticipant(ParticipantMcpConfig {
+                participant_executable: std::path::PathBuf::from("/opt/codex-consensus"),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("WebSocket"));
+    let calls = fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| *line == "app-server proxy")
+            .count(),
+        1,
+        "an uncertain thread/fork must not create a replacement proxy and resend"
+    );
+    let requests = fs::read_to_string(&request_log).unwrap();
+    assert_eq!(
+        requests
+            .lines()
+            .filter(|line| *line == "thread/fork")
+            .count(),
+        1,
+        "the non-idempotent fork request must be issued exactly once"
+    );
+}
+
 fn fake_codex(directory: &Path, log: &Path, version: &str) -> std::path::PathBuf {
     fake_codex_with_server_version(directory, log, version, version)
 }
@@ -417,6 +462,43 @@ exit 2
     binary
 }
 
+fn fake_codex_that_drops_fork(
+    directory: &Path,
+    log: &Path,
+    request_log: &Path,
+    version: &str,
+) -> std::path::PathBuf {
+    let binary = directory.join("codex");
+    let proxy = directory.join("fake_proxy.py");
+    fs::write(&proxy, FAKE_WEBSOCKET_PROXY).unwrap();
+    let script = format!(
+        r#"#!/bin/sh
+LOG='{}'
+PROXY='{}'
+REQUEST_LOG='{}'
+printf '%s\n' "$*" >> "$LOG"
+if [ "$1" = "--version" ]; then
+  printf 'codex-cli {}\n'
+  exit 0
+fi
+if [ "$1 $2 $3" = "app-server daemon start" ]; then
+  exit 0
+fi
+if [ "$1 $2" = "app-server proxy" ]; then
+  exec /usr/bin/env python3 "$PROXY" 'codex-cli/{}' 'drop-fork' '' "$REQUEST_LOG"
+fi
+exit 2
+"#,
+        log.display(),
+        proxy.display(),
+        request_log.display(),
+        version,
+        version,
+    );
+    write_executable_script(&binary, &script);
+    binary
+}
+
 fn write_executable_script(binary: &Path, script: &str) {
     let temporary = binary.with_extension("tmp");
     fs::write(&temporary, script).unwrap();
@@ -480,6 +562,7 @@ sys.stdout.buffer.flush()
 user_agent = sys.argv[1]
 mode = sys.argv[2]
 resume_log = sys.argv[3] if len(sys.argv) > 3 else ''
+request_log = sys.argv[4] if len(sys.argv) > 4 else ''
 while True:
     try:
         first, second = read_exact(2)
@@ -505,6 +588,9 @@ while True:
         continue
     request = json.loads(payload.decode('utf-8'))
     method = request.get('method')
+    if request_log and method:
+        with open(request_log, 'a') as output:
+            output.write(method + '\n')
     if method == 'initialized':
         if mode == 'recover-first':
             sys.exit(0)
@@ -530,6 +616,9 @@ while True:
         continue
 
     if method == 'turn/start' and mode == 'drop-turn':
+        sys.exit(0)
+
+    if method == 'thread/fork' and mode == 'drop-fork':
         sys.exit(0)
 
     if method != 'initialize' or 'id' not in request:
