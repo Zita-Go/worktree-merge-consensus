@@ -378,7 +378,7 @@ fn cancellation_stops_before_integration_and_preserves_git_state() {
 
 #[test]
 fn participant_patch_preflight_orders_resume_status_and_turn_start() {
-    let fixture = AcceptanceFixture::new("participant_patch_available", false);
+    let fixture = AcceptanceFixture::new("primary_loaded_with_participant", false);
     let (run_id, _daemon) = fixture.start();
     let accepted = fixture.wait_for_terminal(&run_id);
 
@@ -405,6 +405,12 @@ fn participant_patch_preflight_orders_resume_status_and_turn_start() {
             "method mcpServerStatus/list primary-thread",
             "method turn/start primary-thread REQUEST_PRIMARY_INTEGRATION",
         ]
+    );
+    assert!(
+        !fixture
+            .events()
+            .lines()
+            .any(|line| line.starts_with("method thread/fork "))
     );
     fixture.assert_source_refs_unchanged();
 }
@@ -442,6 +448,159 @@ fn participant_patch_inventory_failures_block_before_turn_or_git_write() {
         fixture.assert_source_refs_unchanged();
         fixture.assert_branch_absent();
     }
+}
+
+#[test]
+fn not_loaded_primary_uses_direct_participant_binding() {
+    let fixture = AcceptanceFixture::new("primary_not_loaded", false);
+    let (run_id, _daemon) = fixture.start();
+    let accepted = fixture.wait_for_terminal(&run_id);
+    let events = fixture.events();
+
+    assert_eq!(accepted["status"], "ACCEPTED", "{events}");
+    assert_eq!(accepted["accepted_result"]["tests"][0]["exit_code"], 0);
+    assert_eq!(accepted["accepted_result"]["source_refs_unchanged"], true);
+    assert_eq!(
+        accepted["accepted_result"]["publication"]["local_only"],
+        true
+    );
+    assert_eq!(accepted["accepted_result"]["publication"]["pushed"], false);
+    assert_eq!(
+        accepted["accepted_result"]["publication"]["pull_request_created"],
+        false
+    );
+    assert_eq!(
+        accepted["accepted_result"]["publication"]["merged_into_existing_branch"],
+        false
+    );
+    assert!(
+        events
+            .lines()
+            .any(|line| { line == "primary-binding primary-thread primary-thread DIRECT 1" })
+    );
+    assert_eq!(
+        events
+            .lines()
+            .filter(|line| line.starts_with("method thread/fork "))
+            .count(),
+        0
+    );
+    assert!(
+        events
+            .lines()
+            .filter(|line| line.starts_with("turn primary-thread "))
+            .count()
+            >= 4
+    );
+    fixture.assert_source_refs_unchanged();
+}
+
+#[test]
+fn preloaded_primary_uses_ephemeral_full_history_binding() {
+    let fixture = AcceptanceFixture::new("primary_loaded_without_participant", false);
+    let (run_id, _daemon) = fixture.start();
+    let accepted = fixture.wait_for_terminal(&run_id);
+    let events = fixture.events();
+    let mirror = "primary-thread-consensus-mirror-1";
+    let binding_event = format!("primary-binding primary-thread {mirror} EPHEMERAL_FORK 1");
+    let goal_event = format!("method thread/goal/get {mirror} null");
+
+    assert_eq!(accepted["status"], "ACCEPTED", "{events}");
+    assert_eq!(accepted["accepted_result"]["tests"][0]["exit_code"], 0);
+    assert_eq!(accepted["accepted_result"]["source_refs_unchanged"], true);
+    assert_eq!(
+        accepted["accepted_result"]["publication"]["local_only"],
+        true
+    );
+    assert_eq!(accepted["accepted_result"]["publication"]["pushed"], false);
+    assert_eq!(
+        accepted["accepted_result"]["publication"]["pull_request_created"],
+        false
+    );
+    assert_eq!(
+        accepted["accepted_result"]["publication"]["merged_into_existing_branch"],
+        false
+    );
+    assert!(events.lines().any(|line| line == binding_event.as_str()));
+    assert_eq!(
+        events
+            .lines()
+            .filter(|line| *line == "method thread/fork primary-thread")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .lines()
+            .filter(|line| *line == goal_event.as_str())
+            .count(),
+        1
+    );
+    assert!(
+        events
+            .lines()
+            .filter(|line| line.starts_with(&format!("turn {mirror} ")))
+            .count()
+            >= 4
+    );
+    assert!(
+        !events
+            .lines()
+            .any(|line| line.starts_with("turn primary-thread "))
+    );
+    assert!(
+        events
+            .lines()
+            .filter(|line| line.starts_with("turn reviewer-thread "))
+            .count()
+            >= 3
+    );
+    fixture.assert_source_refs_unchanged();
+}
+
+#[test]
+fn invalid_mirror_postconditions_fail_before_any_turn_or_git_write() {
+    for (scenario, reason) in [
+        ("mirror_goal_present", "HISTORY_UNAVAILABLE"),
+        ("mirror_history_mismatch", "HISTORY_UNAVAILABLE"),
+    ] {
+        let fixture = AcceptanceFixture::new(scenario, false);
+        let (run_id, _daemon) = fixture.start();
+        let blocked = fixture.wait_for_terminal(&run_id);
+        let events = fixture.events();
+
+        assert_eq!(
+            blocked["status"], "BLOCKED",
+            "scenario={scenario}\n{events}"
+        );
+        assert_eq!(
+            blocked["reason_code"], reason,
+            "scenario={scenario}\n{events}"
+        );
+        assert!(!events.lines().any(|line| line.starts_with("turn ")));
+        assert!(!events.lines().any(|line| line.starts_with("git ")));
+        fixture.assert_source_refs_unchanged();
+        fixture.assert_source_worktrees_clean_and_at_frozen_heads();
+        fixture.assert_branch_absent();
+    }
+}
+
+#[test]
+fn participant_status_pagination_reaches_the_second_page() {
+    let fixture = AcceptanceFixture::new("participant_status_paginated", false);
+    let (run_id, _daemon) = fixture.start();
+    let accepted = fixture.wait_for_terminal(&run_id);
+    let events = fixture.events();
+
+    assert_eq!(accepted["status"], "ACCEPTED", "{events}");
+    assert!(
+        events
+            .lines()
+            .filter(|line| *line == "method mcpServerStatus/list primary-thread")
+            .count()
+            >= 2
+    );
+    fixture.assert_source_refs_unchanged();
 }
 
 struct AcceptanceFixture {
@@ -644,6 +803,25 @@ impl AcceptanceFixture {
                 &["rev-parse", "refs/heads/reviewer"]
             ),
             self.repository.reviewer_sha
+        );
+    }
+
+    fn assert_source_worktrees_clean_and_at_frozen_heads(&self) {
+        assert_eq!(
+            git_text(&self.repository.primary, &["rev-parse", "HEAD"]),
+            self.repository.primary_sha
+        );
+        assert_eq!(
+            git_text(&self.repository.reviewer, &["rev-parse", "HEAD"]),
+            self.repository.reviewer_sha
+        );
+        assert_eq!(
+            git_text(&self.repository.primary, &["status", "--porcelain"]),
+            ""
+        );
+        assert_eq!(
+            git_text(&self.repository.reviewer, &["status", "--porcelain"]),
+            ""
         );
     }
 

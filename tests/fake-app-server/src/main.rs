@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     fs::{self, OpenOptions},
     io::{self, Read, Write},
@@ -14,6 +14,7 @@ use tungstenite::{Message, accept};
 const CONTROLLED_PATCH_APPROVAL_KEY: &str = "plugins.worktree-merge-consensus.mcp_servers.worktreeMergeConsensus.tools.consensus_apply_patch.approval_mode";
 const PARTICIPANT_MCP_SERVER: &str = "worktreeMergeConsensusParticipant";
 const PARTICIPANT_PATCH_TOOL: &str = "consensus_apply_patch";
+const PARTICIPANT_STATUS_PAGE_LIMIT: u64 = 100;
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -143,7 +144,7 @@ fn handle_request(config: &Config, method: &str, params: &Value) -> Result<Value
             }))
         }
         "thread/list" => Ok(json!({
-            "data": [thread_summary(config, &config.primary_thread), thread_summary(config, &config.reviewer_thread)],
+            "data": [thread_summary(config, &config.primary_thread)?, thread_summary(config, &config.reviewer_thread)?],
             "nextCursor": null,
             "backwardsCursor": null
         })),
@@ -162,6 +163,8 @@ fn handle_request(config: &Config, method: &str, params: &Value) -> Result<Value
             mark_thread_resumed(config, thread_id, params)?;
             Ok(json!({"thread": thread_detail(config, thread_id)?}))
         }
+        "thread/fork" => fork_thread(config, params),
+        "thread/goal/get" => thread_goal(config, params),
         "mcpServerStatus/list" => participant_mcp_status(config, params),
         "turn/interrupt" => {
             let thread_id = params
@@ -234,13 +237,25 @@ fn configure_controlled_patch(config: &Config, params: &Value) -> Result<Value, 
     }))
 }
 
-fn thread_summary(config: &Config, thread_id: &str) -> Value {
+fn thread_summary(config: &Config, thread_id: &str) -> Result<Value, String> {
     let cwd = if thread_id == config.primary_thread {
         &config.primary_thread_cwd
-    } else {
+    } else if thread_id == config.reviewer_thread {
         &config.reviewer_thread_cwd
+    } else if active_primary_mirror(config).as_deref() == Some(thread_id) {
+        &config.primary_thread_cwd
+    } else {
+        return Err(format!("unknown task {thread_id}"));
     };
-    json!({
+    let status = if thread_id == config.primary_thread
+        && config.scenario == "primary_not_loaded"
+        && !thread_loaded_marker(config, thread_id).exists()
+    {
+        json!({"type": "notLoaded"})
+    } else {
+        json!({"type": "idle"})
+    };
+    Ok(json!({
         "id": thread_id,
         "cwd": cwd,
         "name": thread_id,
@@ -248,15 +263,15 @@ fn thread_summary(config: &Config, thread_id: &str) -> Value {
         "cliVersion": "0.144.5",
         "createdAt": 1,
         "updatedAt": 1,
-        "status": {"type": "idle"},
+        "status": status,
         "source": "fakeAppServer"
-    })
+    }))
 }
 
 fn thread_detail(config: &Config, thread_id: &str) -> Result<Value, String> {
     complete_deferred_turns(config)?;
     let turns = load_turns(config, thread_id)?;
-    let mut summary = thread_summary(config, thread_id);
+    let mut summary = thread_summary(config, thread_id)?;
     if turns
         .iter()
         .any(|turn| turn.get("status").and_then(Value::as_str) == Some("inProgress"))
@@ -265,6 +280,82 @@ fn thread_detail(config: &Config, thread_id: &str) -> Result<Value, String> {
     }
     summary["turns"] = Value::Array(turns);
     Ok(summary)
+}
+
+fn fork_thread(config: &Config, params: &Value) -> Result<Value, String> {
+    let source_thread_id = params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "thread/fork threadId is missing".to_owned())?;
+    if source_thread_id != config.primary_thread {
+        return Err(format!(
+            "thread/fork source mismatch: {source_thread_id} != {}",
+            config.primary_thread
+        ));
+    }
+    if params.get("ephemeral") != Some(&json!(true))
+        || params.get("excludeTurns") != Some(&json!(false))
+    {
+        return Err("thread/fork must be ephemeral and preserve all turns".to_owned());
+    }
+    let fork_config = params
+        .get("config")
+        .ok_or_else(|| "thread/fork participant config is missing".to_owned())?;
+    validate_participant_resume_config(fork_config)?;
+    if active_primary_mirror(config).is_some() {
+        return Err("thread/fork attempted to replace an existing mirror".to_owned());
+    }
+
+    let source = thread_detail(config, source_thread_id)?;
+    let mirror = format!("{source_thread_id}-consensus-mirror-1");
+    fs::write(active_primary_mirror_path(config), format!("{mirror}\n"))
+        .map_err(|error| format!("persist active Primary mirror: {error}"))?;
+    fs::write(participant_marker(config, &mirror), b"available\n")
+        .map_err(|error| format!("mark mirror participant capability: {error}"))?;
+    for turn in source
+        .get("turns")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        append_turn(config, &mirror, turn)?;
+    }
+    if config.scenario == "mirror_history_mismatch" {
+        append_turn(
+            config,
+            &mirror,
+            &completed_turn(
+                "history-mismatch",
+                "history mismatch fixture",
+                "history mismatch fixture",
+            ),
+        )?;
+    }
+    append_event(config, &format!("method thread/fork {source_thread_id}"))?;
+    Ok(json!({"thread": thread_detail(config, &mirror)?}))
+}
+
+fn thread_goal(config: &Config, params: &Value) -> Result<Value, String> {
+    let thread_id = params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "thread/goal/get threadId is missing".to_owned())?;
+    if active_primary_mirror(config).as_deref() != Some(thread_id) {
+        return Err(format!(
+            "thread/goal/get requested unknown mirror {thread_id}"
+        ));
+    }
+    let goal = if config.scenario == "mirror_goal_present" {
+        json!({"id": "unexpected-active-goal"})
+    } else {
+        Value::Null
+    };
+    let label = if goal.is_null() { "null" } else { "present" };
+    append_event(
+        config,
+        &format!("method thread/goal/get {thread_id} {label}"),
+    )?;
+    Ok(json!({"goal": goal}))
 }
 
 fn start_turn(config: &Config, params: &Value) -> Result<Value, String> {
@@ -286,11 +377,7 @@ fn start_turn(config: &Config, params: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .ok_or_else(|| "prompt action is missing".to_owned())?;
     let resume_mode = consume_thread_resume(config, thread_id)?;
-    let expected_resume_mode = if action == "REQUEST_PRIMARY_INTEGRATION" {
-        "participant"
-    } else {
-        "default"
-    };
+    let expected_resume_mode = "default";
     if resume_mode != expected_resume_mode {
         return Err(format!(
             "{action} used {resume_mode} resume instead of {expected_resume_mode}"
@@ -303,6 +390,7 @@ fn start_turn(config: &Config, params: &Value) -> Result<Value, String> {
         )?;
         return Err(error);
     }
+    append_primary_binding_event(config, action, thread_id, prompt)?;
     append_event(config, &format!("method turn/start {thread_id} {action}"))?;
     append_event(config, &format!("turn {thread_id} {action}"))?;
     let occurrence = action_count(config, action)?;
@@ -340,11 +428,51 @@ fn resume_marker(config: &Config, thread_id: &str) -> PathBuf {
     config.state_directory.join(format!("resumed-{thread_id}"))
 }
 
+fn thread_loaded_marker(config: &Config, thread_id: &str) -> PathBuf {
+    config.state_directory.join(format!("loaded-{thread_id}"))
+}
+
+fn participant_marker(config: &Config, thread_id: &str) -> PathBuf {
+    config
+        .state_directory
+        .join(format!("participant-{thread_id}"))
+}
+
+fn active_primary_mirror_path(config: &Config) -> PathBuf {
+    config.state_directory.join("active-primary-mirror")
+}
+
+fn active_primary_mirror(config: &Config) -> Option<String> {
+    fs::read_to_string(active_primary_mirror_path(config))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
 fn mark_thread_resumed(config: &Config, thread_id: &str, params: &Value) -> Result<(), String> {
+    thread_summary(config, thread_id)?;
     let mode = match params.get("config") {
-        None => "default",
+        None => {
+            if thread_id == config.primary_thread
+                && config.scenario == "primary_not_loaded"
+                && !thread_loaded_marker(config, thread_id).exists()
+            {
+                fs::write(thread_loaded_marker(config, thread_id), b"loaded\n")
+                    .map_err(|error| format!("mark task loaded: {error}"))?;
+            }
+            "default"
+        }
         Some(resume_config) => {
             validate_participant_resume_config(resume_config)?;
+            if thread_id == config.primary_thread
+                && config.scenario == "primary_not_loaded"
+                && !thread_loaded_marker(config, thread_id).exists()
+            {
+                fs::write(thread_loaded_marker(config, thread_id), b"loaded\n")
+                    .map_err(|error| format!("mark task loaded: {error}"))?;
+                fs::write(participant_marker(config, thread_id), b"available\n")
+                    .map_err(|error| format!("mark participant capability: {error}"))?;
+            }
             "participant"
         }
     };
@@ -403,13 +531,46 @@ fn participant_mcp_status(config: &Config, params: &Value) -> Result<Value, Stri
     if params.get("detail") != Some(&json!("toolsAndAuthOnly")) {
         return Err("mcpServerStatus/list detail is not toolsAndAuthOnly".to_owned());
     }
-    let resume_mode = fs::read_to_string(resume_marker(config, thread_id))
-        .map_err(|error| format!("MCP status requested before task resume: {error}"))?;
-    if resume_mode.trim() != "participant" {
-        return Err("MCP status requested without participant resume config".to_owned());
+    if params.get("limit").and_then(Value::as_u64) != Some(PARTICIPANT_STATUS_PAGE_LIMIT) {
+        return Err("mcpServerStatus/list limit is not 100".to_owned());
     }
+    let cursor = match params.get("cursor") {
+        Some(Value::Null) => None,
+        Some(Value::String(cursor)) => Some(cursor.as_str()),
+        _ => return Err("mcpServerStatus/list cursor must be a string or null".to_owned()),
+    };
+    thread_summary(config, thread_id)?;
     append_event(config, &format!("method mcpServerStatus/list {thread_id}"))?;
-    let data = match config.scenario.as_str() {
+    if config.scenario == "participant_status_paginated" {
+        return match cursor {
+            None => Ok(json!({
+                "data": [{
+                    "name": "unrelatedServer",
+                    "tools": {}
+                }],
+                "nextCursor": "participant-page-2"
+            })),
+            Some("participant-page-2") => Ok(json!({
+                "data": participant_inventory(config, thread_id),
+                "nextCursor": null
+            })),
+            Some(cursor) => Err(format!("unexpected MCP status cursor {cursor}")),
+        };
+    }
+    if cursor.is_some() {
+        return Err("unexpected MCP status cursor for a single-page response".to_owned());
+    }
+    Ok(json!({
+        "data": participant_inventory(config, thread_id),
+        "nextCursor": null
+    }))
+}
+
+fn participant_inventory(config: &Config, thread_id: &str) -> Value {
+    if !participant_is_available(config, thread_id) {
+        return json!([]);
+    }
+    match config.scenario.as_str() {
         "participant_patch_missing_server" => json!([]),
         "participant_patch_missing_tool" => json!([{
             "name": PARTICIPANT_MCP_SERVER,
@@ -434,8 +595,24 @@ fn participant_mcp_status(config: &Config, params: &Value) -> Result<Value, Stri
                 PARTICIPANT_PATCH_TOOL: {"inputSchema": {"type": "object"}}
             }
         }]),
-    };
-    Ok(json!({"data": data}))
+    }
+}
+
+fn participant_is_available(config: &Config, thread_id: &str) -> bool {
+    if participant_marker(config, thread_id).exists() {
+        return true;
+    }
+    if active_primary_mirror(config).as_deref() == Some(thread_id) {
+        return true;
+    }
+    thread_id == config.primary_thread
+        && !matches!(
+            config.scenario.as_str(),
+            "primary_not_loaded"
+                | "primary_loaded_without_participant"
+                | "mirror_goal_present"
+                | "mirror_history_mismatch"
+        )
 }
 
 fn declared_tests(metadata: &Value) -> Vec<String> {
@@ -461,17 +638,11 @@ fn validate_turn_policy(
     current: &Value,
 ) -> Result<(), String> {
     let verification = action == "REQUEST_PRIMARY_VERIFICATION";
-    let primary_action = matches!(
-        action,
-        "REQUEST_PRIMARY_CONTRACT"
-            | "REQUEST_PRIMARY_PLAN"
-            | "REQUEST_PRIMARY_INTEGRATION"
-            | "REQUEST_PRIMARY_VERIFICATION"
-    );
+    let primary_action = is_primary_action(action);
     let expected_thread = if primary_action {
-        &config.primary_thread
+        active_primary_mirror(config).unwrap_or_else(|| config.primary_thread.clone())
     } else {
-        &config.reviewer_thread
+        config.reviewer_thread.clone()
     };
     let expected_cwd = if verification {
         PathBuf::from(
@@ -526,6 +697,62 @@ fn validate_turn_policy(
         return Err("turn/start sandbox policy is not pinned".to_owned());
     }
     Ok(())
+}
+
+fn is_primary_action(action: &str) -> bool {
+    matches!(
+        action,
+        "REQUEST_PRIMARY_CONTRACT"
+            | "REQUEST_PRIMARY_PLAN"
+            | "REQUEST_PRIMARY_INTEGRATION"
+            | "REQUEST_PRIMARY_VERIFICATION"
+    )
+}
+
+fn append_primary_binding_event(
+    config: &Config,
+    action: &str,
+    thread_id: &str,
+    prompt: &str,
+) -> Result<(), String> {
+    if !is_primary_action(action) {
+        return Ok(());
+    }
+    let identity = prompt_json_block(prompt, "Primary participant execution identity:")?;
+    let source = identity
+        .get("source_primary_thread_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Primary execution identity is missing its Source task".to_owned())?;
+    let effective = identity
+        .get("effective_primary_thread_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Primary execution identity is missing its Effective task".to_owned())?;
+    let mode = identity
+        .get("binding_mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Primary execution identity is missing its binding mode".to_owned())?;
+    let generation = identity
+        .get("binding_generation")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "Primary execution identity is missing its binding generation".to_owned())?;
+    let expected_mode = if thread_id == config.primary_thread {
+        "DIRECT"
+    } else {
+        "EPHEMERAL_FORK"
+    };
+    if source != config.primary_thread
+        || effective != thread_id
+        || mode != expected_mode
+        || generation == 0
+    {
+        return Err(format!(
+            "Primary execution identity does not match the routed task: {identity}"
+        ));
+    }
+    append_event(
+        config,
+        &format!("primary-binding {source} {effective} {mode} {generation}"),
+    )
 }
 
 fn scripted_reply(
@@ -914,8 +1141,25 @@ fn load_turns(config: &Config, thread_id: &str) -> Result<Vec<Value>, String> {
 }
 
 fn turn_count(config: &Config) -> Result<usize, String> {
-    Ok(load_turns(config, &config.primary_thread)?.len()
-        + load_turns(config, &config.reviewer_thread)?.len())
+    let path = config.state_directory.join("turns.jsonl");
+    let Ok(contents) = fs::read_to_string(path) else {
+        return Ok(0);
+    };
+    let mut turns = HashSet::new();
+    for line in contents.lines() {
+        let entry: Value =
+            serde_json::from_str(line).map_err(|error| format!("parse saved turn: {error}"))?;
+        let thread_id = entry
+            .get("thread_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "saved turn is missing thread_id".to_owned())?;
+        let turn_id = entry
+            .pointer("/turn/id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "saved turn is missing id".to_owned())?;
+        turns.insert((thread_id.to_owned(), turn_id.to_owned()));
+    }
+    Ok(turns.len())
 }
 
 fn action_count(config: &Config, action: &str) -> Result<usize, String> {
