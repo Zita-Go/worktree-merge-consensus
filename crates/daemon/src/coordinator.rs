@@ -2425,6 +2425,8 @@ where
                     "task became active after pending-send without a recoverable request marker",
                 ));
             }
+            self.store
+                .record_turn_start_intent(&run_id, &request_hash)?;
             let turn = self
                 .app
                 .start_turn(

@@ -533,6 +533,28 @@ impl SqliteRunStore {
         self.record_turn_started_with_generation(run_id, message_hash, thread_id, turn_id, true)
     }
 
+    pub fn record_turn_start_intent(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+    ) -> Result<(), StoreError> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE turns
+             SET capability_generation = ?1
+             WHERE run_id = ?2 AND message_hash = ?3
+               AND delivery_state IN ('PENDING', 'SENT')
+               AND thread_id IS NULL AND turn_id IS NULL",
+            params![PARTICIPANT_CAPABILITY_GENERATION, run_id, message_hash],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::PendingSendNotFound(run_id.to_owned()));
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn record_recovered_turn_started(
         &self,
         run_id: &str,

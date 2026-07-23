@@ -1044,7 +1044,7 @@ fn set_turn_capability_generation(path: &Path, generation: Option<&str>) {
         .execute(
             "UPDATE turns
              SET capability_generation = ?1
-             WHERE run_id = ?2 AND delivery_state = 'SENT'",
+             WHERE run_id = ?2 AND delivery_state IN ('PENDING', 'SENT')",
             params![generation, RUN_ID],
         )
         .unwrap();
@@ -2190,6 +2190,72 @@ async fn completed_turn_is_recovered_without_duplicate_send_when_turn_id_was_not
             .all(|request| request != "primary:REQUEST_PRIMARY_CONTRACT")
     );
     assert!(store.pending_send(RUN_ID).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn new_turn_start_intent_prevents_legacy_provenance_after_lost_rpc_response() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    let app =
+        Arc::new(FakeAppServer::new(conflict_free_replies()).with_lost_first_start_response());
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    let state = coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let request_hash = first_request_hash(&state);
+    store
+        .record_pending_send(RUN_ID, "PRIMARY", "CONTRACT", 1, &request_hash)
+        .unwrap();
+    set_turn_capability_generation(&path, None);
+
+    let paused = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+    assert_eq!(
+        store
+            .pending_send(RUN_ID)
+            .unwrap()
+            .unwrap()
+            .capability_generation
+            .as_deref(),
+        Some(consensus_daemon::store::PARTICIPANT_CAPABILITY_GENERATION)
+    );
+    assert_eq!(app.request_count(), 1);
+
+    drop(coordinator);
+    drop(store);
+    let reopened = SqliteRunStore::open(&path).unwrap();
+    let restarted = Coordinator::new(
+        Arc::clone(&app),
+        reopened,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    let accepted = restarted.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(accepted.status, RunStatus::Accepted);
+    assert_eq!(app.request_count(), 7);
+    let generation = Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT capability_generation
+             FROM turns
+             WHERE run_id = ?1 AND message_hash = ?2",
+            params![RUN_ID, request_hash],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .unwrap();
+    assert_eq!(
+        generation.as_deref(),
+        Some(consensus_daemon::store::PARTICIPANT_CAPABILITY_GENERATION)
+    );
 }
 
 #[tokio::test]
@@ -3655,6 +3721,7 @@ struct FakeAppServer {
     marker_protocol: bool,
     event_only_turn_items: bool,
     start_error: Option<String>,
+    lose_next_start_response: AtomicBool,
     participant_inventory: ParticipantInventory,
 }
 
@@ -3734,6 +3801,7 @@ impl FakeAppServer {
             marker_protocol: false,
             event_only_turn_items: false,
             start_error: None,
+            lose_next_start_response: AtomicBool::new(false),
             participant_inventory: ParticipantInventory::Available,
         }
     }
@@ -3742,6 +3810,11 @@ impl FakeAppServer {
         let mut server = Self::new(conflict_free_replies());
         server.start_error = Some(detail.into());
         server
+    }
+
+    fn with_lost_first_start_response(self) -> Self {
+        self.lose_next_start_response.store(true, Ordering::SeqCst);
+        self
     }
 
     fn with_verification_behavior(mut self, behavior: VerificationBehavior) -> Self {
@@ -4450,6 +4523,11 @@ impl AppServer for FakeAppServer {
                     "grantRoot": "/repo"
                 }),
             });
+        }
+        if self.lose_next_start_response.swap(false, Ordering::SeqCst) {
+            return Err(AppServerError::InvalidResponse(
+                "turn/start response lost after server committed the turn".into(),
+            ));
         }
         Ok(TurnHandle {
             id: turn_id,

@@ -102,7 +102,7 @@ fn recovered_legacy_turn_start_preserves_null_capability_generation() {
 }
 
 #[test]
-fn new_turn_start_upgrades_legacy_pending_capability_generation() {
+fn new_turn_start_intent_survives_crash_and_recovered_binding_as_current_generation() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");
     let store = SqliteRunStore::open(&path).unwrap();
@@ -121,10 +121,16 @@ fn new_turn_start_upgrades_legacy_pending_capability_generation() {
         .unwrap();
 
     store
-        .record_turn_started(RUN_ID, "request-hash", "primary-thread", "turn-new")
+        .record_turn_start_intent(RUN_ID, "request-hash")
+        .unwrap();
+    drop(store);
+
+    let reopened = SqliteRunStore::open(&path).unwrap();
+    reopened
+        .record_recovered_turn_started(RUN_ID, "request-hash", "primary-thread", "turn-new")
         .unwrap();
 
-    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    let pending = reopened.pending_send(RUN_ID).unwrap().unwrap();
     assert_eq!(
         pending.capability_generation.as_deref(),
         Some(PARTICIPANT_CAPABILITY_GENERATION)
@@ -369,6 +375,13 @@ fn terminal_turn_retry_is_archived_and_reset_atomically() {
         .unwrap();
     store
         .record_turn_started(RUN_ID, "request-hash", "reviewer-thread", "turn-7")
+        .unwrap();
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE turns SET capability_generation = NULL WHERE run_id = ?1",
+            [RUN_ID],
+        )
         .unwrap();
 
     store
