@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+pub const PARTICIPANT_CAPABILITY_GENERATION: &str = "participant-mcp-v1";
+
 #[derive(Clone)]
 pub struct SqliteRunStore {
     connection: Arc<Mutex<Connection>>,
@@ -27,6 +29,7 @@ pub struct PendingSend {
     pub thread_id: Option<String>,
     pub turn_id: Option<String>,
     pub full_prompt: Option<String>,
+    pub capability_generation: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +42,7 @@ pub struct AcceptedTurn {
     pub response_hash: String,
     pub thread_id: String,
     pub turn_id: String,
+    pub capability_generation: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -444,11 +448,20 @@ impl SqliteRunStore {
         ensure_run_exists(&transaction, run_id)?;
         transaction.execute(
             "INSERT INTO turns (
-                run_id, role, phase, round, message_hash, delivery_state, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'PENDING', ?6)
+                run_id, role, phase, round, message_hash, delivery_state,
+                capability_generation, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'PENDING', ?6, ?7)
              ON CONFLICT(run_id, role, phase, round, message_hash)
              DO NOTHING",
-            params![run_id, role, phase, round, message_hash, now_unix()],
+            params![
+                run_id,
+                role,
+                phase,
+                round,
+                message_hash,
+                PARTICIPANT_CAPABILITY_GENERATION,
+                now_unix()
+            ],
         )?;
         transaction.commit()?;
         Ok(())
@@ -458,7 +471,8 @@ impl SqliteRunStore {
         let connection = self.lock()?;
         connection
             .query_row(
-                "SELECT run_id, role, phase, round, message_hash, thread_id, turn_id
+                "SELECT run_id, role, phase, round, message_hash, thread_id, turn_id,
+                        capability_generation
                  FROM turns
                  WHERE run_id = ?1 AND delivery_state IN ('PENDING', 'SENT')
                  ORDER BY id DESC LIMIT 1",
@@ -473,6 +487,7 @@ impl SqliteRunStore {
                         thread_id: row.get(5)?,
                         turn_id: row.get(6)?,
                         full_prompt: None,
+                        capability_generation: row.get(7)?,
                     })
                 },
             )
@@ -485,7 +500,7 @@ impl SqliteRunStore {
         connection
             .query_row(
                 "SELECT run_id, role, phase, round, message_hash, response_hash,
-                        thread_id, turn_id
+                        thread_id, turn_id, capability_generation
                  FROM turns
                  WHERE run_id = ?1 AND delivery_state = 'ACCEPTED'
                  ORDER BY id DESC LIMIT 1",
@@ -500,6 +515,7 @@ impl SqliteRunStore {
                         response_hash: row.get(5)?,
                         thread_id: row.get(6)?,
                         turn_id: row.get(7)?,
+                        capability_generation: row.get(8)?,
                     })
                 },
             )
@@ -514,12 +530,42 @@ impl SqliteRunStore {
         thread_id: &str,
         turn_id: &str,
     ) -> Result<(), StoreError> {
+        self.record_turn_started_with_generation(run_id, message_hash, thread_id, turn_id, true)
+    }
+
+    pub fn record_recovered_turn_started(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<(), StoreError> {
+        self.record_turn_started_with_generation(run_id, message_hash, thread_id, turn_id, false)
+    }
+
+    fn record_turn_started_with_generation(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+        thread_id: &str,
+        turn_id: &str,
+        record_participant_generation: bool,
+    ) -> Result<(), StoreError> {
+        let capability_generation =
+            record_participant_generation.then_some(PARTICIPANT_CAPABILITY_GENERATION);
         let changed = self.lock()?.execute(
             "UPDATE turns
-             SET delivery_state = 'SENT', thread_id = ?1, turn_id = ?2
-             WHERE run_id = ?3 AND message_hash = ?4
+             SET delivery_state = 'SENT', thread_id = ?1, turn_id = ?2,
+                 capability_generation = COALESCE(?3, capability_generation)
+             WHERE run_id = ?4 AND message_hash = ?5
                AND delivery_state IN ('PENDING', 'SENT')",
-            params![thread_id, turn_id, run_id, message_hash],
+            params![
+                thread_id,
+                turn_id,
+                capability_generation,
+                run_id,
+                message_hash
+            ],
         )?;
         if changed == 1 {
             Ok(())
@@ -1733,7 +1779,8 @@ fn v025_verification_completion_collision_candidate(
     }
 
     let mut statement = connection.prepare(
-        "SELECT id, role, phase, round, message_hash, thread_id, turn_id
+        "SELECT id, role, phase, round, message_hash, thread_id, turn_id,
+                capability_generation
          FROM turns
          WHERE run_id = ?1 AND delivery_state = 'SENT'
          ORDER BY id ASC",
@@ -1748,11 +1795,22 @@ fn v025_verification_completion_collision_candidate(
                 row.get::<_, String>(4)?,
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    let [(turn_record_id, role, phase, round, message_hash, Some(thread_id), Some(turn_id))] =
-        sent_turns.as_slice()
+    let [
+        (
+            turn_record_id,
+            role,
+            phase,
+            round,
+            message_hash,
+            Some(thread_id),
+            Some(turn_id),
+            capability_generation,
+        ),
+    ] = sent_turns.as_slice()
     else {
         return Ok(None);
     };
@@ -1883,6 +1941,7 @@ fn v025_verification_completion_collision_candidate(
             thread_id: Some(thread_id.clone()),
             turn_id: Some(turn_id.clone()),
             full_prompt: None,
+            capability_generation: capability_generation.clone(),
         },
         stale_turn_id,
         turn_record_id: *turn_record_id,
@@ -1941,10 +2000,17 @@ fn archive_and_reset_turn(
     let changed = transaction.execute(
         "UPDATE turns
          SET delivery_state = 'PENDING', thread_id = NULL, turn_id = NULL,
-             response_hash = NULL, accepted_at = NULL
-         WHERE id = ?1 AND delivery_state = ?2
-           AND thread_id = ?3 AND turn_id = ?4",
-        params![turn_record_id, delivery_state, thread_id, turn_id],
+             response_hash = NULL, accepted_at = NULL,
+             capability_generation = ?1
+         WHERE id = ?2 AND delivery_state = ?3
+           AND thread_id = ?4 AND turn_id = ?5",
+        params![
+            PARTICIPANT_CAPABILITY_GENERATION,
+            turn_record_id,
+            delivery_state,
+            thread_id,
+            turn_id
+        ],
     )?;
     if changed != 1 {
         return Err(StoreError::TerminalTurnNotRetryable(format!(
@@ -1998,6 +2064,7 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             delivery_state TEXT NOT NULL,
             thread_id TEXT,
             turn_id TEXT,
+            capability_generation TEXT,
             created_at INTEGER NOT NULL,
             accepted_at INTEGER,
             UNIQUE(run_id, role, phase, round, message_hash)
@@ -2084,7 +2151,21 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             primary_worktree TEXT NOT NULL UNIQUE,
             acquired_at INTEGER NOT NULL
          );",
-    )
+    )?;
+    let mut columns = connection.prepare("PRAGMA table_info(turns)")?;
+    let has_capability_generation = columns
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|column| column == "capability_generation");
+    drop(columns);
+    if !has_capability_generation {
+        connection.execute(
+            "ALTER TABLE turns ADD COLUMN capability_generation TEXT",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 fn update_run_row(

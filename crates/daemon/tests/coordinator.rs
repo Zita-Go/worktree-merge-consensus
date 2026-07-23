@@ -898,9 +898,69 @@ async fn invalid_plan_approval_revision_can_resume_the_same_blocked_run() {
 }
 
 #[tokio::test]
-async fn invalid_integration_json_after_one_successful_patch_resumes_with_a_marker_only_turn() {
+async fn legacy_capability_generation_allows_exact_invalid_integration_recovery() {
     let temp = tempfile::tempdir().unwrap();
-    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let path = temp.path().join("state.db");
+    let (coordinator, app, store) =
+        seed_invalid_integration_recovery(&path, "worktreeMergeConsensus").await;
+    set_turn_capability_generation(&path, None);
+
+    let accepted = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(accepted.status, RunStatus::Accepted);
+    assert_eq!(accepted.integration_sha.as_deref(), Some(INTEGRATION_SHA));
+    assert_eq!(app.request_count(), 8);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    let retry_prompt = app
+        .prompts()
+        .into_iter()
+        .rfind(|prompt| prompt.contains("REQUEST_PRIMARY_INTEGRATION"))
+        .unwrap();
+    assert!(retry_prompt.contains("Coordinator recovery override"));
+    assert!(retry_prompt.contains("Do not call consensus_apply_patch"));
+    assert!(retry_prompt.contains("INTEGRATION_READY</consensus-result>"));
+}
+
+#[tokio::test]
+async fn participant_capability_generation_rejects_legacy_invalid_integration_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let (coordinator, app, store) =
+        seed_invalid_integration_recovery(&path, "worktreeMergeConsensus").await;
+
+    let error = coordinator.resume(RUN_ID).await.unwrap_err();
+
+    assert_eq!(error.code(), "MODEL_RESPONSE_RETRY_UNSAFE");
+    assert!(error.detail().contains("outside"));
+    assert_eq!(app.request_count(), 5);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+}
+
+#[tokio::test]
+async fn malformed_capability_generation_fails_closed_for_invalid_integration_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let (coordinator, app, store) =
+        seed_invalid_integration_recovery(&path, "worktreeMergeConsensus").await;
+    set_turn_capability_generation(&path, Some("unknown-generation"));
+
+    let error = coordinator.resume(RUN_ID).await.unwrap_err();
+
+    assert_eq!(error.code(), "MODEL_RESPONSE_RETRY_UNSAFE");
+    assert!(error.detail().contains("capability generation"));
+    assert_eq!(app.request_count(), 5);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+}
+
+async fn seed_invalid_integration_recovery(
+    path: &Path,
+    patch_server: &str,
+) -> (
+    Coordinator<FakeAppServer, RecordingSafety>,
+    Arc<FakeAppServer>,
+    SqliteRunStore,
+) {
+    let store = SqliteRunStore::open(path).unwrap();
     let mut replies = conflict_free_replies();
     replies[4] = message(
         "INTEGRATION_READY",
@@ -958,7 +1018,7 @@ async fn invalid_integration_json_after_one_successful_patch_resumes_with_a_mark
                 "id": format!("patch-{suffix}"),
                 "type": "mcpToolCall",
                 "pluginId": "worktree-merge-consensus@worktree-merge-consensus",
-                "server": "worktreeMergeConsensus",
+                "server": patch_server,
                 "tool": "consensus_apply_patch",
                 "arguments": {
                     "run_id": RUN_ID,
@@ -975,20 +1035,19 @@ async fn invalid_integration_json_after_one_successful_patch_resumes_with_a_mark
         .record_successful_patch(RUN_ID, &pending.message_hash, &successful_patch_hash)
         .unwrap();
 
-    let accepted = coordinator.resume(RUN_ID).await.unwrap();
+    (coordinator, app, store)
+}
 
-    assert_eq!(accepted.status, RunStatus::Accepted);
-    assert_eq!(accepted.integration_sha.as_deref(), Some(INTEGRATION_SHA));
-    assert_eq!(app.request_count(), 8);
-    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
-    let retry_prompt = app
-        .prompts()
-        .into_iter()
-        .rfind(|prompt| prompt.contains("REQUEST_PRIMARY_INTEGRATION"))
+fn set_turn_capability_generation(path: &Path, generation: Option<&str>) {
+    Connection::open(path)
+        .unwrap()
+        .execute(
+            "UPDATE turns
+             SET capability_generation = ?1
+             WHERE run_id = ?2 AND delivery_state = 'SENT'",
+            params![generation, RUN_ID],
+        )
         .unwrap();
-    assert!(retry_prompt.contains("Coordinator recovery override"));
-    assert!(retry_prompt.contains("Do not call consensus_apply_patch"));
-    assert!(retry_prompt.contains("INTEGRATION_READY</consensus-result>"));
 }
 
 #[tokio::test]

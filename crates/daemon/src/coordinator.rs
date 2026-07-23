@@ -36,7 +36,8 @@ use crate::policy::{
     is_retry_safe_read_only_integration_command, validate_test_command,
 };
 use crate::store::{
-    AcceptedTurn, SqliteRunStore, StoreError, VerificationCommandClaim, VerificationCommandRecord,
+    AcceptedTurn, PARTICIPANT_CAPABILITY_GENERATION, SqliteRunStore, StoreError,
+    VerificationCommandClaim, VerificationCommandRecord,
 };
 
 const MAX_DRIVER_STEPS: usize = 128;
@@ -1699,12 +1700,24 @@ where
                     "integration invalid-response turn has no successful controlled patch record",
                 )
             })?;
+        let allow_legacy_server = match pending.capability_generation.as_deref() {
+            None => true,
+            Some(PARTICIPANT_CAPABILITY_GENERATION) => false,
+            Some(generation) => {
+                return Err(CoordinatorError::operational(
+                    "MODEL_RESPONSE_RETRY_UNSAFE",
+                    format!(
+                        "integration invalid-response turn has malformed capability generation {generation}"
+                    ),
+                ));
+            }
+        };
         if let Some(blocker) = recoverable_integration_turn_blocker(
             state,
             turn,
             &pending.message_hash,
             &successful_patch_hash,
-            true,
+            allow_legacy_server,
         ) {
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
@@ -2398,8 +2411,12 @@ where
             find_turn_by_request_hash(&current_detail, &request_hash, &archived_turn_ids)
         });
         let turn_id = if let Some(turn_id) = recovered_turn {
-            self.store
-                .record_turn_started(&run_id, &request_hash, &thread_id, &turn_id)?;
+            self.store.record_recovered_turn_started(
+                &run_id,
+                &request_hash,
+                &thread_id,
+                &turn_id,
+            )?;
             turn_id
         } else {
             if current_detail.summary.is_active() {

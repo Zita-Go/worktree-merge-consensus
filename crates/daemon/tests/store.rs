@@ -5,12 +5,180 @@ use consensus_core::{
     protocol::validate_message,
     state::{NextAction, Phase, Role, RunDiagnostic, RunFacts, RunState, RunStatus},
 };
-use consensus_daemon::store::{SqliteRunStore, VerificationCommandClaim};
+use consensus_daemon::store::{
+    PARTICIPANT_CAPABILITY_GENERATION, SqliteRunStore, VerificationCommandClaim,
+};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 const RUN_ID: &str = "4b230bd8-d870-4ef4-bf20-05a4c61020af";
+
+#[test]
+fn new_turn_rows_persist_participant_capability_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+    store
+        .record_pending_send(RUN_ID, "PRIMARY", "INTEGRATE", 1, "request-hash")
+        .unwrap();
+    store
+        .record_turn_started(RUN_ID, "request-hash", "primary-thread", "turn-1")
+        .unwrap();
+    drop(store);
+
+    let generation = Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT capability_generation FROM turns WHERE run_id = ?1",
+            [RUN_ID],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+
+    assert_eq!(generation, PARTICIPANT_CAPABILITY_GENERATION);
+}
+
+#[test]
+fn accepted_turn_exposes_participant_capability_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut run = fixture_run(RUN_ID, "/repo/.git");
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    store.insert_run(&run).unwrap();
+    store
+        .record_pending_send(RUN_ID, "PRIMARY", "CONTRACT", 1, "request-hash")
+        .unwrap();
+    store
+        .record_turn_started(RUN_ID, "request-hash", "primary-thread", "turn-1")
+        .unwrap();
+    run.pause("PERMISSION_REQUIRED").unwrap();
+    store
+        .accept_response_and_advance(RUN_ID, "response-hash", &run)
+        .unwrap();
+
+    let accepted = store.latest_accepted_turn(RUN_ID).unwrap().unwrap();
+
+    assert_eq!(
+        accepted.capability_generation.as_deref(),
+        Some(PARTICIPANT_CAPABILITY_GENERATION)
+    );
+}
+
+#[test]
+fn recovered_legacy_turn_start_preserves_null_capability_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+    store
+        .record_pending_send(RUN_ID, "PRIMARY", "INTEGRATE", 1, "request-hash")
+        .unwrap();
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE turns SET capability_generation = NULL WHERE run_id = ?1",
+            [RUN_ID],
+        )
+        .unwrap();
+
+    store
+        .record_recovered_turn_started(RUN_ID, "request-hash", "primary-thread", "turn-legacy")
+        .unwrap();
+
+    let generation = Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT capability_generation FROM turns WHERE run_id = ?1",
+            [RUN_ID],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .unwrap();
+    assert_eq!(generation, None);
+}
+
+#[test]
+fn new_turn_start_upgrades_legacy_pending_capability_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+    store
+        .record_pending_send(RUN_ID, "PRIMARY", "INTEGRATE", 1, "request-hash")
+        .unwrap();
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE turns SET capability_generation = NULL WHERE run_id = ?1",
+            [RUN_ID],
+        )
+        .unwrap();
+
+    store
+        .record_turn_started(RUN_ID, "request-hash", "primary-thread", "turn-new")
+        .unwrap();
+
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    assert_eq!(
+        pending.capability_generation.as_deref(),
+        Some(PARTICIPANT_CAPABILITY_GENERATION)
+    );
+}
+
+#[test]
+fn legacy_turn_schema_migrates_with_null_capability_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                round INTEGER NOT NULL,
+                message_hash TEXT NOT NULL,
+                response_hash TEXT,
+                delivery_state TEXT NOT NULL,
+                thread_id TEXT,
+                turn_id TEXT,
+                created_at INTEGER NOT NULL,
+                accepted_at INTEGER,
+                UNIQUE(run_id, role, phase, round, message_hash)
+             );
+             INSERT INTO turns (
+                run_id, role, phase, round, message_hash, delivery_state,
+                thread_id, turn_id, created_at
+             ) VALUES (
+                'legacy-run', 'PRIMARY', 'INTEGRATE', 1, 'legacy-request',
+                'SENT', 'primary-thread', 'legacy-turn', 1
+             );",
+        )
+        .unwrap();
+    drop(connection);
+
+    let store = SqliteRunStore::open(&path).unwrap();
+    let pending = store.pending_send("legacy-run").unwrap().unwrap();
+    drop(store);
+    let generation = Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT capability_generation FROM turns WHERE run_id = 'legacy-run'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .unwrap();
+
+    assert_eq!(pending.turn_id.as_deref(), Some("legacy-turn"));
+    assert_eq!(generation, None);
+}
 
 #[test]
 fn pending_send_survives_reopen_without_storing_prompt() {
@@ -219,6 +387,10 @@ fn terminal_turn_retry_is_archived_and_reset_atomically() {
     assert_eq!(pending.message_hash, "request-hash");
     assert!(pending.thread_id.is_none());
     assert!(pending.turn_id.is_none());
+    assert_eq!(
+        pending.capability_generation.as_deref(),
+        Some(PARTICIPANT_CAPABILITY_GENERATION)
+    );
     assert_eq!(reopened.turn_attempt_count(RUN_ID).unwrap(), 1);
     assert_eq!(
         reopened.archived_turn_ids(RUN_ID, "request-hash").unwrap(),
