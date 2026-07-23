@@ -12,6 +12,8 @@ use serde_json::{Value, json};
 use tungstenite::{Message, accept};
 
 const CONTROLLED_PATCH_APPROVAL_KEY: &str = "plugins.worktree-merge-consensus.mcp_servers.worktreeMergeConsensus.tools.consensus_apply_patch.approval_mode";
+const PARTICIPANT_MCP_SERVER: &str = "worktreeMergeConsensusParticipant";
+const PARTICIPANT_PATCH_TOOL: &str = "consensus_apply_patch";
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -157,9 +159,10 @@ fn handle_request(config: &Config, method: &str, params: &Value) -> Result<Value
                 .get("threadId")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "threadId is missing".to_owned())?;
-            mark_thread_resumed(config, thread_id)?;
+            mark_thread_resumed(config, thread_id, params)?;
             Ok(json!({"thread": thread_detail(config, thread_id)?}))
         }
+        "mcpServerStatus/list" => participant_mcp_status(config, params),
         "turn/interrupt" => {
             let thread_id = params
                 .get("threadId")
@@ -269,7 +272,6 @@ fn start_turn(config: &Config, params: &Value) -> Result<Value, String> {
         .get("threadId")
         .and_then(Value::as_str)
         .ok_or_else(|| "turn/start threadId is missing".to_owned())?;
-    consume_thread_resume(config, thread_id)?;
     let prompt = params
         .get("input")
         .and_then(Value::as_array)
@@ -283,6 +285,17 @@ fn start_turn(config: &Config, params: &Value) -> Result<Value, String> {
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| "prompt action is missing".to_owned())?;
+    let resume_mode = consume_thread_resume(config, thread_id)?;
+    let expected_resume_mode = if action == "REQUEST_PRIMARY_INTEGRATION" {
+        "participant"
+    } else {
+        "default"
+    };
+    if resume_mode != expected_resume_mode {
+        return Err(format!(
+            "{action} used {resume_mode} resume instead of {expected_resume_mode}"
+        ));
+    }
     if let Err(error) = validate_turn_policy(config, action, thread_id, params, &payload) {
         append_event(
             config,
@@ -290,6 +303,7 @@ fn start_turn(config: &Config, params: &Value) -> Result<Value, String> {
         )?;
         return Err(error);
     }
+    append_event(config, &format!("method turn/start {thread_id} {action}"))?;
     append_event(config, &format!("turn {thread_id} {action}"))?;
     let occurrence = action_count(config, action)?;
 
@@ -326,20 +340,102 @@ fn resume_marker(config: &Config, thread_id: &str) -> PathBuf {
     config.state_directory.join(format!("resumed-{thread_id}"))
 }
 
-fn mark_thread_resumed(config: &Config, thread_id: &str) -> Result<(), String> {
-    fs::write(resume_marker(config, thread_id), b"ready\n")
+fn mark_thread_resumed(config: &Config, thread_id: &str, params: &Value) -> Result<(), String> {
+    let mode = match params.get("config") {
+        None => "default",
+        Some(resume_config) => {
+            validate_participant_resume_config(resume_config)?;
+            "participant"
+        }
+    };
+    fs::write(resume_marker(config, thread_id), format!("{mode}\n"))
         .map_err(|error| format!("mark resumed task {thread_id}: {error}"))?;
+    append_event(config, &format!("method thread/resume {thread_id}"))?;
     append_event(config, &format!("resume {thread_id}"))
 }
 
-fn consume_thread_resume(config: &Config, thread_id: &str) -> Result<(), String> {
+fn consume_thread_resume(config: &Config, thread_id: &str) -> Result<String, String> {
     let marker = resume_marker(config, thread_id);
     if !marker.exists() {
         return Err(format!(
             "task {thread_id} must be resumed before turn/start"
         ));
     }
-    fs::remove_file(marker).map_err(|error| format!("consume resumed task {thread_id}: {error}"))
+    let mode = fs::read_to_string(&marker)
+        .map_err(|error| format!("read resumed task {thread_id}: {error}"))?
+        .trim()
+        .to_owned();
+    fs::remove_file(marker)
+        .map_err(|error| format!("consume resumed task {thread_id}: {error}"))?;
+    Ok(mode)
+}
+
+fn validate_participant_resume_config(config: &Value) -> Result<(), String> {
+    let server = config
+        .pointer(&format!("/mcp_servers/{PARTICIPANT_MCP_SERVER}"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| "participant resume config is missing the exact MCP server".to_owned())?;
+    if server.len() != 7
+        || !server
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(|command| Path::new(command).is_absolute())
+        || server.get("args") != Some(&json!(["participant-mcp-server"]))
+        || server.get("required") != Some(&json!(true))
+        || server.get("enabled_tools") != Some(&json!([PARTICIPANT_PATCH_TOOL]))
+        || server.get("startup_timeout_sec") != Some(&json!(10))
+        || server.get("tool_timeout_sec") != Some(&json!(300))
+        || server.get("tools")
+            != Some(&json!({
+                PARTICIPANT_PATCH_TOOL: {"approval_mode": "approve"}
+            }))
+    {
+        return Err(format!("participant resume config is malformed: {config}"));
+    }
+    Ok(())
+}
+
+fn participant_mcp_status(config: &Config, params: &Value) -> Result<Value, String> {
+    let thread_id = params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "mcpServerStatus/list threadId is missing".to_owned())?;
+    if params.get("detail") != Some(&json!("toolsAndAuthOnly")) {
+        return Err("mcpServerStatus/list detail is not toolsAndAuthOnly".to_owned());
+    }
+    let resume_mode = fs::read_to_string(resume_marker(config, thread_id))
+        .map_err(|error| format!("MCP status requested before task resume: {error}"))?;
+    if resume_mode.trim() != "participant" {
+        return Err("MCP status requested without participant resume config".to_owned());
+    }
+    append_event(config, &format!("method mcpServerStatus/list {thread_id}"))?;
+    let data = match config.scenario.as_str() {
+        "participant_patch_missing_server" => json!([]),
+        "participant_patch_missing_tool" => json!([{
+            "name": PARTICIPANT_MCP_SERVER,
+            "tools": {}
+        }]),
+        "participant_patch_extra_tool" => json!([{
+            "name": PARTICIPANT_MCP_SERVER,
+            "tools": {
+                PARTICIPANT_PATCH_TOOL: {"inputSchema": {"type": "object"}},
+                "unexpected_patch_tool": {"inputSchema": {"type": "object"}}
+            }
+        }]),
+        "participant_patch_malformed_inventory" => json!([{
+            "name": PARTICIPANT_MCP_SERVER,
+            "tools": {
+                PARTICIPANT_PATCH_TOOL: "not-an-object"
+            }
+        }]),
+        _ => json!([{
+            "name": PARTICIPANT_MCP_SERVER,
+            "tools": {
+                PARTICIPANT_PATCH_TOOL: {"inputSchema": {"type": "object"}}
+            }
+        }]),
+    };
+    Ok(json!({"data": data}))
 }
 
 fn declared_tests(metadata: &Value) -> Vec<String> {

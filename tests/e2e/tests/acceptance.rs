@@ -376,6 +376,74 @@ fn cancellation_stops_before_integration_and_preserves_git_state() {
     fixture.assert_branch_absent();
 }
 
+#[test]
+fn participant_patch_preflight_orders_resume_status_and_turn_start() {
+    let fixture = AcceptanceFixture::new("participant_patch_available", false);
+    let (run_id, _daemon) = fixture.start();
+    let accepted = fixture.wait_for_terminal(&run_id);
+
+    assert_eq!(
+        accepted["status"],
+        "ACCEPTED",
+        "state={accepted}\nevents={}",
+        fixture.events()
+    );
+    let methods = fixture
+        .events()
+        .lines()
+        .filter(|line| line.starts_with("method "))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let integration_start = methods
+        .iter()
+        .position(|method| method == "method turn/start primary-thread REQUEST_PRIMARY_INTEGRATION")
+        .unwrap();
+    assert_eq!(
+        &methods[integration_start - 2..=integration_start],
+        [
+            "method thread/resume primary-thread",
+            "method mcpServerStatus/list primary-thread",
+            "method turn/start primary-thread REQUEST_PRIMARY_INTEGRATION",
+        ]
+    );
+    fixture.assert_source_refs_unchanged();
+}
+
+#[test]
+fn participant_patch_inventory_failures_block_before_turn_or_git_write() {
+    for scenario in [
+        "participant_patch_missing_server",
+        "participant_patch_missing_tool",
+        "participant_patch_extra_tool",
+        "participant_patch_malformed_inventory",
+    ] {
+        let fixture = AcceptanceFixture::new(scenario, false);
+        let (run_id, _daemon) = fixture.start();
+        let blocked = fixture.wait_for_terminal(&run_id);
+        let events = fixture.events();
+
+        assert_eq!(
+            blocked["status"], "BLOCKED",
+            "scenario={scenario}\n{events}"
+        );
+        assert_eq!(
+            blocked["reason_code"], "PATCH_TOOL_UNAVAILABLE",
+            "scenario={scenario}\n{events}"
+        );
+        assert_eq!(
+            fixture.action_count("REQUEST_PRIMARY_INTEGRATION"),
+            0,
+            "scenario={scenario}\n{events}"
+        );
+        assert!(
+            !events.lines().any(|line| line.starts_with("git ")),
+            "scenario={scenario}\n{events}"
+        );
+        fixture.assert_source_refs_unchanged();
+        fixture.assert_branch_absent();
+    }
+}
+
 struct AcceptanceFixture {
     _temp: tempfile::TempDir,
     repository: RepositoryFixture,

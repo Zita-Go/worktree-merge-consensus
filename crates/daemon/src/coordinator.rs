@@ -8,7 +8,8 @@ use std::{
 
 use app_server_client::{
     AppEvent, AppServer, AppServerError, CONTROLLED_PATCH_APPROVAL_KEY,
-    CONTROLLED_PATCH_APPROVAL_MODE, CommandExecRequest, ThreadDetail, TurnExecutionPolicy,
+    CONTROLLED_PATCH_APPROVAL_MODE, CommandExecRequest, McpServerStatus, PARTICIPANT_MCP_SERVER,
+    PARTICIPANT_PATCH_TOOL, ThreadDetail, ThreadResumePolicy, TurnExecutionPolicy,
 };
 use consensus_core::{
     canonical_json_hash,
@@ -109,6 +110,7 @@ pub struct CoordinatorOptions {
     pub wait_timeout: Duration,
     pub poll_interval: Duration,
     pub communication_attempts: usize,
+    pub participant_mcp_executable: PathBuf,
 }
 
 impl Default for CoordinatorOptions {
@@ -117,6 +119,8 @@ impl Default for CoordinatorOptions {
             wait_timeout: DEFAULT_WAIT_TIMEOUT,
             poll_interval: Duration::from_millis(500),
             communication_attempts: 3,
+            participant_mcp_executable: std::env::current_exe()
+                .expect("current daemon executable is required for participant MCP injection"),
         }
     }
 }
@@ -1700,6 +1704,7 @@ where
             turn,
             &pending.message_hash,
             &successful_patch_hash,
+            true,
         ) {
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
@@ -2310,8 +2315,23 @@ where
         let thread_id = role_thread_id(state, role).to_owned();
         let detail = self.wait_until_idle(state, role, &thread_id).await?;
         self.verify_thread_identity(state, role, &detail)?;
-        let resumed = self.resume_thread_with_retry(&thread_id).await?;
+        let resume_policy = if action == NextAction::RequestPrimaryIntegration {
+            ThreadResumePolicy::PrimaryIntegration {
+                participant_executable: self.options.participant_mcp_executable.clone(),
+            }
+        } else {
+            ThreadResumePolicy::Default
+        };
+        let resumed = self
+            .resume_thread_with_retry(&thread_id, &resume_policy)
+            .await?;
         self.verify_thread_identity(state, role, &resumed)?;
+        if action == NextAction::RequestPrimaryIntegration {
+            let statuses = self
+                .list_mcp_server_status_for_preflight(&thread_id)
+                .await?;
+            verify_participant_patch_capability(&thread_id, &statuses)?;
+        }
         if resumed.summary.is_active() {
             self.wait_until_idle(state, role, &thread_id).await?;
         }
@@ -3313,11 +3333,12 @@ where
     async fn resume_thread_with_retry(
         &self,
         thread_id: &str,
+        policy: &ThreadResumePolicy,
     ) -> Result<ThreadDetail, CoordinatorError> {
         let attempts = self.options.communication_attempts.max(1);
         let mut last_error = None;
         for attempt in 0..attempts {
-            match self.app.resume_thread(thread_id).await {
+            match self.app.resume_thread(thread_id, policy).await {
                 Ok(detail) => return Ok(detail),
                 Err(error) => last_error = Some(error),
             }
@@ -3330,6 +3351,48 @@ where
             Some(thread_id),
             last_error.unwrap_or_else(|| {
                 AppServerError::InvalidResponse("thread resume failed without an error".into())
+            }),
+        ))
+    }
+
+    async fn list_mcp_server_status_for_preflight(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<McpServerStatus>, CoordinatorError> {
+        let attempts = self.options.communication_attempts.max(1);
+        let mut last_error = None;
+        for attempt in 0..attempts {
+            match self.app.list_mcp_server_status(thread_id).await {
+                Ok(statuses) => return Ok(statuses),
+                Err(AppServerError::IncompatibleCodex(detail)) => {
+                    return Err(CoordinatorError::app_server(
+                        "INCOMPATIBLE_CODEX",
+                        detail,
+                        "mcpServerStatus/list",
+                        Some(thread_id),
+                    ));
+                }
+                Err(AppServerError::InvalidResponse(detail)) => {
+                    return Err(CoordinatorError::app_server(
+                        "PATCH_TOOL_UNAVAILABLE",
+                        detail,
+                        "mcpServerStatus/list",
+                        Some(thread_id),
+                    ));
+                }
+                Err(error) => last_error = Some(error),
+            }
+            if attempt + 1 < attempts {
+                tokio::time::sleep(self.options.poll_interval).await;
+            }
+        }
+        Err(communication_error(
+            "mcpServerStatus/list",
+            Some(thread_id),
+            last_error.unwrap_or_else(|| {
+                AppServerError::InvalidResponse(
+                    "MCP server status failed without an error".to_owned(),
+                )
             }),
         ))
     }
@@ -3355,6 +3418,37 @@ where
             .load_run(run_id)?
             .ok_or_else(|| StoreError::RunNotFound(run_id.to_owned()).into())
     }
+}
+
+fn verify_participant_patch_capability(
+    thread_id: &str,
+    statuses: &[McpServerStatus],
+) -> Result<(), CoordinatorError> {
+    let participant_servers = statuses
+        .iter()
+        .filter(|status| status.name == PARTICIPANT_MCP_SERVER)
+        .collect::<Vec<_>>();
+    let valid = match participant_servers.as_slice() {
+        [server] => {
+            server.tools.len() == 1
+                && server
+                    .tools
+                    .get(PARTICIPANT_PATCH_TOOL)
+                    .is_some_and(Value::is_object)
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err(CoordinatorError::app_server(
+            "PATCH_TOOL_UNAVAILABLE",
+            format!(
+                "task MCP inventory must expose exactly {PARTICIPANT_MCP_SERVER}.{PARTICIPANT_PATCH_TOOL}"
+            ),
+            "mcpServerStatus/list",
+            Some(thread_id),
+        ));
+    }
+    Ok(())
 }
 
 fn allowed_participant_signals(action: NextAction) -> &'static [ParticipantSignal] {
@@ -3706,6 +3800,7 @@ fn verify_integration_execution_items(
                 turn,
                 request_hash,
                 successful_patch_hash,
+                false,
             ) {
                 return Err(CoordinatorError::operational(
                     "FORBIDDEN_OPERATION",
@@ -3790,10 +3885,30 @@ fn controlled_patch_mcp_identity_blocker(
     item: &Value,
     request_hash: &str,
 ) -> Option<String> {
+    controlled_patch_mcp_identity_blocker_for_recovery(state, item, request_hash, false)
+}
+
+fn recoverable_controlled_patch_mcp_identity_blocker(
+    state: &RunState,
+    item: &Value,
+    request_hash: &str,
+) -> Option<String> {
+    controlled_patch_mcp_identity_blocker_for_recovery(state, item, request_hash, true)
+}
+
+fn controlled_patch_mcp_identity_blocker_for_recovery(
+    state: &RunState,
+    item: &Value,
+    request_hash: &str,
+    allow_legacy_server: bool,
+) -> Option<String> {
+    let server = item.get("server").and_then(Value::as_str);
+    let server_matches = server == Some(PARTICIPANT_MCP_SERVER)
+        || (allow_legacy_server && server == Some("worktreeMergeConsensus"));
     if item.get("pluginId").and_then(Value::as_str)
         != Some("worktree-merge-consensus@worktree-merge-consensus")
-        || item.get("server").and_then(Value::as_str) != Some("worktreeMergeConsensus")
-        || item.get("tool").and_then(Value::as_str) != Some("consensus_apply_patch")
+        || !server_matches
+        || item.get("tool").and_then(Value::as_str) != Some(PARTICIPANT_PATCH_TOOL)
     {
         return Some(
             "integration turn invoked an MCP tool outside the exact controlled patch capability"
@@ -3924,6 +4039,7 @@ fn recoverable_integration_turn_blocker(
     turn: &Value,
     request_hash: &str,
     successful_patch_hash: &str,
+    allow_legacy_server: bool,
 ) -> Option<String> {
     let Some(items) = turn.get("items").and_then(Value::as_array) else {
         return Some("canonical items are unavailable".into());
@@ -3990,9 +4106,12 @@ fn recoverable_integration_turn_blocker(
                         "controlled patch call appears after the final agent response".into(),
                     );
                 }
-                if let Some(blocker) =
+                let identity_blocker = if allow_legacy_server {
+                    recoverable_controlled_patch_mcp_identity_blocker(state, item, request_hash)
+                } else {
                     controlled_patch_mcp_identity_blocker(state, item, request_hash)
-                {
+                };
+                if let Some(blocker) = identity_blocker {
                     return Some(blocker);
                 }
                 let patch = item
@@ -5276,13 +5395,13 @@ mod retry_safety_tests {
     }
 
     #[test]
-    fn integration_history_accepts_only_the_exact_request_bound_patch_tool() {
+    fn participant_patch_integration_history_accepts_only_the_exact_request_bound_tool() {
         let state = integration_state();
         let request_hash = "request-hash";
         let mut call = json!({
             "type": "mcpToolCall",
             "pluginId": "worktree-merge-consensus@worktree-merge-consensus",
-            "server": "worktreeMergeConsensus",
+            "server": PARTICIPANT_MCP_SERVER,
             "tool": "consensus_apply_patch",
             "arguments": {
                 "run_id": state.facts.run_id.to_string(),
@@ -5297,6 +5416,13 @@ mod retry_safety_tests {
             None
         );
 
+        call["server"] = json!("worktreeMergeConsensus");
+        assert!(
+            integration_patch_mcp_blocker(&state, &call, request_hash)
+                .unwrap()
+                .contains("outside")
+        );
+        call["server"] = json!(PARTICIPANT_MCP_SERVER);
         call["tool"] = json!("consensus_resume");
         assert!(
             integration_patch_mcp_blocker(&state, &call, request_hash)
@@ -5344,7 +5470,13 @@ mod retry_safety_tests {
         let successful_hash = canonical_json_hash(&json!({"patch": successful_patch}));
 
         assert_eq!(
-            recoverable_integration_turn_blocker(&state, &turn, request_hash, &successful_hash),
+            recoverable_integration_turn_blocker(
+                &state,
+                &turn,
+                request_hash,
+                &successful_hash,
+                true,
+            ),
             None
         );
         assert!(
@@ -5352,7 +5484,8 @@ mod retry_safety_tests {
                 &state,
                 &turn,
                 request_hash,
-                &canonical_json_hash(&json!({"patch": "different"}))
+                &canonical_json_hash(&json!({"patch": "different"})),
+                true,
             )
             .unwrap()
             .contains("SQLite success record")

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -12,7 +12,8 @@ use std::{
 
 use app_server_client::{
     AppEvent, AppServer, AppServerError, CommandExecRequest, CommandExecResult, InitializeInfo,
-    ThreadDetail, ThreadPage, ThreadSummary, TurnExecutionPolicy, TurnHandle,
+    McpServerStatus, PARTICIPANT_MCP_SERVER, PARTICIPANT_PATCH_TOOL, ThreadDetail, ThreadPage,
+    ThreadResumePolicy, ThreadSummary, TurnExecutionPolicy, TurnHandle,
 };
 use async_trait::async_trait;
 use consensus_core::{
@@ -140,6 +141,7 @@ async fn task_cwd_is_metadata_and_bound_worktrees_drive_turns() {
             wait_timeout: Duration::from_secs(1),
             poll_interval: Duration::from_millis(1),
             communication_attempts: 2,
+            participant_mcp_executable: participant_mcp_executable(),
         },
     );
     let state = fixture_run();
@@ -224,6 +226,159 @@ async fn task_cwd_is_metadata_and_bound_worktrees_drive_turns() {
     assert!(policies.iter().enumerate().all(|(index, policy)| {
         matches!(index, 4 | 5) || matches!(policy, TurnExecutionPolicy::ReadOnly { .. })
     }));
+}
+
+#[tokio::test]
+async fn participant_patch_preflight_orders_resume_inventory_and_turn_start() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(FakeAppServer::new(conflict_free_replies()));
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+
+    coordinator
+        .start(
+            fixture_run(),
+            StartRequest {
+                integration_branch: Some("consensus/test-run".into()),
+                test_commands: vec!["cargo test --workspace".into()],
+            },
+        )
+        .await
+        .unwrap();
+    let result = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Accepted);
+    let methods = app.method_order();
+    let integration_start = methods
+        .iter()
+        .position(|method| method == "turn/start:primary:REQUEST_PRIMARY_INTEGRATION")
+        .unwrap();
+    assert_eq!(
+        &methods[integration_start - 2..=integration_start],
+        [
+            "thread/resume:primary",
+            "mcpServerStatus/list:primary",
+            "turn/start:primary:REQUEST_PRIMARY_INTEGRATION",
+        ]
+    );
+    let resume_policies = app.resume_policies();
+    assert!(matches!(
+        &resume_policies[4],
+        ThreadResumePolicy::PrimaryIntegration {
+            participant_executable
+        } if participant_executable == &participant_mcp_executable()
+    ));
+    assert!(
+        resume_policies
+            .iter()
+            .enumerate()
+            .all(|(index, policy)| index == 4 || policy == &ThreadResumePolicy::Default)
+    );
+}
+
+#[tokio::test]
+async fn participant_patch_inventory_mismatch_blocks_before_integration_turn() {
+    for inventory in [
+        ParticipantInventory::MissingServer,
+        ParticipantInventory::MissingTool,
+        ParticipantInventory::ExtraTool,
+        ParticipantInventory::MalformedDefinition,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+        let app = Arc::new(
+            FakeAppServer::new(conflict_free_replies()).with_participant_inventory(inventory),
+        );
+        let safety = Arc::new(RecordingSafety::default());
+        let coordinator =
+            Coordinator::new(Arc::clone(&app), store, Arc::clone(&safety), fast_options());
+
+        coordinator
+            .start(
+                fixture_run(),
+                StartRequest {
+                    integration_branch: Some("consensus/test-run".into()),
+                    test_commands: vec!["cargo test --workspace".into()],
+                },
+            )
+            .await
+            .unwrap();
+        let blocked = coordinator.drive(RUN_ID).await.unwrap();
+
+        assert_eq!(
+            blocked.status,
+            RunStatus::Blocked,
+            "inventory={inventory:?}"
+        );
+        assert_eq!(
+            blocked.reason_code.as_deref(),
+            Some("PATCH_TOOL_UNAVAILABLE"),
+            "inventory={inventory:?}"
+        );
+        assert!(
+            app.request_order()
+                .iter()
+                .all(|request| !request.ends_with("REQUEST_PRIMARY_INTEGRATION")),
+            "inventory={inventory:?}"
+        );
+        assert!(
+            app.method_order()
+                .iter()
+                .all(|method| method != "turn/start:primary:REQUEST_PRIMARY_INTEGRATION"),
+            "inventory={inventory:?}"
+        );
+        assert!(
+            safety
+                .events()
+                .iter()
+                .all(|event| !event.starts_with("result:")),
+            "inventory={inventory:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn participant_patch_status_method_unavailable_is_incompatible_codex() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::new(conflict_free_replies())
+            .with_participant_inventory(ParticipantInventory::StatusUnavailable),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+
+    coordinator
+        .start(
+            fixture_run(),
+            StartRequest {
+                integration_branch: Some("consensus/test-run".into()),
+                test_commands: vec!["cargo test --workspace".into()],
+            },
+        )
+        .await
+        .unwrap();
+    let incompatible = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(incompatible.status, RunStatus::IncompatibleCodex);
+    assert_eq!(
+        incompatible.reason_code.as_deref(),
+        Some("INCOMPATIBLE_CODEX")
+    );
+    assert!(
+        app.method_order()
+            .iter()
+            .all(|method| method != "turn/start:primary:REQUEST_PRIMARY_INTEGRATION")
+    );
 }
 
 #[tokio::test]
@@ -2411,6 +2566,7 @@ async fn completed_bwrap_file_change_blocker_retries_the_same_run_and_existing_m
             wait_timeout: Duration::from_millis(15),
             poll_interval: Duration::from_millis(1),
             communication_attempts: 1,
+            participant_mcp_executable: participant_mcp_executable(),
         },
     );
     coordinator
@@ -2464,6 +2620,7 @@ async fn pending_controlled_patch_approval_is_interrupted_and_retried_on_the_sam
             wait_timeout: Duration::from_millis(15),
             poll_interval: Duration::from_millis(1),
             communication_attempts: 1,
+            participant_mcp_executable: participant_mcp_executable(),
         },
     );
     coordinator
@@ -2520,6 +2677,7 @@ async fn completed_patch_rejected_while_paused_retries_the_same_run() {
             wait_timeout: Duration::from_millis(15),
             poll_interval: Duration::from_millis(1),
             communication_attempts: 1,
+            participant_mcp_executable: participant_mcp_executable(),
         },
     );
     coordinator
@@ -2574,6 +2732,7 @@ async fn completed_patch_rejection_without_redundant_text_retries_the_same_run()
             wait_timeout: Duration::from_millis(15),
             poll_interval: Duration::from_millis(1),
             communication_attempts: 1,
+            participant_mcp_executable: participant_mcp_executable(),
         },
     );
     coordinator
@@ -2614,6 +2773,7 @@ async fn completed_patch_rejection_without_critical_identity_is_not_retryable() 
             wait_timeout: Duration::from_millis(15),
             poll_interval: Duration::from_millis(1),
             communication_attempts: 1,
+            participant_mcp_executable: participant_mcp_executable(),
         },
     );
     coordinator
@@ -2661,6 +2821,7 @@ async fn in_progress_patch_rejected_while_paused_is_interrupted_and_retried() {
             wait_timeout: Duration::from_millis(15),
             poll_interval: Duration::from_millis(1),
             communication_attempts: 1,
+            participant_mcp_executable: participant_mcp_executable(),
         },
     );
     coordinator
@@ -2718,6 +2879,7 @@ async fn failed_patch_without_final_json_is_interrupted_and_retried() {
             wait_timeout: Duration::from_millis(15),
             poll_interval: Duration::from_millis(1),
             communication_attempts: 1,
+            participant_mcp_executable: participant_mcp_executable(),
         },
     );
     coordinator
@@ -2762,6 +2924,7 @@ async fn failed_patch_without_final_json_rejects_unknown_turn_items() {
             wait_timeout: Duration::from_millis(15),
             poll_interval: Duration::from_millis(1),
             communication_attempts: 1,
+            participant_mcp_executable: participant_mcp_executable(),
         },
     );
     coordinator
@@ -2815,6 +2978,7 @@ async fn controlled_patch_requires_the_exact_active_request_and_succeeds_only_on
             wait_timeout: Duration::from_secs(2),
             poll_interval: Duration::from_millis(1),
             communication_attempts: 1,
+            participant_mcp_executable: participant_mcp_executable(),
         },
     );
     coordinator
@@ -2952,6 +3116,7 @@ async fn active_turn_timeout_pauses_as_communication_failure() {
             wait_timeout: Duration::from_millis(15),
             poll_interval: Duration::from_millis(1),
             communication_attempts: 1,
+            participant_mcp_executable: participant_mcp_executable(),
         },
     );
     coordinator
@@ -2987,6 +3152,7 @@ async fn canonical_turn_progress_renews_the_bounded_idle_wait() {
             wait_timeout: Duration::from_millis(250),
             poll_interval: Duration::from_millis(1),
             communication_attempts: 1,
+            participant_mcp_executable: participant_mcp_executable(),
         },
     );
     coordinator
@@ -3410,7 +3576,9 @@ struct FakeAppServer {
     replies: Mutex<VecDeque<Value>>,
     threads: Mutex<HashMap<String, Vec<Value>>>,
     requests: Mutex<Vec<String>>,
+    method_order: Mutex<Vec<String>>,
     resumes: Mutex<Vec<String>>,
+    resume_policies: Mutex<Vec<ThreadResumePolicy>>,
     resume_tickets: Mutex<HashMap<String, usize>>,
     reply_types: Mutex<Vec<String>>,
     prompts: Mutex<Vec<String>>,
@@ -3428,6 +3596,18 @@ struct FakeAppServer {
     marker_protocol: bool,
     event_only_turn_items: bool,
     start_error: Option<String>,
+    participant_inventory: ParticipantInventory,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ParticipantInventory {
+    #[default]
+    Available,
+    MissingServer,
+    MissingTool,
+    ExtraTool,
+    MalformedDefinition,
+    StatusUnavailable,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3472,7 +3652,9 @@ impl FakeAppServer {
                 ("reviewer".into(), Vec::new()),
             ])),
             requests: Mutex::new(Vec::new()),
+            method_order: Mutex::new(Vec::new()),
             resumes: Mutex::new(Vec::new()),
+            resume_policies: Mutex::new(Vec::new()),
             resume_tickets: Mutex::new(HashMap::from([
                 ("primary".into(), 0),
                 ("reviewer".into(), 0),
@@ -3493,6 +3675,7 @@ impl FakeAppServer {
             marker_protocol: false,
             event_only_turn_items: false,
             start_error: None,
+            participant_inventory: ParticipantInventory::Available,
         }
     }
 
@@ -3522,6 +3705,11 @@ impl FakeAppServer {
         self
     }
 
+    fn with_participant_inventory(mut self, inventory: ParticipantInventory) -> Self {
+        self.participant_inventory = inventory;
+        self
+    }
+
     fn with_approval_mode(self, mode: Option<&str>) -> Self {
         *self.approval_mode.lock().unwrap() = mode.map(str::to_owned);
         self
@@ -3537,8 +3725,16 @@ impl FakeAppServer {
         self.requests.lock().unwrap().clone()
     }
 
+    fn method_order(&self) -> Vec<String> {
+        self.method_order.lock().unwrap().clone()
+    }
+
     fn resume_order(&self) -> Vec<String> {
         self.resumes.lock().unwrap().clone()
+    }
+
+    fn resume_policies(&self) -> Vec<ThreadResumePolicy> {
+        self.resume_policies.lock().unwrap().clone()
     }
 
     fn reply_types(&self) -> Vec<String> {
@@ -3904,8 +4100,17 @@ impl AppServer for FakeAppServer {
         Ok(self.detail(thread_id))
     }
 
-    async fn resume_thread(&self, thread_id: &str) -> Result<ThreadDetail, AppServerError> {
+    async fn resume_thread(
+        &self,
+        thread_id: &str,
+        policy: &ThreadResumePolicy,
+    ) -> Result<ThreadDetail, AppServerError> {
+        self.method_order
+            .lock()
+            .unwrap()
+            .push(format!("thread/resume:{thread_id}"));
         self.resumes.lock().unwrap().push(thread_id.to_owned());
+        self.resume_policies.lock().unwrap().push(policy.clone());
         *self
             .resume_tickets
             .lock()
@@ -3913,6 +4118,46 @@ impl AppServer for FakeAppServer {
             .get_mut(thread_id)
             .unwrap() += 1;
         Ok(self.detail(thread_id))
+    }
+
+    async fn list_mcp_server_status(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<McpServerStatus>, AppServerError> {
+        self.method_order
+            .lock()
+            .unwrap()
+            .push(format!("mcpServerStatus/list:{thread_id}"));
+        let patch_definition = match self.participant_inventory {
+            ParticipantInventory::MalformedDefinition => json!("not-an-object"),
+            _ => json!({"inputSchema": {"type": "object"}}),
+        };
+        let mut tools = BTreeMap::new();
+        if !matches!(
+            self.participant_inventory,
+            ParticipantInventory::MissingTool
+        ) {
+            tools.insert(PARTICIPANT_PATCH_TOOL.to_owned(), patch_definition);
+        }
+        if matches!(self.participant_inventory, ParticipantInventory::ExtraTool) {
+            tools.insert(
+                "unexpected_patch_tool".to_owned(),
+                json!({"inputSchema": {"type": "object"}}),
+            );
+        }
+        match self.participant_inventory {
+            ParticipantInventory::MissingServer => Ok(vec![McpServerStatus {
+                name: "unrelatedServer".to_owned(),
+                tools,
+            }]),
+            ParticipantInventory::StatusUnavailable => Err(AppServerError::IncompatibleCodex(
+                "required App Server method mcpServerStatus/list is unavailable".to_owned(),
+            )),
+            _ => Ok(vec![McpServerStatus {
+                name: PARTICIPANT_MCP_SERVER.to_owned(),
+                tools,
+            }]),
+        }
     }
 
     async fn start_turn(
@@ -3933,6 +4178,10 @@ impl AppServer for FakeAppServer {
             return Err(AppServerError::InvalidResponse(detail.clone()));
         }
         let action = prompt_action(prompt);
+        self.method_order
+            .lock()
+            .unwrap()
+            .push(format!("turn/start:{thread_id}:{action}"));
         let verification_request_number = {
             let mut requests = self.requests.lock().unwrap();
             requests.push(format!("{thread_id}:{action}"));
@@ -4055,7 +4304,7 @@ impl AppServer for FakeAppServer {
                 "id": format!("patch-{turn_id}"),
                 "type": "mcpToolCall",
                 "pluginId": "worktree-merge-consensus@worktree-merge-consensus",
-                "server": "worktreeMergeConsensus",
+                "server": PARTICIPANT_MCP_SERVER,
                 "tool": "consensus_apply_patch",
                 "arguments": {
                     "run_id": metadata["run_id"],
@@ -4404,6 +4653,7 @@ fn fast_options() -> CoordinatorOptions {
         wait_timeout: Duration::from_secs(1),
         poll_interval: Duration::from_millis(1),
         communication_attempts: 2,
+        participant_mcp_executable: participant_mcp_executable(),
     }
 }
 
@@ -4412,7 +4662,12 @@ fn legacy_migration_options() -> CoordinatorOptions {
         wait_timeout: Duration::from_millis(15),
         poll_interval: Duration::from_millis(1),
         communication_attempts: 1,
+        participant_mcp_executable: participant_mcp_executable(),
     }
+}
+
+fn participant_mcp_executable() -> PathBuf {
+    PathBuf::from("/test/bin/codex-consensus")
 }
 
 struct LegacyMigrationSeed {
