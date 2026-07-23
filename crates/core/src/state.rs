@@ -736,6 +736,7 @@ impl RunState {
             || self.integration_branch.is_none()
             || self.integration_sha.is_none()
             || self.current_integration_payload.is_none()
+            || self.verification_worktree.is_none()
             || self.required_test_commands.is_empty()
             || self.test_evidence.is_empty()
             || self.accepted_result.is_some()
@@ -765,21 +766,50 @@ impl RunState {
                 "corrective controlled-patch recovery requires at least one failed frozen test",
             ));
         }
+        let integration_payload = self.current_integration_payload.as_ref().ok_or_else(|| {
+            state_error(
+                "NOT_RETRYABLE",
+                "corrective controlled-patch recovery requires retained integration evidence",
+            )
+        })?;
+        let payload_evidence = test_evidence(integration_payload).map_err(|_| {
+            state_error(
+                "NOT_RETRYABLE",
+                "corrective controlled-patch recovery requires matching persisted test evidence",
+            )
+        })?;
+        if payload_evidence != self.test_evidence {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "corrective controlled-patch recovery test evidence fields disagree",
+            ));
+        }
+        let expected_failures = failed_test_identities_from_evidence(&self.test_evidence);
+        let payload_failures = integration_payload
+            .get("verification_failures")
+            .and_then(failed_test_identities)
+            .ok_or_else(|| {
+                state_error(
+                    "NOT_RETRYABLE",
+                    "corrective controlled-patch recovery requires structured verification failures",
+                )
+            })?;
         let feedback = self.last_result_feedback.as_ref().ok_or_else(|| {
             state_error(
                 "NOT_RETRYABLE",
                 "corrective controlled-patch recovery requires machine verification feedback",
             )
         })?;
+        let feedback_failures = feedback
+            .get("failed_tests")
+            .and_then(failed_test_identities);
         if feedback.get("format").and_then(Value::as_str) != Some("machine_verification")
-            || !feedback
-                .get("failed_tests")
-                .and_then(Value::as_array)
-                .is_some_and(|failures| !failures.is_empty())
+            || payload_failures != expected_failures
+            || feedback_failures.as_ref() != Some(&expected_failures)
         {
             return Err(state_error(
                 "NOT_RETRYABLE",
-                "corrective controlled-patch recovery requires retained machine failure diagnostics",
+                "corrective controlled-patch recovery requires matching machine failure diagnostics",
             ));
         }
 
@@ -1519,6 +1549,42 @@ fn test_evidence(payload: &Value) -> Result<Vec<TestEvidence>, StateError> {
                     format!("invalid test_evidence entry: {error}"),
                 )
             })
+        })
+        .collect()
+}
+
+fn failed_test_identities_from_evidence(evidence: &[TestEvidence]) -> Vec<(String, i64, String)> {
+    evidence
+        .iter()
+        .filter(|entry| entry.exit_code != 0)
+        .map(|entry| {
+            (
+                entry.command.clone(),
+                entry.exit_code,
+                entry.item_id.clone(),
+            )
+        })
+        .collect()
+}
+
+fn failed_test_identities(value: &Value) -> Option<Vec<(String, i64, String)>> {
+    let failures = value.as_array().filter(|failures| !failures.is_empty())?;
+    failures
+        .iter()
+        .map(|failure| {
+            let command = failure
+                .get("command")
+                .and_then(Value::as_str)
+                .filter(|command| !command.trim().is_empty())?;
+            let exit_code = failure
+                .get("exit_code")
+                .and_then(Value::as_i64)
+                .filter(|exit_code| *exit_code != 0)?;
+            let item_id = failure
+                .get("item_id")
+                .and_then(Value::as_str)
+                .filter(|item_id| !item_id.trim().is_empty())?;
+            Some((command.to_owned(), exit_code, item_id.to_owned()))
         })
         .collect()
 }

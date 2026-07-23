@@ -128,6 +128,124 @@ fn unavailable_primary_before_verification_clone_keeps_public_reason_code() {
     assert_eq!(error.code(), "WORKTREE_UNAVAILABLE");
 }
 
+#[test]
+fn corrective_patch_rejects_head_movement_after_recovery_verification_without_mutation() {
+    let fixture = RealGitSafetyFixture::integrated();
+    let safety = GitRepositorySafety::default();
+    safety
+        .verify_integration(
+            &fixture.facts,
+            "consensus/test-run",
+            &fixture.integration_sha,
+            &fixture.changed_files,
+        )
+        .unwrap();
+    fs::write(fixture.primary.join("moved.txt"), "moved\n").unwrap();
+    run_git(&fixture.primary, &["add", "moved.txt"]);
+    run_git(&fixture.primary, &["commit", "-m", "move-after-recovery"]);
+    let status_before = git_stdout(&fixture.primary, &["status", "--porcelain"]);
+    let primary_before = fs::read_to_string(fixture.primary.join("primary.txt")).unwrap();
+    let patch = "diff --git a/primary.txt b/primary.txt\n--- a/primary.txt\n+++ b/primary.txt\n@@ -1 +1,2 @@\n primary\n+corrected\n";
+
+    let error = safety
+        .apply_corrective_integration_patch(
+            &fixture.facts,
+            "consensus/test-run",
+            &fixture.integration_sha,
+            patch,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "STALE_INTEGRATION_SHA");
+    assert_eq!(
+        fs::read_to_string(fixture.primary.join("primary.txt")).unwrap(),
+        primary_before
+    );
+    assert_eq!(
+        git_stdout(&fixture.primary, &["status", "--porcelain"]),
+        status_before
+    );
+}
+
+#[test]
+fn production_git_safety_rejects_a_dirty_corrective_target() {
+    let fixture = RealGitSafetyFixture::integrated();
+    fs::write(fixture.primary.join("dirty.txt"), "dirty\n").unwrap();
+
+    let error = GitRepositorySafety::default()
+        .verify_integration(
+            &fixture.facts,
+            "consensus/test-run",
+            &fixture.integration_sha,
+            &fixture.changed_files,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "DIRTY_WORKTREE");
+}
+
+#[test]
+fn production_git_safety_rejects_a_moved_corrective_target_head() {
+    let fixture = RealGitSafetyFixture::integrated();
+    run_git(
+        &fixture.primary,
+        &["commit", "--allow-empty", "-m", "move-target"],
+    );
+
+    let error = GitRepositorySafety::default()
+        .verify_integration(
+            &fixture.facts,
+            "consensus/test-run",
+            &fixture.integration_sha,
+            &fixture.changed_files,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "STALE_INTEGRATION_SHA");
+}
+
+#[test]
+fn production_git_safety_rejects_frozen_source_ref_drift() {
+    let fixture = RealGitSafetyFixture::integrated();
+    fs::write(fixture.reviewer.join("drift.txt"), "drift\n").unwrap();
+    run_git(&fixture.reviewer, &["add", "drift.txt"]);
+    run_git(&fixture.reviewer, &["commit", "-m", "drift-reviewer"]);
+
+    let error = GitRepositorySafety::default()
+        .verify_integration(
+            &fixture.facts,
+            "consensus/test-run",
+            &fixture.integration_sha,
+            &fixture.changed_files,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "SOURCE_DRIFT");
+}
+
+#[test]
+fn production_git_safety_rejects_missing_frozen_source_ancestry() {
+    let fixture = RealGitSafetyFixture::integrated();
+    run_git(
+        &fixture.primary,
+        &["reset", "--hard", &fixture.facts.primary_sha],
+    );
+    let rewritten = GitInspector::default()
+        .inspect_integration(&fixture.primary, &fixture.facts)
+        .unwrap();
+
+    let error = GitRepositorySafety::default()
+        .verify_integration(
+            &fixture.facts,
+            "consensus/test-run",
+            &rewritten.worktree.head_sha,
+            &rewritten.changed_files,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "MISSING_SOURCE_ANCESTRY");
+}
+
 #[tokio::test]
 async fn task_cwd_is_metadata_and_bound_worktrees_drive_turns() {
     let temp = tempfile::tempdir().unwrap();
@@ -1305,6 +1423,10 @@ async fn corrective_patch_tool_retry_allows_exactly_one_request_bound_patch() {
     assert_eq!(applied.base_sha, INTEGRATION_SHA);
     assert_eq!(applied.changed_files, vec![PathBuf::from("combined.txt")]);
     assert_eq!(safety.patch_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        safety.corrective_patch_bases.lock().unwrap().as_slice(),
+        [INTEGRATION_SHA]
+    );
 
     let duplicate = coordinator
         .apply_patch(
@@ -2444,7 +2566,7 @@ async fn completed_turn_is_recovered_without_duplicate_send_when_turn_id_was_not
     app.inject_completed_turn(
         "primary",
         "recovered-turn",
-        &format!("recovered marker {{\"request_hash\":\"{request_hash}\"}}"),
+        &legacy_request_prompt(&request_hash),
         recovered_reply,
     );
 
@@ -2548,7 +2670,7 @@ async fn unrecorded_interrupted_turn_is_recovered_and_paused_without_duplicate_s
     app.inject_interrupted_turn(
         "primary",
         "recovered-interrupted",
-        &format!("recovered marker {{\"request_hash\":\"{request_hash}\"}}"),
+        &legacy_request_prompt(&request_hash),
     );
 
     let paused = coordinator.drive(RUN_ID).await.unwrap();
@@ -3788,6 +3910,7 @@ impl RepositorySafety for AdvancingIntegrationSafety {
 struct CorrectiveRecoverySafety {
     branch_absent_calls: AtomicUsize,
     patch_calls: AtomicUsize,
+    corrective_patch_bases: Mutex<Vec<String>>,
     verified_results: Mutex<Vec<String>>,
     result_verification_error: Mutex<Option<&'static str>>,
 }
@@ -3824,15 +3947,20 @@ impl RepositorySafety for CorrectiveRecoverySafety {
         Ok(())
     }
 
-    fn apply_integration_patch(
+    fn apply_corrective_integration_patch(
         &self,
         _facts: &RunFacts,
         _target_branch: &str,
+        expected_base_sha: &str,
         _patch: &str,
     ) -> Result<(String, Vec<PathBuf>), SafetyError> {
         self.patch_calls.fetch_add(1, Ordering::SeqCst);
+        self.corrective_patch_bases
+            .lock()
+            .unwrap()
+            .push(expected_base_sha.to_owned());
         Ok((
-            INTEGRATION_SHA.to_owned(),
+            expected_base_sha.to_owned(),
             vec![PathBuf::from("combined.txt")],
         ))
     }
@@ -5347,7 +5475,9 @@ async fn seed_legacy_unattended_verification_history(
 }
 
 fn legacy_request_prompt(request_hash: &str) -> String {
-    format!("Legacy verification request.\n{{\"request_hash\":\"{request_hash}\"}}")
+    format!(
+        "Legacy verification request.\n\nCoordinator delivery identity for crash recovery:\n```json\n{{\"request_hash\":\"{request_hash}\"}}\n```\n"
+    )
 }
 
 fn legacy_verification_reply(signal: &str) -> Value {
@@ -5882,4 +6012,92 @@ fn run_git(cwd: &Path, arguments: &[&str]) {
         "git {arguments:?} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn git_stdout(cwd: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {arguments:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+struct RealGitSafetyFixture {
+    _root: tempfile::TempDir,
+    primary: PathBuf,
+    reviewer: PathBuf,
+    facts: RunFacts,
+    integration_sha: String,
+    changed_files: Vec<PathBuf>,
+}
+
+impl RealGitSafetyFixture {
+    fn integrated() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let repository = root.path().join("repository");
+        let primary = root.path().join("primary");
+        let reviewer = root.path().join("reviewer");
+        fs::create_dir(&repository).unwrap();
+        run_git(&repository, &["init", "--initial-branch=base"]);
+        run_git(&repository, &["config", "user.name", "Consensus Test"]);
+        run_git(
+            &repository,
+            &["config", "user.email", "consensus@example.invalid"],
+        );
+        fs::write(repository.join("README.md"), "base\n").unwrap();
+        run_git(&repository, &["add", "README.md"]);
+        run_git(&repository, &["commit", "-m", "base"]);
+        run_git(&repository, &["branch", "primary"]);
+        run_git(&repository, &["branch", "reviewer"]);
+        run_git(
+            &repository,
+            &["worktree", "add", primary.to_str().unwrap(), "primary"],
+        );
+        run_git(
+            &repository,
+            &["worktree", "add", reviewer.to_str().unwrap(), "reviewer"],
+        );
+        fs::write(primary.join("primary.txt"), "primary\n").unwrap();
+        run_git(&primary, &["add", "primary.txt"]);
+        run_git(&primary, &["commit", "-m", "primary-change"]);
+        fs::write(reviewer.join("reviewer.txt"), "reviewer\n").unwrap();
+        run_git(&reviewer, &["add", "reviewer.txt"]);
+        run_git(&reviewer, &["commit", "-m", "reviewer-change"]);
+        let inspector = GitInspector::default();
+        let frozen_primary = inspector.inspect_worktree(&primary).unwrap();
+        let frozen_reviewer = inspector.inspect_worktree(&reviewer).unwrap();
+        let facts = RunFacts {
+            run_id: Uuid::new_v4(),
+            primary_thread_id: "primary-thread".into(),
+            reviewer_thread_id: "reviewer-thread".into(),
+            primary_worktree: frozen_primary.worktree.clone(),
+            reviewer_worktree: frozen_reviewer.worktree.clone(),
+            git_common_dir: frozen_primary.common_dir.clone(),
+            primary_sha: frozen_primary.head_sha.clone(),
+            reviewer_sha: frozen_reviewer.head_sha.clone(),
+            primary_ref: frozen_primary.source_ref.map(|source| source.name),
+            reviewer_ref: frozen_reviewer.source_ref.map(|source| source.name),
+        };
+        run_git(&primary, &["switch", "-c", "consensus/test-run"]);
+        run_git(
+            &primary,
+            &["merge", "--no-ff", "reviewer", "-m", "integrate-reviewer"],
+        );
+        let integration = inspector.inspect_integration(&primary, &facts).unwrap();
+        Self {
+            _root: root,
+            primary,
+            reviewer,
+            facts,
+            integration_sha: integration.worktree.head_sha,
+            changed_files: integration.changed_files,
+        }
+    }
 }

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -43,6 +43,7 @@ use crate::store::{
 const MAX_DRIVER_STEPS: usize = 128;
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(1_800);
 const TURN_INTERRUPT_TIMEOUT: Duration = Duration::from_secs(10);
+const DELIVERY_IDENTITY_HEADING: &str = "Coordinator delivery identity for crash recovery:";
 const VERIFICATION_COMMAND_OUTPUT_CAP_BYTES: usize = 65_536;
 const MAX_VERIFICATION_FAILURE_OUTPUT_BYTES: usize = 16_384;
 const VERIFICATION_OUTPUT_TRUNCATION_MARKER: &str = "[earlier output truncated]\n";
@@ -194,6 +195,19 @@ pub trait RepositorySafety: Send + Sync {
         Err(SafetyError::new(
             "PATCH_UNAVAILABLE",
             "repository safety provider does not support controlled integration patches",
+        ))
+    }
+
+    fn apply_corrective_integration_patch(
+        &self,
+        _facts: &RunFacts,
+        _target_branch: &str,
+        _expected_base_sha: &str,
+        _patch: &str,
+    ) -> Result<(String, Vec<PathBuf>), SafetyError> {
+        Err(SafetyError::new(
+            "PATCH_UNAVAILABLE",
+            "repository safety provider does not support corrective integration patches",
         ))
     }
 
@@ -374,6 +388,30 @@ impl RepositorySafety for GitRepositorySafety {
         self.inspector
             .verify_source_refs_unchanged(&facts.primary_worktree, facts)?;
         Ok((base_sha, changed_files))
+    }
+
+    fn apply_corrective_integration_patch(
+        &self,
+        facts: &RunFacts,
+        target_branch: &str,
+        expected_base_sha: &str,
+        patch: &str,
+    ) -> Result<(String, Vec<PathBuf>), SafetyError> {
+        let observed_base_sha = self.verify_integration_patch_ready(facts, target_branch)?;
+        if observed_base_sha != expected_base_sha {
+            return Err(SafetyError::new(
+                "STALE_INTEGRATION_SHA",
+                "corrective patch base does not match the persisted integration SHA",
+            ));
+        }
+        let changed_files = self.inspector.apply_checked_text_patch(
+            &facts.primary_worktree,
+            expected_base_sha,
+            patch,
+        )?;
+        self.inspector
+            .verify_source_refs_unchanged(&facts.primary_worktree, facts)?;
+        Ok((expected_base_sha.to_owned(), changed_files))
     }
 
     fn verify_integration(
@@ -615,9 +653,23 @@ where
         let target = state.target_integration_branch.as_deref().ok_or_else(|| {
             CoordinatorError::operational("INVALID_STATE", "target integration branch is missing")
         })?;
-        let (base_sha, changed_files) =
+        let (base_sha, changed_files) = if corrective_integration {
+            let expected_base_sha = state.integration_sha.as_deref().ok_or_else(|| {
+                CoordinatorError::operational(
+                    "INVALID_STATE",
+                    "corrective patch requires the persisted integration SHA",
+                )
+            })?;
+            self.safety.apply_corrective_integration_patch(
+                &state.facts,
+                target,
+                expected_base_sha,
+                patch,
+            )?
+        } else {
             self.safety
-                .apply_integration_patch(&state.facts, target, patch)?;
+                .apply_integration_patch(&state.facts, target, patch)?
+        };
         let patch_hash = canonical_json_hash(&json!({"patch": patch}));
         self.store
             .record_successful_patch(run_id, request_hash, &patch_hash)?;
@@ -2537,7 +2589,9 @@ where
                 "\nCoordinator recovery override:\n- The exact request-bound controlled patch and final commit already succeeded in an archived attempt.\n- Do not call consensus_apply_patch and do not edit, stage, commit, create, or merge anything.\n- Use only read-only Git queries in the authorized primary worktree to inspect the existing clean target branch.\n- Return `<consensus-result>INTEGRATION_READY</consensus-result>` plus optional free-form Markdown. The coordinator derives branch, SHA, and changed files directly from Git.\n",
             );
         }
-        prompt.push_str("\nCoordinator delivery identity for crash recovery:\n```json\n");
+        prompt.push('\n');
+        prompt.push_str(DELIVERY_IDENTITY_HEADING);
+        prompt.push_str("\n```json\n");
         prompt.push_str(
             &serde_json::to_string(&json!({"request_hash": request_hash})).map_err(|error| {
                 CoordinatorError::operational("SERIALIZATION_FAILURE", error.to_string())
@@ -3902,7 +3956,7 @@ fn merge_completed_turn_evidence(
         ));
     }
     let mut ordered = Vec::new();
-    let mut item_ids = HashSet::new();
+    let mut item_hashes = HashMap::new();
     let mut append = |item: &Value| -> Result<(), CoordinatorError> {
         let item_id = item
             .get("id")
@@ -3914,9 +3968,20 @@ fn merge_completed_turn_evidence(
                     "completed turn evidence contains an item without a nonempty id",
                 )
             })?;
-        if item_ids.insert(item_id.to_owned()) {
-            ordered.push(item.clone());
+        let item_hash = canonical_json_hash(item);
+        if let Some(existing_hash) = item_hashes.get(item_id) {
+            if existing_hash != &item_hash {
+                return Err(CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    format!(
+                        "completed turn item {item_id} has conflicting canonical representations"
+                    ),
+                ));
+            }
+            return Ok(());
         }
+        item_hashes.insert(item_id.to_owned(), item_hash);
+        ordered.push(item.clone());
         Ok(())
     };
     for item in &completed_items {
@@ -4533,8 +4598,12 @@ fn find_turn_by_request_hash(
 }
 
 fn turn_contains_request_hash(turn: &Value, request_hash: &str) -> bool {
-    let marker = format!("\"request_hash\":\"{request_hash}\"");
-    turn.get("items")
+    turn_delivery_request_hash(turn).as_deref() == Some(request_hash)
+}
+
+fn turn_delivery_request_hash(turn: &Value) -> Option<String> {
+    let texts = turn
+        .get("items")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -4546,7 +4615,46 @@ fn turn_contains_request_hash(turn: &Value, request_hash: &str) -> bool {
                 .flatten()
         })
         .filter_map(|input| input.get("text").and_then(Value::as_str))
-        .any(|text| text.contains(&marker))
+        .collect::<Vec<_>>();
+    if texts
+        .iter()
+        .map(|text| text.matches(DELIVERY_IDENTITY_HEADING).count())
+        .sum::<usize>()
+        != 1
+    {
+        return None;
+    }
+    let text = texts
+        .into_iter()
+        .find(|text| text.contains(DELIVERY_IDENTITY_HEADING))?;
+    parse_delivery_request_hash(text)
+}
+
+fn parse_delivery_request_hash(text: &str) -> Option<String> {
+    let marker_start = text.find(DELIVERY_IDENTITY_HEADING)?;
+    if marker_start > 0 && text.as_bytes().get(marker_start - 1) != Some(&b'\n') {
+        return None;
+    }
+    let marker = &text[marker_start..];
+    let json_prefix = format!("{DELIVERY_IDENTITY_HEADING}\n```json\n");
+    let json_suffix = "\n```\n";
+    if !marker.starts_with(&json_prefix) || !marker.ends_with(json_suffix) {
+        return None;
+    }
+    let encoded = &marker[json_prefix.len()..marker.len() - json_suffix.len()];
+    if encoded.is_empty() || encoded.contains('\n') || encoded.contains('\r') {
+        return None;
+    }
+    let value = serde_json::from_str::<Value>(encoded).ok()?;
+    let object = value.as_object()?;
+    if object.len() != 1 {
+        return None;
+    }
+    object
+        .get("request_hash")
+        .and_then(Value::as_str)
+        .filter(|request_hash| !request_hash.trim().is_empty())
+        .map(str::to_owned)
 }
 
 fn terminal_turn_retry_blocker(turn: &Value) -> Option<String> {
@@ -5548,6 +5656,23 @@ fn verify_reviewer_frozen(
 mod retry_safety_tests {
     use super::*;
 
+    fn turn_with_user_text(text: &str) -> Value {
+        json!({
+            "id": "turn-1",
+            "items": [{
+                "id": "user-1",
+                "type": "userMessage",
+                "content": [{"type": "inputText", "text": text}]
+            }]
+        })
+    }
+
+    fn structured_delivery_marker(request_hash: &str) -> String {
+        format!(
+            "Normal coordinator prompt.\n\nCoordinator delivery identity for crash recovery:\n```json\n{{\"request_hash\":\"{request_hash}\"}}\n```\n"
+        )
+    }
+
     fn consensus_call(tool: &str) -> Value {
         json!({
             "type": "mcpToolCall",
@@ -5725,6 +5850,128 @@ mod retry_safety_tests {
             json!({"id": "compact-1", "type": "compaction"}),
         ] {
             assert!(context_compaction_retry_blocker(&malformed).is_some());
+        }
+    }
+
+    #[test]
+    fn completed_turn_evidence_rejects_conflicting_canonical_item_ids() {
+        let side_effect_items = [
+            json!({
+                "id": "conflict",
+                "type": "commandExecution",
+                "command": "git merge reviewer",
+                "status": "completed",
+                "exitCode": 0
+            }),
+            json!({
+                "id": "conflict",
+                "type": "fileChange",
+                "changes": [{"path": "src/lib.rs", "kind": "update"}],
+                "status": "completed"
+            }),
+            json!({
+                "id": "conflict",
+                "type": "mcpToolCall",
+                "server": "worktreeMergeConsensus",
+                "tool": "consensus_resume",
+                "status": "completed"
+            }),
+            json!({
+                "id": "conflict",
+                "type": "dynamicToolCall",
+                "tool": "write_file",
+                "status": "completed"
+            }),
+            json!({
+                "id": "conflict",
+                "type": "futureSideEffectItem",
+                "status": "completed"
+            }),
+        ];
+
+        for side_effect_item in side_effect_items {
+            let persisted = json!({
+                "id": "turn-1",
+                "items": [side_effect_item]
+            });
+            let event = json!({
+                "id": "turn-1",
+                "items": [{
+                    "id": "conflict",
+                    "type": "agentMessage",
+                    "text": "benign"
+                }]
+            });
+
+            let error = merge_completed_turn_evidence(&persisted, &event, Vec::new())
+                .expect_err("conflicting canonical item representations must fail closed");
+
+            assert_eq!(error.code(), "HISTORY_UNAVAILABLE");
+            assert!(
+                error
+                    .to_string()
+                    .contains("conflicting canonical representations")
+            );
+        }
+    }
+
+    #[test]
+    fn completed_turn_evidence_deduplicates_identical_canonical_items() {
+        let item = json!({
+            "id": "same",
+            "type": "agentMessage",
+            "text": "identical"
+        });
+        let persisted = json!({"id": "turn-1", "items": [item.clone()]});
+        let event = json!({"id": "turn-1", "items": [item.clone()]});
+
+        let merged =
+            merge_completed_turn_evidence(&persisted, &event, vec![item]).expect("exact repeats");
+
+        assert_eq!(merged["items"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn request_hash_binding_requires_one_exact_structured_delivery_marker() {
+        let target = "target-request";
+        let other = "other-request";
+        let valid = structured_delivery_marker(target);
+        assert!(turn_contains_request_hash(
+            &turn_with_user_text(&valid),
+            target
+        ));
+
+        let quoted = format!(
+            "> Coordinator delivery identity for crash recovery:\n> ```json\n> {{\"request_hash\":\"{target}\"}}\n> ```\n"
+        );
+        let embedded = format!("```text\n{valid}```\n");
+        let duplicate = format!("{valid}{valid}");
+        let malformed_fence = valid.replace("```json", "```JSON");
+        let malformed_json = valid.replace(
+            &format!("{{\"request_hash\":\"{target}\"}}"),
+            &format!("{{\"request_hash\":\"{target}\",}}"),
+        );
+        let another_turn_confusion = format!(
+            "Earlier text {{\"request_hash\":\"{target}\"}}.\n\n{}",
+            structured_delivery_marker(other)
+        );
+        assert!(turn_contains_request_hash(
+            &turn_with_user_text(&another_turn_confusion),
+            other
+        ));
+
+        for invalid in [
+            quoted,
+            embedded,
+            duplicate,
+            malformed_fence,
+            malformed_json,
+            another_turn_confusion,
+        ] {
+            assert!(
+                !turn_contains_request_hash(&turn_with_user_text(&invalid), target),
+                "invalid delivery marker was accepted: {invalid}"
+            );
         }
     }
 

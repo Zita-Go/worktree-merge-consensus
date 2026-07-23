@@ -202,7 +202,11 @@ fn is_allowed_git_command(state: &RunState, command: &str) -> bool {
     if is_allowed_read_only_git_invocation(state, subcommand, rest) {
         return true;
     }
+    let corrective_integration = state.integration_branch.is_some()
+        || state.integration_sha.is_some()
+        || state.current_integration_payload.is_some();
     match *subcommand {
+        "switch" if corrective_integration => false,
         "switch" => {
             matches!(
                 rest,
@@ -211,6 +215,7 @@ fn is_allowed_git_command(state: &RunState, command: &str) -> bool {
                         && *sha == state.facts.primary_sha
             )
         }
+        "merge" if corrective_integration => false,
         "merge" => {
             matches!(
                 rest,
@@ -426,6 +431,46 @@ mod tests {
             ),
             ApprovalDecision::Accept
         );
+    }
+
+    #[test]
+    fn corrective_integration_denies_branch_and_merge_but_allows_patch_completion() {
+        let mut state = integration_state();
+        state.integration_branch = Some("consensus/test-run".into());
+        state.integration_sha = Some("cccccccccccccccccccccccccccccccccccccccc".into());
+        state.current_integration_payload = Some(json!({
+            "changed_files": ["combined.txt"],
+            "integration_evidence": {"summary": "frozen failed result"}
+        }));
+
+        for command in [
+            format!("git switch -c consensus/test-run {PRIMARY_SHA}"),
+            format!("git merge --no-ff --no-edit {REVIEWER_SHA}"),
+        ] {
+            assert_eq!(
+                decide_command_approval(
+                    &state,
+                    &json!({"cwd": "/repo/primary", "command": command})
+                ),
+                ApprovalDecision::Cancel,
+                "{command} must be denied for a corrective integration"
+            );
+        }
+        for command in [
+            "git status --short",
+            "git rev-parse HEAD",
+            "git add -A",
+            "git commit -m consensus-fix",
+        ] {
+            assert_eq!(
+                decide_command_approval(
+                    &state,
+                    &json!({"cwd": "/repo/primary", "command": command})
+                ),
+                ApprovalDecision::Accept,
+                "{command} must remain available for exact corrective patch completion or inspection"
+            );
+        }
     }
 
     #[test]

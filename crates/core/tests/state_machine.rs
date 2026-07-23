@@ -464,6 +464,49 @@ fn corrective_patch_tool_retry_rejects_missing_failed_verification() {
 }
 
 #[test]
+fn corrective_patch_tool_retry_rejects_missing_persisted_verification_worktree() {
+    let mut state = blocked_corrective_patch_tool_state();
+    state.verification_worktree = None;
+
+    let error = state
+        .retry_blocked_corrective_patch_tool_unavailable()
+        .unwrap_err();
+
+    assert_eq!(error.code(), "NOT_RETRYABLE");
+}
+
+#[test]
+fn corrective_patch_tool_retry_rejects_cross_field_failed_verification_mismatches() {
+    let mut payload_evidence_mismatch = blocked_corrective_patch_tool_state();
+    payload_evidence_mismatch
+        .current_integration_payload
+        .as_mut()
+        .unwrap()["test_evidence"][0]["command"] = json!("cargo test --workspace");
+
+    let mut payload_failures_mismatch = blocked_corrective_patch_tool_state();
+    payload_failures_mismatch
+        .current_integration_payload
+        .as_mut()
+        .unwrap()["verification_failures"][0]["item_id"] = json!("different-item");
+
+    let mut feedback_mismatch = blocked_corrective_patch_tool_state();
+    feedback_mismatch.last_result_feedback.as_mut().unwrap()["failed_tests"][0]["command"] =
+        json!("cargo test --workspace");
+
+    for mut state in [
+        payload_evidence_mismatch,
+        payload_failures_mismatch,
+        feedback_mismatch,
+    ] {
+        let error = state
+            .retry_blocked_corrective_patch_tool_unavailable()
+            .unwrap_err();
+
+        assert_eq!(error.code(), "NOT_RETRYABLE");
+    }
+}
+
+#[test]
 fn corrective_patch_tool_retry_rejects_an_accepted_result() {
     let mut accepted = fixture_result_state("dddddddddddddddddddddddddddddddddddddddd");
     accepted
@@ -806,6 +849,7 @@ fn blocked_corrective_patch_tool_state() -> RunState {
         "item_id": "test-command-1",
         "output": "a compiler diagnostic"
     }]);
+    state.verification_worktree = Some(PathBuf::from("/state/verification/run"));
     state.apply_message(verification).unwrap();
     state.block("CONTROLLED_PATCH_TOOL_UNAVAILABLE");
     state

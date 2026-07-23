@@ -1461,6 +1461,7 @@ impl SqliteRunStore {
             || accepted.message_hash.is_empty()
             || accepted.response_hash.is_empty()
             || accepted.turn_id.is_empty()
+            || accepted.capability_generation.as_deref() != Some(PARTICIPANT_CAPABILITY_GENERATION)
         {
             return Err(StoreError::TerminalTurnNotRetryable(
                 "accepted corrective patch-tool blocker does not match the frozen correction request"
@@ -1484,31 +1485,33 @@ impl SqliteRunStore {
                 "run {run_id} changed while preparing corrective patch-tool recovery"
             )));
         }
-        let accepted_record_exists = transaction
+        let latest_accepted = transaction
             .query_row(
-                "SELECT 1 FROM turns
-                 WHERE run_id = ?1 AND role = ?2 AND phase = ?3 AND round = ?4
-                   AND message_hash = ?5 AND response_hash = ?6
-                   AND thread_id = ?7 AND turn_id = ?8
-                   AND delivery_state = 'ACCEPTED'
-                 LIMIT 1",
-                params![
-                    run_id,
-                    accepted.role,
-                    accepted.phase,
-                    accepted.round,
-                    accepted.message_hash,
-                    accepted.response_hash,
-                    accepted.thread_id,
-                    accepted.turn_id,
-                ],
-                |_| Ok(()),
+                "SELECT run_id, role, phase, round, message_hash, response_hash,
+                        thread_id, turn_id, capability_generation
+                 FROM turns
+                 WHERE run_id = ?1 AND delivery_state = 'ACCEPTED'
+                 ORDER BY id DESC LIMIT 1",
+                [&run_id],
+                |row| {
+                    Ok(AcceptedTurn {
+                        run_id: row.get(0)?,
+                        role: row.get(1)?,
+                        phase: row.get(2)?,
+                        round: row.get(3)?,
+                        message_hash: row.get(4)?,
+                        response_hash: row.get(5)?,
+                        thread_id: row.get(6)?,
+                        turn_id: row.get(7)?,
+                        capability_generation: row.get(8)?,
+                    })
+                },
             )
-            .optional()?
-            .is_some();
-        if !accepted_record_exists {
+            .optional()?;
+        if latest_accepted.as_ref() != Some(accepted) {
             return Err(StoreError::TerminalTurnNotRetryable(
-                "corrective patch-tool blocker is not the exact persisted accepted turn".into(),
+                "corrective patch-tool blocker is not the transaction-local latest accepted turn"
+                    .into(),
             ));
         }
         let prior_attempt_exists = transaction

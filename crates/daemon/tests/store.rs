@@ -613,6 +613,117 @@ fn corrective_patch_tool_retry_rejects_conflicting_repository_lock_without_mutat
 }
 
 #[test]
+fn corrective_patch_tool_retry_rejects_changed_capability_generation_transactionally() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    let (blocked, resumed, accepted) = seed_corrective_patch_tool_retry(&store);
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE turns SET capability_generation = 'different-generation'
+             WHERE run_id = ?1 AND delivery_state = 'ACCEPTED'",
+            [RUN_ID],
+        )
+        .unwrap();
+
+    let error = store
+        .reactivate_blocked_run_with_corrective_patch_tool_retry(
+            &blocked,
+            &resumed,
+            &accepted,
+            "completed",
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "TERMINAL_TURN_NOT_RETRYABLE");
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), blocked);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+}
+
+#[test]
+fn corrective_patch_tool_retry_rejects_each_changed_accepted_turn_identity_field() {
+    let mutations = [
+        "UPDATE turns SET message_hash = 'different-request'
+         WHERE run_id = ?1 AND delivery_state = 'ACCEPTED'",
+        "UPDATE turns SET response_hash = 'different-response'
+         WHERE run_id = ?1 AND delivery_state = 'ACCEPTED'",
+        "UPDATE turns SET thread_id = 'different-thread'
+         WHERE run_id = ?1 AND delivery_state = 'ACCEPTED'",
+        "UPDATE turns SET turn_id = 'different-turn'
+         WHERE run_id = ?1 AND delivery_state = 'ACCEPTED'",
+        "UPDATE turns SET round = round + 1
+         WHERE run_id = ?1 AND delivery_state = 'ACCEPTED'",
+        "UPDATE turns SET delivery_state = 'SENT'
+         WHERE run_id = ?1 AND delivery_state = 'ACCEPTED'",
+    ];
+
+    for mutation in mutations {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let store = SqliteRunStore::open(&path).unwrap();
+        let (blocked, resumed, accepted) = seed_corrective_patch_tool_retry(&store);
+        Connection::open(&path)
+            .unwrap()
+            .execute(mutation, [RUN_ID])
+            .unwrap();
+
+        let error = store
+            .reactivate_blocked_run_with_corrective_patch_tool_retry(
+                &blocked,
+                &resumed,
+                &accepted,
+                "completed",
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), "TERMINAL_TURN_NOT_RETRYABLE");
+        assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), blocked);
+        assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+        let lock_count = Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM locks", [], |row| row.get::<_, i64>(0))
+            .unwrap();
+        assert_eq!(lock_count, 0, "mutation must roll back for: {mutation}");
+    }
+}
+
+#[test]
+fn corrective_patch_tool_retry_rejects_a_newer_accepted_turn_transactionally() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    let (blocked, resumed, accepted) = seed_corrective_patch_tool_retry(&store);
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "INSERT INTO turns (
+                run_id, role, phase, round, message_hash, response_hash,
+                delivery_state, thread_id, turn_id, capability_generation,
+                created_at, accepted_at
+             ) VALUES (
+                ?1, 'PRIMARY', 'INTEGRATE', ?2, 'newer-request', 'newer-response',
+                'ACCEPTED', 'primary-thread', 'newer-turn', ?3, 2, 2
+             )",
+            params![RUN_ID, blocked.round, PARTICIPANT_CAPABILITY_GENERATION],
+        )
+        .unwrap();
+
+    let error = store
+        .reactivate_blocked_run_with_corrective_patch_tool_retry(
+            &blocked,
+            &resumed,
+            &accepted,
+            "completed",
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "TERMINAL_TURN_NOT_RETRYABLE");
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), blocked);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+}
+
+#[test]
 fn unattended_verification_migration_is_atomic_and_bounded_to_one_retry() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");
