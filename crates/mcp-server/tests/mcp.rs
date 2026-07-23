@@ -1,7 +1,9 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use consensus_mcp_server::{BackendError, ToolBackend, serve};
+use consensus_mcp_server::{
+    BackendError, MCP_TOOL_NAMES, ToolBackend, ToolSurface, serve, serve_surface,
+};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -41,6 +43,86 @@ async fn exchange(input: &str, backend: Arc<dyn ToolBackend>) -> Vec<Value> {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
+}
+
+async fn exchange_surface(
+    input: &str,
+    backend: Arc<dyn ToolBackend>,
+    surface: ToolSurface,
+) -> Vec<Value> {
+    let (client, server) = tokio::io::duplex(128 * 1024);
+    let (server_read, server_write) = tokio::io::split(server);
+    let task = tokio::spawn(async move {
+        serve_surface(BufReader::new(server_read), server_write, backend, surface)
+            .await
+            .unwrap();
+    });
+
+    let (mut client_read, mut client_write) = tokio::io::split(client);
+    client_write.write_all(input.as_bytes()).await.unwrap();
+    client_write.shutdown().await.unwrap();
+
+    let mut output = String::new();
+    client_read.read_to_string(&mut output).await.unwrap();
+    task.await.unwrap();
+    output
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn participant_patch_surface_lists_only_patch_and_rejects_other_tools_before_dispatch() {
+    let list_input = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}
+"#;
+    let operator_responses = exchange_surface(
+        list_input,
+        Arc::new(FakeBackend::default()),
+        ToolSurface::Operator,
+    )
+    .await;
+    let operator_tool_names = operator_responses[0]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    let participant_responses = exchange_surface(
+        list_input,
+        Arc::new(FakeBackend::default()),
+        ToolSurface::ParticipantPatch,
+    )
+    .await;
+    let participant_tool_names = participant_responses[0]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(operator_tool_names, MCP_TOOL_NAMES);
+    assert_eq!(participant_tool_names, ["consensus_apply_patch"]);
+
+    let backend = Arc::new(FakeBackend::default());
+    let input = concat!(
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"consensus_status","arguments":{"unexpected":true}}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"consensus_apply_patch","arguments":{"run_id":"run-123","request_hash":"hash-123","patch":"diff --git a/file b/file"}}}"#,
+        "\n",
+    );
+    let responses = exchange_surface(input, backend.clone(), ToolSurface::ParticipantPatch).await;
+    assert_eq!(responses[0]["error"]["code"], -32602);
+    assert_eq!(responses[1]["result"]["isError"], false);
+    assert_eq!(
+        backend.calls.lock().unwrap().as_slice(),
+        [(
+            "consensus_apply_patch".to_owned(),
+            json!({
+                "run_id": "run-123",
+                "request_hash": "hash-123",
+                "patch": "diff --git a/file b/file"
+            })
+        )]
+    );
 }
 
 #[tokio::test]

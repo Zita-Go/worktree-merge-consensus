@@ -12,6 +12,8 @@ pub const MCP_TOOL_NAMES: [&str; 8] = [
     "consensus_cancel",
 ];
 
+pub const PARTICIPANT_PATCH_TOOL: &str = "consensus_apply_patch";
+
 pub fn tool_definitions() -> Vec<Value> {
     vec![
         tool(
@@ -104,7 +106,7 @@ pub fn tool_definitions() -> Vec<Value> {
             run_id_schema(),
         ),
         tool(
-            MCP_TOOL_NAMES[6],
+            PARTICIPANT_PATCH_TOOL,
             "Apply one text-only patch during the exact active primary integration turn.",
             json!({
                 "type": "object",
@@ -156,7 +158,7 @@ pub(crate) fn validate_arguments(name: &str, arguments: Value) -> Result<Value, 
             parsed.validate()?;
             serde_json::to_value(parsed).map_err(|error| error.to_string())
         }
-        "consensus_apply_patch" => {
+        PARTICIPANT_PATCH_TOOL => {
             let parsed: ApplyPatchArguments = parse(arguments)?;
             parsed.validate()?;
             serde_json::to_value(parsed).map_err(|error| error.to_string())

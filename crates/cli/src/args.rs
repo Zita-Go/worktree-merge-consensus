@@ -56,7 +56,7 @@ impl Cli {
             Command::Run(arguments) => arguments.json,
             Command::Status(arguments) => arguments.json,
             Command::Resume(arguments) | Command::Cancel(arguments) => arguments.json,
-            Command::Daemon(_) | Command::McpServer => false,
+            Command::Daemon(_) | Command::McpServer | Command::ParticipantMcpServer => false,
         }
     }
 }
@@ -83,6 +83,8 @@ pub enum Command {
     Daemon(DaemonArgs),
     #[command(name = "mcp-server", hide = true)]
     McpServer,
+    #[command(name = "participant-mcp-server", hide = true)]
+    ParticipantMcpServer,
 }
 
 #[derive(Debug, Args)]

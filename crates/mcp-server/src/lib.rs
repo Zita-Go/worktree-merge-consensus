@@ -7,7 +7,7 @@ use serde_json::{Map, Value, json};
 use thiserror::Error;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
-pub use tools::{MCP_TOOL_NAMES, tool_definitions};
+pub use tools::{MCP_TOOL_NAMES, PARTICIPANT_PATCH_TOOL, tool_definitions};
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -41,6 +41,18 @@ pub trait ToolBackend: Send + Sync + 'static {
     async fn call(&self, tool: &str, arguments: Value) -> Result<Value, BackendError>;
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum ToolSurface {
+    Operator,
+    ParticipantPatch,
+}
+
+impl ToolSurface {
+    fn permits(self, tool: &str) -> bool {
+        matches!(self, Self::Operator) || tool == PARTICIPANT_PATCH_TOOL
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ServerError {
     #[error("MCP stdio I/O failed: {0}")]
@@ -50,9 +62,22 @@ pub enum ServerError {
 }
 
 pub async fn serve<R, W>(
+    reader: R,
+    writer: W,
+    backend: Arc<dyn ToolBackend>,
+) -> Result<(), ServerError>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    serve_surface(reader, writer, backend, ToolSurface::Operator).await
+}
+
+pub async fn serve_surface<R, W>(
     mut reader: R,
     mut writer: W,
     backend: Arc<dyn ToolBackend>,
+    surface: ToolSurface,
 ) -> Result<(), ServerError>
 where
     R: AsyncBufRead + Unpin,
@@ -73,7 +98,7 @@ where
             ))
         } else {
             match serde_json::from_str::<Value>(&line) {
-                Ok(request) => handle_request(request, backend.as_ref()).await,
+                Ok(request) => handle_request(request, backend.as_ref(), surface).await,
                 Err(error) => Some(error_response(
                     Value::Null,
                     -32700,
@@ -93,15 +118,27 @@ where
 }
 
 pub async fn serve_stdio(backend: Arc<dyn ToolBackend>) -> Result<(), ServerError> {
-    serve(
+    serve_stdio_surface(backend, ToolSurface::Operator).await
+}
+
+pub async fn serve_stdio_surface(
+    backend: Arc<dyn ToolBackend>,
+    surface: ToolSurface,
+) -> Result<(), ServerError> {
+    serve_surface(
         BufReader::new(tokio::io::stdin()),
         tokio::io::stdout(),
         backend,
+        surface,
     )
     .await
 }
 
-async fn handle_request(request: Value, backend: &dyn ToolBackend) -> Option<Value> {
+async fn handle_request(
+    request: Value,
+    backend: &dyn ToolBackend,
+    surface: ToolSurface,
+) -> Option<Value> {
     let Some(object) = request.as_object() else {
         return Some(error_response(
             Value::Null,
@@ -139,15 +176,28 @@ async fn handle_request(request: Value, backend: &dyn ToolBackend) -> Option<Val
             Err(message) => error_response(response_id, -32602, message),
         }),
         "tools/list" => id.map(|_| match validate_list_params(object.get("params")) {
-            Ok(()) => success_response(response_id, json!({"tools": tool_definitions()})),
+            Ok(()) => success_response(
+                response_id,
+                json!({"tools": tool_definitions().into_iter().filter(|tool| {
+                    tool["name"].as_str().is_some_and(|name| surface.permits(name))
+                }).collect::<Vec<_>>() }),
+            ),
             Err(message) => error_response(response_id, -32602, message),
         }),
         "tools/call" => {
             let _ = id?;
             Some(match parse_tool_call(object.get("params")) {
-                Ok((name, arguments)) => match backend.call(&name, arguments).await {
-                    Ok(value) => success_response(response_id, successful_tool_result(value)),
-                    Err(error) => success_response(response_id, failed_tool_result(&error)),
+                Ok((name, _arguments)) if !surface.permits(&name) => error_response(
+                    response_id,
+                    -32602,
+                    format!("tool {name} is not available on this MCP surface"),
+                ),
+                Ok((name, arguments)) => match tools::validate_arguments(&name, arguments) {
+                    Ok(arguments) => match backend.call(&name, arguments).await {
+                        Ok(value) => success_response(response_id, successful_tool_result(value)),
+                        Err(error) => success_response(response_id, failed_tool_result(&error)),
+                    },
+                    Err(message) => error_response(response_id, -32602, message),
                 },
                 Err(message) => error_response(response_id, -32602, message),
             })
@@ -209,7 +259,6 @@ fn parse_tool_call(params: Option<&Value>) -> Result<(String, Value), String> {
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let arguments = tools::validate_arguments(name, arguments)?;
     Ok((name.to_owned(), arguments))
 }
 

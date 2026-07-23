@@ -29,7 +29,9 @@ use consensus_daemon::{
     store::SqliteRunStore,
     wire::{DaemonRequest, DaemonResponse},
 };
-use consensus_mcp_server::{BackendError, ToolBackend, serve_stdio};
+use consensus_mcp_server::{
+    BackendError, ToolBackend, ToolSurface, serve_stdio, serve_stdio_surface,
+};
 use installation::{DoctorSurface, inspect_effective_legacy_skill};
 use output::{emit_error, emit_serializable, emit_value, human_json};
 use select::{
@@ -137,6 +139,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
         },
         Command::McpServer => serve_mcp(state_dir).await,
+        Command::ParticipantMcpServer => serve_participant_mcp(state_dir).await,
     }
 }
 
@@ -431,6 +434,15 @@ async fn serve_mcp(state_dir: PathBuf) -> Result<(), CliError> {
     serve_stdio(Arc::new(CliMcpBackend { state_dir }))
         .await
         .map_err(|error| CliError::new("MCP_SERVER_FAILED", error.to_string()))
+}
+
+async fn serve_participant_mcp(state_dir: PathBuf) -> Result<(), CliError> {
+    serve_stdio_surface(
+        Arc::new(CliMcpBackend { state_dir }),
+        ToolSurface::ParticipantPatch,
+    )
+    .await
+    .map_err(|error| CliError::new("MCP_SERVER_FAILED", error.to_string()))
 }
 
 struct CliMcpBackend {
