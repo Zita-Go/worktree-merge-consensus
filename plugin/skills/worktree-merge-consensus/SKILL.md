@@ -266,9 +266,10 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   plugin artifacts, then explicitly call `consensus_resume`. The Run, round,
   branch, old SHA, and failed verification evidence must match; the coordinator
   archives only the empty correction turn, reacquires the lock, preflights the
-  participant server, and retries one request-bound correction patch. The new
-  SHA must advance and all frozen verification reruns. Installation alone does
-  not mutate the blocked Run; every near-match remains terminal.
+  participant server, and retries one request-bound correction patch and
+  correction commit. The new SHA must advance and all frozen verification
+  reruns. Installation alone does not mutate the blocked Run; every near-match
+  remains terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
 Read [references/protocol.md](references/protocol.md) when explaining lifecycle states, acceptance evidence, or recovery behavior.

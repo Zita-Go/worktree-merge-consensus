@@ -197,7 +197,8 @@ only the exact post-0.2.6 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` correction
 blocker. It preserves the same Run, round, branch, old SHA, and failed frozen
 verification evidence; archives only the empty correction turn; reacquires the
 lock; repeats participant preflight; and retries one request-bound correction
-patch. The new SHA must advance and every frozen verification command reruns.
+patch and correction commit. The new SHA must advance and every frozen
+verification command reruns.
 Installing or enabling the operator plugin alone never mutates the blocked Run.
 
 Read [the v2 participant protocol](docs/protocol-v2.md), the

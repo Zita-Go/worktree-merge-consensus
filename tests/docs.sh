@@ -106,6 +106,19 @@ def forbid(path, claim, pattern):
     if re.search(pattern, text_for(path), re.I | re.S):
         errors.append(f"{path} contradicts the participant contract: {claim}")
 
+def missing_patterns(text, patterns):
+    return [pattern for pattern in patterns if not re.search(pattern, text, re.I | re.S)]
+
+def require_text(path, text, claim, patterns):
+    missing = missing_patterns(text, patterns)
+    if missing:
+        errors.append(f"{path} is missing semantic claim {claim}: {missing[0]}")
+
+def recovery_window(path):
+    text = text_for(path)
+    marker = re.search(r"CONTROLLED_PATCH_TOOL_UNAVAILABLE", text)
+    return text[max(0, marker.start() - 500):marker.start() + 1400] if marker else ""
+
 variant_documents = [
     "docs/compatibility.md",
     "docs/protocol-v1.md",
@@ -167,6 +180,67 @@ for path in semantic_documents:
         "installation alone recovers a blocked Run",
         r"installation alone(?![^.]{0,80}(?:never|does not))[^.]{0,120}(?:mutat|recover)",
     )
+
+recovery_claims = [
+    ("exact recovery blocker", [r"CONTROLLED_PATCH_TOOL_UNAVAILABLE"]),
+    ("matching deployment and explicit resume", [
+        r"(?:matching.{0,80}0\.2\.7|0\.2\.7.{0,80}matching)",
+        r"explicit.{0,80}(?:consensus_resume|resume)",
+    ]),
+    ("same recovery identity", [
+        r"same.{0,80}Run",
+        r"round",
+        r"branch",
+        r"(?:old|prior).{0,40}(?:integration )?SHA",
+        r"(?:failed.{0,80}verification|verification.{0,80}failed).{0,80}evidence",
+    ]),
+    ("only the empty correction attempt is archived", [
+        r"(?:empty|side-effect-free).{0,100}correction",
+        r"(?:archive|archives).{0,80}only.{0,120}(?:correction|turn)",
+    ]),
+    ("repository lock reacquisition", [r"reacquir\w*.{0,80}lock"]),
+    ("one request-bound correction patch", [
+        r"(?:at most one|one).{0,120}request-bound.{0,160}(?:corrective|correction).{0,80}patch",
+    ]),
+    ("one request-bound correction commit", [
+        r"(?:at most one|one).{0,180}request-bound.{0,180}(?:corrective|correction).{0,120}patch.{0,80}commit",
+    ]),
+    ("integration SHA advances", [r"(?:SHA.{0,80}(?:must )?advance|advance.{0,80}SHA)"]),
+    ("complete frozen verification reruns", [
+        r"(?:all|every).{0,80}frozen verification.{0,100}(?:rerun|runs again|reruns)",
+    ]),
+    ("installation alone does not mutate or recover", [
+        r"(?:installing|installation).{0,120}alone.{0,160}(?:does not|never).{0,120}(?:mutat|recover)",
+    ]),
+]
+
+for path in semantic_documents:
+    window = recovery_window(path)
+    for claim, patterns in recovery_claims:
+        require_text(path, window, claim, patterns)
+
+chinese_recovery = recovery_window("README.zh-CN.md")
+chinese_claims = [
+    ("exact recovery blocker", [r"CONTROLLED_PATCH_TOOL_UNAVAILABLE"]),
+    ("matching deployment and explicit resume", [r"部署匹配的 0\.2\.7.{0,80}显式调用.{0,80}consensus_resume"]),
+    ("same recovery identity", [r"同一 Run.{0,80}轮次.{0,80}分支.{0,80}旧 SHA.{0,100}失败.{0,80}冻结验证证据"]),
+    ("only the empty correction attempt is archived", [r"只归档空的修正 turn"]),
+    ("repository lock reacquisition", [r"重新获取锁"]),
+    ("one request-bound correction patch", [r"(?:只允许|一次).{0,80}绑定请求的修正补丁"]),
+    ("one correction commit", [r"(?:只允许|一次).{0,80}修正 commit"]),
+    ("integration SHA advances", [r"新 SHA 必须前进"]),
+    ("complete frozen verification reruns", [r"全部冻结验证命令会重新执行"]),
+    ("installation alone does not mutate or recover", [r"仅安装或启用.{0,100}绝不会改变阻塞 Run"]),
+]
+for claim, patterns in chinese_claims:
+    require_text("README.zh-CN.md", chinese_recovery, claim, patterns)
+
+canonical_recovery = recovery_window("docs/compatibility.md")
+for claim, patterns in recovery_claims:
+    for pattern in patterns:
+        mutated = re.sub(pattern, "", canonical_recovery, count=1, flags=re.I | re.S)
+        if not missing_patterns(mutated, patterns):
+            errors.append(f"docs gate mutation probe did not reject removal of {claim}")
 
 if errors:
     print("\n".join(errors), file=sys.stderr)

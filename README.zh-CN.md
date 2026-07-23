@@ -131,7 +131,8 @@ App Server `command/exec` 完成的协调器自有验证。结构化命令结果
 部署匹配的 0.2.7 后，必须显式调用 `consensus_resume`，才可能恢复精确的 post-0.2.6
 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` 修正阻塞。恢复保留同一 Run、轮次、分支、旧 SHA 与失败的
 冻结验证证据；只归档空的修正 turn，重新获取锁、再次预检参与服务并重试一次绑定请求的修正补丁。
-新 SHA 必须前进，全部冻结验证命令会重新执行。仅安装或启用操作者插件绝不会改变阻塞 Run。
+只允许一次修正 commit。新 SHA 必须前进，全部冻结验证命令会重新执行。仅安装或启用操作者插件
+绝不会改变阻塞 Run。
 
 精确边界见 [v2 参与任务协议](docs/protocol-v2.md)、[旧版 v1 协议](docs/protocol-v1.md)、
 [兼容性策略](docs/compatibility.md)与[安全策略](SECURITY.md)。
