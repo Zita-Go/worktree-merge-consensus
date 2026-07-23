@@ -183,6 +183,23 @@ v0.2.5 post-migration completion collision. That repair preserves the active
 turn, Run, integration branch and SHA, source refs, patch record, merge, and
 commit; it neither sends a second resume nor executes a test during repair.
 
+Version 0.2.7 makes participant patch-tool availability coordinator-owned. On
+every Primary integration resume, the coordinator injects the task-scoped
+`worktreeMergeConsensusParticipant` server through `participant-mcp-server`,
+then calls `mcpServerStatus/list` with `detail: "toolsAndAuthOnly"` before
+`turn/start`. That server must expose exactly `consensus_apply_patch`; the
+operator plugin still exposes eight tools, but its visibility does not prove
+participant visibility. Ordinary and non-integration resumes remain
+thread-ID-only.
+
+After a matching 0.2.7 deployment, explicit `consensus_resume` may recover
+only the exact post-0.2.6 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` correction
+blocker. It preserves the same Run, round, branch, old SHA, and failed frozen
+verification evidence; archives only the empty correction turn; reacquires the
+lock; repeats participant preflight; and retries one request-bound correction
+patch. The new SHA must advance and every frozen verification command reruns.
+Installing or enabling the operator plugin alone never mutates the blocked Run.
+
 Read [the v2 participant protocol](docs/protocol-v2.md), the
 [legacy v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
@@ -211,8 +228,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.6-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.6-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.7-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.7-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -251,6 +268,11 @@ including `consensus_list_worktrees`, launch and control the persistent
 coordinator. The eighth, `consensus_apply_patch`, is a participant-only,
 request-bound write capability described below. It does not relay review turns
 through a third agent.
+
+The operator plugin's eight tools are not the Primary participant's tool
+inventory. The coordinator injects and preflights the task-scoped participant
+server before each Primary integration turn; plugin installation alone does not
+change a blocked Run.
 
 Names such as `consensus_doctor` are MCP tool names, not shell executables.
 Codex starts the plugin server as `codex-consensus mcp-server`; the equivalent

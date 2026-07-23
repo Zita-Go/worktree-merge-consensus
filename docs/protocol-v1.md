@@ -55,12 +55,28 @@ start detached because it is frozen by SHA; an accepted integration result must
 be attached to its authorized new local branch.
 
 Before each protocol turn, the daemon waits for the target task to become idle,
-resumes it by its frozen task ID, and only then sends `turn/start`. Reading task
+resumes it by its frozen task ID, and only then sends `turn/start`. A Primary
+integration resume additionally carries coordinator-owned task-scoped MCP
+configuration for `worktreeMergeConsensusParticipant`; it launches the hidden
+`participant-mcp-server` command and must expose exactly
+`consensus_apply_patch`. The coordinator calls `mcpServerStatus/list` with the
+task ID and `detail: "toolsAndAuthOnly"` before every such turn. The operator
+plugin's eight-tool inventory is separate and never proves participant tool
+visibility. Ordinary, non-integration resumes remain task-ID-only. Reading task
 history is not a substitute for resuming a task that App Server reports as
 `notLoaded`. Version 0.1.26 treats this as a bounded inactivity wait: the
 default idle window is 30 minutes and renews only when canonical task status or
 turn history changes. A task with no canonical progress pauses with
 `COMMUNICATION_FAILURE`; cancellation remains available while waiting.
+
+For legacy v1 Runs, version 0.2.7 permits only the exact post-0.2.6
+`CONTROLLED_PATCH_TOOL_UNAVAILABLE` correction recovery. Explicit resume after
+a matching 0.2.7 deployment preserves the same Run, round, integration branch,
+old SHA, and failed frozen verification evidence; archives only the empty
+side-effect-free correction turn; reacquires the lock; repeats participant
+preflight; and permits one request-bound corrective patch and commit. The
+integration SHA must advance and all frozen verification reruns. Installing or
+enabling the operator plugin alone never mutates a blocked Run.
 
 Preflight reason codes include `UNREGISTERED_WORKTREE`,
 `DUPLICATE_WORKTREE`, `REPOSITORY_MISMATCH`, `DIRTY_WORKTREE`, and

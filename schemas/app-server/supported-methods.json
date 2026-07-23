@@ -12,7 +12,8 @@
     "turn/interrupt",
     "command/exec",
     "config/read",
-    "config/batchWrite"
+    "config/batchWrite",
+    "mcpServerStatus/list"
   ],
   "requiredNotifications": [
     "thread/status/changed",
@@ -25,7 +26,7 @@
     "initialize": ["clientInfo", "capabilities"],
     "thread/list": [],
     "thread/read": ["threadId", "includeTurns"],
-    "thread/resume": ["threadId"],
+    "thread/resume": ["threadId", "config"],
     "turn/start": [
       "threadId",
       "input",
@@ -45,7 +46,8 @@
       "sandboxPolicy"
     ],
     "config/read": ["includeLayers"],
-    "config/batchWrite": ["edits", "reloadUserConfig"]
+    "config/batchWrite": ["edits", "reloadUserConfig"],
+    "mcpServerStatus/list": ["threadId", "detail"]
   },
   "initializeCapabilities": {
     "experimentalApi": true

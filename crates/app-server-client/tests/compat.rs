@@ -56,7 +56,8 @@ fn required_method_contract_is_explicit_and_pinned() {
             "turn/interrupt",
             "command/exec",
             "config/read",
-            "config/batchWrite"
+            "config/batchWrite",
+            "mcpServerStatus/list"
         ]
     );
 }
@@ -113,8 +114,17 @@ fn pinned_fixture_keeps_open_ended_version_gate_and_unattended_execution_contrac
             "turn/interrupt",
             "command/exec",
             "config/read",
-            "config/batchWrite"
+            "config/batchWrite",
+            "mcpServerStatus/list"
         ])
+    );
+    assert_eq!(
+        fixture["requestShape"]["thread/resume"],
+        serde_json::json!(["threadId", "config"])
+    );
+    assert_eq!(
+        fixture["requestShape"]["mcpServerStatus/list"],
+        serde_json::json!(["threadId", "detail"])
     );
     assert_eq!(
         fixture["requestShape"]["command/exec"],

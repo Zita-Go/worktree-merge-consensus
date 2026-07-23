@@ -12,6 +12,7 @@ pub const REQUIRED_METHODS: &[&str] = &[
     "command/exec",
     "config/read",
     "config/batchWrite",
+    "mcpServerStatus/list",
 ];
 
 const METHOD_FIXTURE: &str = include_str!("../../../schemas/app-server/supported-methods.json");

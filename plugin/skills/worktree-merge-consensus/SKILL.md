@@ -61,6 +61,15 @@ Primary integration prompt may call it with the exact active run ID and request
 hash; its daemon-side policy is described under recovery below. Never call it
 manually from this launcher skill.
 
+Release 0.2.7 makes that participant capability coordinator-owned rather than
+an inference from the operator plugin. For every Primary integration turn, the
+coordinator injects the task-scoped `worktreeMergeConsensusParticipant` server
+through `participant-mcp-server` and preflights `mcpServerStatus/list` with
+`detail: "toolsAndAuthOnly"`. The participant server must expose exactly
+`consensus_apply_patch`; the operator plugin's eight tools do not prove that
+the participant task can see it. Ordinary and non-integration task resumes do
+not receive this configuration.
+
 Use those CLI commands only for diagnostics or when the user explicitly requests the CLI surface. If no `consensus_*` MCP tools are exposed, run `codex mcp list --json`, `command -v codex-consensus`, and `codex-consensus doctor` when shell access is available. Report whether `worktreeMergeConsensus` is absent, disabled, or unable to start, then stop. A successful CLI doctor does not prove that the plugin MCP tools were loaded. Do not search for a `consensus_doctor` binary or substitute ordinary task/thread tools.
 
 ## Launch
@@ -251,6 +260,14 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   the daemon once. Do not call `consensus_resume` again. v0.2.6 revalidates and
   continues the same Run during startup; observe it with `consensus_status`.
   Every near-match remains blocked without mutation.
+- If the exact post-v0.2.6 production Run is `BLOCKED` with
+  `CONTROLLED_PATCH_TOOL_UNAVAILABLE`, install matching v0.2.7 binary and
+  plugin artifacts, then explicitly call `consensus_resume`. The Run, round,
+  branch, old SHA, and failed verification evidence must match; the coordinator
+  archives only the empty correction turn, reacquires the lock, preflights the
+  participant server, and retries one request-bound correction patch. The new
+  SHA must advance and all frozen verification reruns. Installation alone does
+  not mutate the blocked Run; every near-match remains terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
 Read [references/protocol.md](references/protocol.md) when explaining lifecycle states, acceptance evidence, or recovery behavior.

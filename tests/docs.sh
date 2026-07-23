@@ -67,11 +67,29 @@ for marker in dangerFullAccess command/exec VERIFICATION_EXECUTION_UNCERTAIN 'tr
   grep -Fq "$marker" SECURITY.md || fail "SECURITY.md is missing the $marker boundary"
 done
 
-for method in turn/interrupt command/exec config/read config/batchWrite; do
+for method in turn/interrupt command/exec config/read config/batchWrite mcpServerStatus/list; do
   grep -Fq "\"$method\"" schemas/app-server/supported-methods.json ||
     fail "App Server fixture is missing $method"
   grep -Fq "\`$method\`" docs/compatibility.md ||
     fail "compatibility policy is missing $method"
+done
+
+for document in \
+  README.md \
+  README.zh-CN.md \
+  docs/compatibility.md \
+  docs/protocol-v1.md \
+  docs/protocol-v2.md \
+  plugin/skills/worktree-merge-consensus/SKILL.md \
+  plugin/skills/worktree-merge-consensus/references/protocol.md; do
+  for marker in \
+    mcpServerStatus/list \
+    worktreeMergeConsensusParticipant \
+    participant-mcp-server \
+    CONTROLLED_PATCH_TOOL_UNAVAILABLE; do
+    grep -Fq "$marker" "$document" ||
+      fail "$document is missing the participant injection contract: $marker"
+  done
 done
 
 for notification in item/started item/completed turn/completed; do

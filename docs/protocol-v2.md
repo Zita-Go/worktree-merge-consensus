@@ -153,6 +153,24 @@ the stale archived event rows and continuing the same action. This is not a
 second resume or migration and cannot create another patch, merge, commit, or
 verification execution during repair. Any near-match remains blocked.
 
+Release 0.2.7 injects the task-scoped
+`worktreeMergeConsensusParticipant` server only when resuming a Primary
+integration task. It launches `participant-mcp-server`, and the coordinator
+requires `mcpServerStatus/list` with the task ID and `detail:
+"toolsAndAuthOnly"` before every integration `turn/start`; the discovered tool
+inventory must be exactly `consensus_apply_patch`. The operator plugin's eight
+tools do not prove this participant visibility. A missing or expanded
+participant inventory fails closed before the turn starts.
+
+After a matching 0.2.7 deployment, explicit resume may recover only the exact
+post-0.2.6 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` correction blocker: the same
+Run, round, branch, old integration SHA, and failed frozen verification
+evidence, with one otherwise empty side-effect-free correction turn. Recovery
+archives only that turn, reacquires the Run lock, repeats participant preflight,
+and retries the same request. It permits one request-bound corrective patch and
+commit only; the integration SHA must advance and all frozen verification is
+rerun. Installing or enabling the operator plugin never changes a blocked Run.
+
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the
 [legacy v1 protocol](protocol-v1.md).

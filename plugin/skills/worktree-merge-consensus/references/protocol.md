@@ -35,6 +35,17 @@ response to its pending task turn, computes plan identity, and derives branch,
 SHA, changed files, ancestry, source-ref stability, and test evidence itself.
 Valid v1 JSON envelopes remain accepted only as a migration fallback.
 
+## Participant patch-tool preflight
+
+For every Primary integration turn, the coordinator resumes the existing task
+with task-scoped `worktreeMergeConsensusParticipant` MCP configuration that
+launches `participant-mcp-server`. It then calls `mcpServerStatus/list` with
+that task ID and `detail: "toolsAndAuthOnly"` before `turn/start`. The only
+accepted participant tool inventory is `consensus_apply_patch`. The operator
+plugin exposes eight tools for launch and control; that separate inventory does
+not prove participant visibility. Ordinary and non-integration resumes remain
+task-ID-only.
+
 ## Statuses
 
 - `RUNNING`: the daemon can dispatch the next deterministic action.
@@ -157,6 +168,15 @@ journaled as STARTED before dispatch and COMPLETED after its structured result.
 An exact COMPLETED row is reused after restart; a STARTED row produces
 `VERIFICATION_EXECUTION_UNCERTAIN` and is never executed a second time
 automatically.
+
+Version 0.2.7 permits an explicit same-Run recovery only for the exact
+post-0.2.6 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` correction blocker. It preserves
+the same Run, round, integration branch, old SHA, and failed frozen verification
+evidence; archives only the empty side-effect-free correction turn; reacquires
+the lock; and repeats participant preflight. One request-bound correction patch
+and commit may advance the SHA, after which every frozen verification command
+runs again. Matching 0.2.7 installation alone does not mutate the blocked Run;
+explicit resume is required and every near-match remains terminal.
 
 The same release contains one migration only for the exact legacy 0.2.4
 blocked-verification history: the same Run, Primary task, request, round,

@@ -39,6 +39,7 @@ and requires these JSON-RPC methods:
 - `command/exec`
 - `config/read`
 - `config/batchWrite`
+- `mcpServerStatus/list`
 
 It consumes `thread/status/changed`, `turn/started`, and `turn/completed`
 notifications. Task reads include turns. Coordinator prompts require exactly
@@ -157,6 +158,28 @@ history and the unchanged Git result are revalidated before mutation. The
 repair removes only stale archived event rows, reacquires the existing Run's
 lock, and restores its already-started verification action; it does not archive
 another turn, dispatch another resume, or execute a verification command.
+
+Version 0.2.7 adds task-scoped participant patch-tool injection for Primary
+integration turns. The coordinator, not the operator plugin, resumes the
+existing Primary task with the `worktreeMergeConsensusParticipant` MCP server,
+whose hidden command is `participant-mcp-server` and whose inventory must be
+exactly `consensus_apply_patch`. Before every Primary integration `turn/start`,
+it calls `mcpServerStatus/list` for that task with `detail:
+"toolsAndAuthOnly"`; missing, malformed, or additional tools fail closed before
+the turn starts. Ordinary and non-integration resumes remain `threadId`-only.
+The operator plugin's eight tools are not evidence that the participant server
+is visible: coordinator-owned injection and per-turn preflight are required.
+
+Version 0.2.7 also permits explicit recovery of only the exact production
+blocker left after the 0.2.6 recovery: the same blocked Run, correction round,
+integration branch, prior integration SHA, and failed frozen verification
+evidence, with `CONTROLLED_PATCH_TOOL_UNAVAILABLE` and an otherwise empty,
+side-effect-free correction turn. After a matching 0.2.7 deployment, explicit
+`consensus_resume` archives only that correction turn, atomically reacquires
+the Run lock, preflights the participant server, and retries the same request.
+At most one request-bound corrective patch and commit are allowed; the
+integration SHA must advance and every frozen verification command runs again.
+Installing or enabling the operator plugin alone never mutates a blocked Run.
 
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
 fixed task ID. `thread/read` can return persisted history for a `notLoaded`

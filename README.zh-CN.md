@@ -122,6 +122,17 @@ App Server `command/exec` 完成的协调器自有验证。结构化命令结果
 迁移后完成事件唯一键碰撞执行一次故障关闭式启动修复。修复保留当前 turn、Run、集成分支与 SHA、
 源引用、补丁记录、merge 和 commit；修复本身不会发送第二次 resume，也不会执行测试。
 
+0.2.7 将参与任务补丁工具的可见性明确交给协调器：每次恢复主修集成任务时，协调器都会通过
+`participant-mcp-server` 注入任务作用域的 `worktreeMergeConsensusParticipant` 服务，并在
+`turn/start` 前以 `detail: "toolsAndAuthOnly"` 调用 `mcpServerStatus/list`。该服务必须只暴露
+`consensus_apply_patch`；操作者插件仍有 8 个工具，但其可见并不能证明主修参与任务可见。普通和
+非集成恢复仍只传 task ID。
+
+部署匹配的 0.2.7 后，必须显式调用 `consensus_resume`，才可能恢复精确的 post-0.2.6
+`CONTROLLED_PATCH_TOOL_UNAVAILABLE` 修正阻塞。恢复保留同一 Run、轮次、分支、旧 SHA 与失败的
+冻结验证证据；只归档空的修正 turn，重新获取锁、再次预检参与服务并重试一次绑定请求的修正补丁。
+新 SHA 必须前进，全部冻结验证命令会重新执行。仅安装或启用操作者插件绝不会改变阻塞 Run。
+
 精确边界见 [v2 参与任务协议](docs/protocol-v2.md)、[旧版 v1 协议](docs/protocol-v1.md)、
 [兼容性策略](docs/compatibility.md)与[安全策略](SECURITY.md)。
 
@@ -144,8 +155,8 @@ App Server `command/exec` 完成的协调器自有验证。结构化命令结果
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.6-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.6-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.7-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.7-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 v0.1.0 的 GNU 产物要求 GLIBC 2.39，现已停止推荐；受支持的 Linux 主机请使用
@@ -180,6 +191,9 @@ codex-consensus doctor
 `consensus_list_worktrees`）用于启动和控制持久协调器；第 8 个
 `consensus_apply_patch` 是下文说明的、仅供内部参与 turn 使用且绑定精确请求的写入能力。
 它不会引入第三个 agent 代为转发复核对话。
+
+操作者插件的 8 个工具不是主修参与任务的工具清单。协调器会在每个主修集成 turn 前注入并预检
+任务作用域的参与服务；仅安装插件不会改变已经阻塞的 Run。
 
 `consensus_doctor` 等名称是 MCP 工具名，不是 shell 可执行文件。Codex 会通过
 `codex-consensus mcp-server` 启动插件服务；对应的终端诊断命令是
