@@ -205,6 +205,41 @@ fn pause_and_resume_preserve_the_pending_action() {
 }
 
 #[test]
+fn diagnostic_binding_identity_is_backward_compatible() {
+    let legacy: RunDiagnostic = serde_json::from_value(json!({
+        "code": "COMMUNICATION_FAILURE",
+        "detail": "legacy diagnostic",
+        "operation": "thread/read",
+        "action": "REQUEST_PRIMARY_PLAN",
+        "role": "PRIMARY",
+        "thread_id": "primary-thread"
+    }))
+    .unwrap();
+    assert_eq!(legacy.source_thread_id, None);
+    assert_eq!(legacy.effective_thread_id, None);
+    assert_eq!(legacy.participant_binding_generation, None);
+    assert_eq!(legacy.participant_binding_mode, None);
+    assert_eq!(legacy.participant_server, None);
+
+    let current = RunDiagnostic {
+        code: "PATCH_TOOL_UNAVAILABLE".into(),
+        detail: "mirror capability preflight failed".into(),
+        operation: Some("mcpServerStatus/list".into()),
+        action: NextAction::RequestPrimaryPlan,
+        role: Some(Role::Primary),
+        thread_id: Some("primary-consensus-mirror-1".into()),
+        source_thread_id: Some("primary-thread".into()),
+        effective_thread_id: Some("primary-consensus-mirror-1".into()),
+        participant_binding_generation: Some(1),
+        participant_binding_mode: Some("EPHEMERAL_FORK".into()),
+        participant_server: Some("worktreeMergeConsensusParticipant".into()),
+    };
+    let round_trip: RunDiagnostic =
+        serde_json::from_value(serde_json::to_value(&current).unwrap()).unwrap();
+    assert_eq!(round_trip, current);
+}
+
+#[test]
 fn legacy_invalid_test_block_restores_only_its_read_only_declaration_action() {
     let mut state = RunState::new(facts());
     state.record_error(RunDiagnostic {
@@ -214,6 +249,11 @@ fn legacy_invalid_test_block_restores_only_its_read_only_declaration_action() {
         action: NextAction::RequestPrimaryContract,
         role: Some(Role::Primary),
         thread_id: Some("primary-thread".into()),
+        source_thread_id: None,
+        effective_thread_id: None,
+        participant_binding_generation: None,
+        participant_binding_mode: None,
+        participant_server: None,
     });
     state.block("INVALID_TEST_COMMAND");
 
@@ -237,6 +277,11 @@ fn blocked_preintegration_invalid_plan_verdict_restores_the_exact_action() {
         action: NextAction::RequestReviewerPlanVerdict,
         role: Some(Role::Reviewer),
         thread_id: Some("reviewer-thread".into()),
+        source_thread_id: None,
+        effective_thread_id: None,
+        participant_binding_generation: None,
+        participant_binding_mode: None,
+        participant_server: None,
     });
     state.block("INVALID_RESPONSE");
 
@@ -262,6 +307,11 @@ fn blocked_postintegration_invalid_response_is_not_retryable() {
         action: NextAction::RequestReviewerResultVerdict,
         role: Some(Role::Reviewer),
         thread_id: Some("reviewer-thread".into()),
+        source_thread_id: None,
+        effective_thread_id: None,
+        participant_binding_generation: None,
+        participant_binding_mode: None,
+        participant_server: None,
     });
     state.block("INVALID_RESPONSE");
 
@@ -284,6 +334,11 @@ fn completed_integration_with_an_invalid_result_can_retry_only_its_report_turn()
         action: NextAction::RequestPrimaryIntegration,
         role: Some(Role::Primary),
         thread_id: Some(state.facts.primary_thread_id.clone()),
+        source_thread_id: None,
+        effective_thread_id: None,
+        participant_binding_generation: None,
+        participant_binding_mode: None,
+        participant_server: None,
     });
     state.block("INVALID_RESPONSE");
 
@@ -316,6 +371,11 @@ fn verification_without_execution_restores_only_the_verification_action() {
         action: NextAction::RequestPrimaryVerification,
         role: Some(Role::Primary),
         thread_id: Some("primary-thread".into()),
+        source_thread_id: None,
+        effective_thread_id: None,
+        participant_binding_generation: None,
+        participant_binding_mode: None,
+        participant_server: None,
     });
     state.block("TEST_FAILURE");
 
@@ -349,6 +409,11 @@ fn verification_completion_collision_restores_only_the_inflight_verification_act
         action: NextAction::RequestPrimaryVerification,
         role: Some(Role::Primary),
         thread_id: Some("primary-thread".into()),
+        source_thread_id: None,
+        effective_thread_id: None,
+        participant_binding_generation: None,
+        participant_binding_mode: None,
+        participant_server: None,
     });
     state.block("DATABASE_ERROR");
 
@@ -655,6 +720,11 @@ fn integration_invalid_response_retry_rejects_an_already_accepted_result() {
         action: NextAction::RequestPrimaryIntegration,
         role: Some(Role::Primary),
         thread_id: Some(state.facts.primary_thread_id.clone()),
+        source_thread_id: None,
+        effective_thread_id: None,
+        participant_binding_generation: None,
+        participant_binding_mode: None,
+        participant_server: None,
     });
     state.block("INVALID_RESPONSE");
 
@@ -723,6 +793,11 @@ fn side_effect_free_primary_integration_forbidden_operation_is_retryable() {
         action: NextAction::RequestPrimaryIntegration,
         role: Some(Role::Primary),
         thread_id: Some(state.facts.primary_thread_id.clone()),
+        source_thread_id: None,
+        effective_thread_id: None,
+        participant_binding_generation: None,
+        participant_binding_mode: None,
+        participant_server: None,
     });
     state.block("FORBIDDEN_OPERATION");
 
@@ -747,6 +822,11 @@ fn forbidden_operation_after_integration_identity_is_not_retryable() {
         action: NextAction::RequestPrimaryIntegration,
         role: Some(Role::Primary),
         thread_id: Some(state.facts.primary_thread_id.clone()),
+        source_thread_id: None,
+        effective_thread_id: None,
+        participant_binding_generation: None,
+        participant_binding_mode: None,
+        participant_server: None,
     });
     state.block("FORBIDDEN_OPERATION");
 

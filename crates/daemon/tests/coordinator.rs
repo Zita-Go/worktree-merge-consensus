@@ -655,6 +655,156 @@ async fn invalid_primary_mirror_fails_before_any_model_turn() {
 }
 
 #[tokio::test]
+async fn mirror_capability_failure_records_binding_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::new(conflict_free_replies())
+            .without_primary_participant()
+            .with_participant_failure_after_status_calls(3),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let blocked = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(blocked.status, RunStatus::Blocked);
+    assert_eq!(
+        blocked.reason_code.as_deref(),
+        Some("PATCH_TOOL_UNAVAILABLE")
+    );
+    let diagnostic = blocked.last_error.unwrap();
+    assert_eq!(diagnostic.source_thread_id.as_deref(), Some("primary"));
+    assert_eq!(
+        diagnostic.effective_thread_id.as_deref(),
+        Some("primary-consensus-mirror-1")
+    );
+    assert_eq!(diagnostic.participant_binding_generation, Some(1));
+    assert_eq!(
+        diagnostic.participant_binding_mode.as_deref(),
+        Some("EPHEMERAL_FORK")
+    );
+    assert_eq!(
+        diagnostic.participant_server.as_deref(),
+        Some(PARTICIPANT_MCP_SERVER)
+    );
+}
+
+#[tokio::test]
+async fn missing_mirror_is_recreated_only_after_a_completed_action_boundary() {
+    let temp = tempfile::tempdir().unwrap();
+    let store_path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&store_path).unwrap();
+    let app = Arc::new(
+        FakeAppServer::new(conflict_free_replies())
+            .without_primary_participant()
+            .with_remove_mirror_after_request(2),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let result = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Accepted);
+    let forks = app.forks();
+    assert_eq!(forks.len(), 2);
+    assert_eq!(forks[0].1, "primary-consensus-mirror-1");
+    assert_eq!(forks[1].1, "primary-consensus-mirror-2");
+    let binding = store.active_primary_binding(RUN_ID).unwrap().unwrap();
+    assert_eq!(binding.generation, 2);
+    assert_eq!(
+        binding.effective_primary_thread_id,
+        "primary-consensus-mirror-2"
+    );
+    assert!(
+        app.request_order()
+            .contains(&"primary-consensus-mirror-1:REQUEST_PRIMARY_CONTRACT".to_owned())
+    );
+    assert!(
+        app.request_order()
+            .contains(&"primary-consensus-mirror-2:REQUEST_PRIMARY_PLAN".to_owned())
+    );
+    assert!(
+        !app.request_order()
+            .iter()
+            .any(|request| request == "primary:REQUEST_PRIMARY_PLAN")
+    );
+    let contract_generation = Connection::open(store_path)
+        .unwrap()
+        .query_row(
+            "SELECT participant_binding_generation
+             FROM turns
+             WHERE run_id = ?1 AND role = 'PRIMARY' AND phase = 'CONTRACT'",
+            [RUN_ID],
+            |row| row.get::<_, Option<u32>>(0),
+        )
+        .unwrap();
+    assert_eq!(contract_generation, Some(1));
+}
+
+#[tokio::test]
+async fn missing_mirror_with_uncertain_turn_is_never_reforked() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::new(conflict_free_replies())
+            .without_primary_participant()
+            .with_remove_mirror_after_request(1),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let paused = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+    assert_eq!(paused.reason_code.as_deref(), Some("COMMUNICATION_FAILURE"));
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    assert_eq!(
+        pending.thread_id.as_deref(),
+        Some("primary-consensus-mirror-1")
+    );
+    assert_eq!(pending.participant_binding_generation, Some(1));
+    assert_eq!(app.forks().len(), 1);
+
+    let error = coordinator.resume(RUN_ID).await.unwrap_err();
+
+    assert_eq!(error.code(), "COMMUNICATION_FAILURE");
+    assert_eq!(app.forks().len(), 1);
+    assert_eq!(
+        store
+            .active_primary_binding(RUN_ID)
+            .unwrap()
+            .unwrap()
+            .generation,
+        1
+    );
+}
+
+#[tokio::test]
 async fn participant_patch_inventory_mismatch_blocks_before_integration_turn() {
     for inventory in [
         ParticipantInventory::MissingServer,
@@ -1424,7 +1574,10 @@ fn set_turn_capability_generation(path: &Path, generation: Option<&str>) {
         .unwrap()
         .execute(
             "UPDATE turns
-             SET capability_generation = ?1
+             SET capability_generation = ?1,
+                 participant_binding_generation =
+                    CASE WHEN ?1 IS NULL THEN NULL
+                         ELSE participant_binding_generation END
              WHERE run_id = ?2 AND delivery_state IN ('PENDING', 'SENT')",
             params![generation, RUN_ID],
         )
@@ -1468,6 +1621,99 @@ async fn side_effect_free_execution_tool_blocker_retries_the_same_integration_ac
             .count(),
         2
     );
+}
+
+#[tokio::test]
+async fn recorded_primary_turns_require_their_exact_binding_generation() {
+    for mutation in [
+        "valid",
+        "older-generation",
+        "forged-thread",
+        "forged-generation",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let store_path = temp.path().join("state.db");
+        let store = SqliteRunStore::open(&store_path).unwrap();
+        let mut replies = conflict_free_replies();
+        replies.insert(4, execution_tool_unavailable_blocker());
+        let app = Arc::new(FakeAppServer::new(replies).without_primary_participant());
+        let coordinator = Coordinator::new(
+            Arc::clone(&app),
+            store.clone(),
+            Arc::new(RecordingSafety::default()),
+            fast_options(),
+        );
+        coordinator
+            .start(fixture_run(), start_request())
+            .await
+            .unwrap();
+        let blocked = coordinator.drive(RUN_ID).await.unwrap();
+        assert_eq!(
+            blocked.reason_code.as_deref(),
+            Some("EXECUTION_TOOL_UNAVAILABLE")
+        );
+        let accepted = store.latest_accepted_turn(RUN_ID).unwrap().unwrap();
+        assert_eq!(
+            accepted.thread_id, "primary-consensus-mirror-1",
+            "mutation={mutation}"
+        );
+        assert_eq!(accepted.participant_binding_generation, Some(1));
+        match mutation {
+            "valid" => {}
+            "older-generation" => {
+                let newer = store
+                    .activate_primary_binding(
+                        RUN_ID,
+                        "primary",
+                        "primary-consensus-mirror-2",
+                        PrimaryBindingMode::EphemeralFork,
+                        PARTICIPANT_MCP_SERVER,
+                    )
+                    .unwrap();
+                assert_eq!(newer.generation, 2);
+            }
+            "forged-thread" => {
+                Connection::open(&store_path)
+                    .unwrap()
+                    .execute(
+                        "UPDATE turns SET thread_id = 'forged-mirror'
+                         WHERE run_id = ?1 AND delivery_state = 'ACCEPTED'",
+                        [RUN_ID],
+                    )
+                    .unwrap();
+            }
+            "forged-generation" => {
+                Connection::open(&store_path)
+                    .unwrap()
+                    .execute(
+                        "UPDATE turns SET participant_binding_generation = 999
+                         WHERE run_id = ?1 AND delivery_state = 'ACCEPTED'",
+                        [RUN_ID],
+                    )
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+
+        if mutation == "valid" {
+            let accepted = coordinator.resume(RUN_ID).await.unwrap();
+            assert_eq!(accepted.status, RunStatus::Accepted);
+        } else if mutation == "older-generation" {
+            let resumed = coordinator.prepare_resume(RUN_ID).await.unwrap();
+            assert_eq!(resumed.status, RunStatus::Running);
+            assert_eq!(
+                store
+                    .active_primary_binding(RUN_ID)
+                    .unwrap()
+                    .unwrap()
+                    .generation,
+                2
+            );
+        } else {
+            let error = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
+            assert_eq!(error.code(), "HISTORY_UNAVAILABLE", "mutation={mutation}");
+        }
+    }
 }
 
 #[tokio::test]
@@ -3805,6 +4051,182 @@ async fn controlled_patch_requires_the_exact_active_request_and_succeeds_only_on
 }
 
 #[tokio::test]
+async fn controlled_patch_on_mirror_records_exact_binding_provenance() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::deferred(conflict_free_replies(), 5, DeferMode::Hold)
+            .without_primary_participant(),
+    );
+    let safety = Arc::new(PatchSafety::default());
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::clone(&safety),
+        CoordinatorOptions {
+            wait_timeout: Duration::from_secs(2),
+            poll_interval: Duration::from_millis(1),
+            communication_attempts: 1,
+            participant_mcp_executable: participant_mcp_executable(),
+        },
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let driver = {
+        let coordinator = coordinator.clone();
+        tokio::spawn(async move { coordinator.drive(RUN_ID).await })
+    };
+    wait_for_request_count(&app, 5).await;
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+
+    assert_eq!(
+        pending.thread_id.as_deref(),
+        Some("primary-consensus-mirror-1")
+    );
+    assert_eq!(pending.participant_binding_generation, Some(1));
+    coordinator
+        .apply_patch(
+            RUN_ID,
+            &pending.message_hash,
+            "diff --git a/src/lib.rs b/src/lib.rs",
+        )
+        .await
+        .unwrap();
+    let record = store
+        .successful_patch_record(RUN_ID, &pending.message_hash)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.source_primary_thread_id.as_deref(), Some("primary"));
+    assert_eq!(
+        record.effective_primary_thread_id.as_deref(),
+        Some("primary-consensus-mirror-1")
+    );
+    assert_eq!(record.participant_binding_generation, Some(1));
+    assert_eq!(safety.patch_calls.load(Ordering::SeqCst), 1);
+
+    coordinator.cancel(RUN_ID).await.unwrap();
+    assert_eq!(driver.await.unwrap().unwrap().status, RunStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn controlled_patch_rejects_each_binding_identity_mutation() {
+    for mutation in [
+        "pending-source",
+        "pending-generation",
+        "active-generation",
+        "binding-source",
+        "missing-generation",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let store_path = temp.path().join("state.db");
+        let store = SqliteRunStore::open(&store_path).unwrap();
+        let app = Arc::new(
+            FakeAppServer::deferred(conflict_free_replies(), 5, DeferMode::Hold)
+                .without_primary_participant(),
+        );
+        let safety = Arc::new(PatchSafety::default());
+        let coordinator = Coordinator::new(
+            Arc::clone(&app),
+            store.clone(),
+            Arc::clone(&safety),
+            CoordinatorOptions {
+                wait_timeout: Duration::from_secs(2),
+                poll_interval: Duration::from_millis(1),
+                communication_attempts: 1,
+                participant_mcp_executable: participant_mcp_executable(),
+            },
+        );
+        coordinator
+            .start(fixture_run(), start_request())
+            .await
+            .unwrap();
+        let driver = {
+            let coordinator = coordinator.clone();
+            tokio::spawn(async move { coordinator.drive(RUN_ID).await })
+        };
+        wait_for_request_count(&app, 5).await;
+        let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+        let connection = Connection::open(&store_path).unwrap();
+        match mutation {
+            "pending-source" => {
+                connection
+                    .execute(
+                        "UPDATE turns SET thread_id = 'primary'
+                         WHERE run_id = ?1 AND delivery_state = 'SENT'",
+                        [RUN_ID],
+                    )
+                    .unwrap();
+            }
+            "pending-generation" => {
+                connection
+                    .execute(
+                        "UPDATE turns SET participant_binding_generation = 999
+                         WHERE run_id = ?1 AND delivery_state = 'SENT'",
+                        [RUN_ID],
+                    )
+                    .unwrap();
+            }
+            "active-generation" => {
+                connection
+                    .execute(
+                        "UPDATE primary_participant_bindings SET active = 0
+                         WHERE run_id = ?1 AND active = 1",
+                        [RUN_ID],
+                    )
+                    .unwrap();
+                connection
+                    .execute(
+                        "INSERT INTO primary_participant_bindings (
+                            run_id, generation, source_primary_thread_id,
+                            effective_primary_thread_id, mode, participant_server,
+                            active, created_at, verified_at
+                         ) VALUES (?1, 2, 'primary', 'primary-consensus-mirror-2',
+                            'EPHEMERAL_FORK', ?2, 1, 1, 1)",
+                        params![RUN_ID, PARTICIPANT_MCP_SERVER],
+                    )
+                    .unwrap();
+            }
+            "binding-source" => {
+                connection
+                    .execute(
+                        "UPDATE primary_participant_bindings
+                         SET source_primary_thread_id = 'forged-primary'
+                         WHERE run_id = ?1 AND active = 1",
+                        [RUN_ID],
+                    )
+                    .unwrap();
+            }
+            "missing-generation" => {
+                connection
+                    .execute(
+                        "UPDATE turns SET participant_binding_generation = NULL
+                         WHERE run_id = ?1 AND delivery_state = 'SENT'",
+                        [RUN_ID],
+                    )
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+
+        let error = coordinator
+            .apply_patch(
+                RUN_ID,
+                &pending.message_hash,
+                "diff --git a/src/lib.rs b/src/lib.rs",
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), "PATCH_NOT_AUTHORIZED", "mutation={mutation}");
+        assert_eq!(safety.patch_calls.load(Ordering::SeqCst), 0);
+        coordinator.cancel(RUN_ID).await.unwrap();
+        assert_eq!(driver.await.unwrap().unwrap().status, RunStatus::Cancelled);
+    }
+}
+
+#[tokio::test]
 async fn recovered_result_fix_turn_allows_head_to_advance_past_previous_result() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -4527,6 +4949,9 @@ struct FakeAppServer {
     fork_history: ForkHistory,
     fork_runtime_status: ThreadRuntimeStatus,
     fork_goal: Option<Value>,
+    participant_status_calls: AtomicUsize,
+    participant_failure_after_status_calls: Option<usize>,
+    remove_mirror_after_request: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -4632,6 +5057,9 @@ impl FakeAppServer {
             fork_history: ForkHistory::Exact,
             fork_runtime_status: ThreadRuntimeStatus::Idle,
             fork_goal: None,
+            participant_status_calls: AtomicUsize::new(0),
+            participant_failure_after_status_calls: None,
+            remove_mirror_after_request: None,
         }
     }
 
@@ -4698,6 +5126,16 @@ impl FakeAppServer {
 
     fn with_fork_goal(mut self, goal: Value) -> Self {
         self.fork_goal = Some(goal);
+        self
+    }
+
+    fn with_participant_failure_after_status_calls(mut self, calls: usize) -> Self {
+        self.participant_failure_after_status_calls = Some(calls);
+        self
+    }
+
+    fn with_remove_mirror_after_request(mut self, request: usize) -> Self {
+        self.remove_mirror_after_request = Some(request);
         self
     }
 
@@ -5108,6 +5546,11 @@ impl AppServer for FakeAppServer {
     }
 
     async fn read_thread(&self, thread_id: &str) -> Result<ThreadDetail, AppServerError> {
+        if !self.threads.lock().unwrap().contains_key(thread_id) {
+            return Err(AppServerError::InvalidResponse(format!(
+                "task {thread_id} is unavailable"
+            )));
+        }
         Ok(self.detail(thread_id))
     }
 
@@ -5147,8 +5590,11 @@ impl AppServer for FakeAppServer {
         source_thread_id: &str,
         policy: &ThreadForkPolicy,
     ) -> Result<ThreadDetail, AppServerError> {
+        let fork_number = self.forks.lock().unwrap().len() + 1;
         let effective_thread_id = match self.fork_identity {
-            ForkIdentity::Mirror => format!("{source_thread_id}-consensus-mirror-1"),
+            ForkIdentity::Mirror => {
+                format!("{source_thread_id}-consensus-mirror-{fork_number}")
+            }
             ForkIdentity::Source => source_thread_id.to_owned(),
             ForkIdentity::Reviewer => "reviewer".to_owned(),
         };
@@ -5211,6 +5657,16 @@ impl AppServer for FakeAppServer {
             .lock()
             .unwrap()
             .push(format!("mcpServerStatus/list:{thread_id}"));
+        let status_call = self.participant_status_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if self
+            .participant_failure_after_status_calls
+            .is_some_and(|allowed| status_call > allowed)
+        {
+            return Ok(vec![McpServerStatus {
+                name: "unrelatedServer".to_owned(),
+                tools: BTreeMap::new(),
+            }]);
+        }
         if !self.participant_threads.lock().unwrap().contains(thread_id) {
             return Ok(vec![McpServerStatus {
                 name: "unrelatedServer".to_owned(),
@@ -5453,6 +5909,19 @@ impl AppServer for FakeAppServer {
             .get_mut(thread_id)
             .unwrap()
             .push(turn);
+        if self.remove_mirror_after_request == Some(request_number) {
+            let mirror_id = self
+                .forks
+                .lock()
+                .unwrap()
+                .last()
+                .map(|(_, effective, _)| effective.clone());
+            if let Some(mirror_id) = mirror_id {
+                self.threads.lock().unwrap().remove(&mirror_id);
+                self.resume_tickets.lock().unwrap().remove(&mirror_id);
+                self.participant_threads.lock().unwrap().remove(&mirror_id);
+            }
+        }
         if deferred_mode == Some(DeferMode::UserInput) {
             self.events.lock().unwrap().push_back(AppEvent {
                 id: Some(json!(1)),
@@ -5577,13 +6046,17 @@ fn reply_text(reply: &Value) -> String {
 }
 
 async fn wait_for_request(app: &FakeAppServer) {
+    wait_for_request_count(app, 1).await;
+}
+
+async fn wait_for_request_count(app: &FakeAppServer, count: usize) {
     for _ in 0..500 {
-        if app.request_count() > 0 {
+        if app.request_count() >= count {
             return;
         }
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
-    panic!("fake App Server never received a turn");
+    panic!("fake App Server never received {count} turns");
 }
 
 fn summary(thread_id: &str) -> ThreadSummary {
@@ -5952,6 +6425,11 @@ fn record_missing_verification_diagnostic(state: &mut RunState) {
         action: NextAction::RequestPrimaryVerification,
         role: Some(Role::Primary),
         thread_id: Some("primary".into()),
+        source_thread_id: None,
+        effective_thread_id: None,
+        participant_binding_generation: None,
+        participant_binding_mode: None,
+        participant_server: None,
     });
 }
 
@@ -5964,6 +6442,11 @@ fn record_database_completion_collision_diagnostic(state: &mut RunState, thread_
         action: NextAction::RequestPrimaryVerification,
         role: Some(Role::Primary),
         thread_id: Some(thread_id.into()),
+        source_thread_id: None,
+        effective_thread_id: None,
+        participant_binding_generation: None,
+        participant_binding_mode: None,
+        participant_server: None,
     });
 }
 

@@ -638,12 +638,20 @@ where
                 "controlled patch requires an exact persisted primary integration turn",
             )
         })?;
+        let binding = self.store.active_primary_binding(run_id)?.ok_or_else(|| {
+            CoordinatorError::operational(
+                "PATCH_NOT_AUTHORIZED",
+                "controlled patch requires an active Primary participant binding",
+            )
+        })?;
         if request_hash.trim().is_empty()
             || pending.message_hash != request_hash
             || pending.role != "PRIMARY"
             || pending.phase != "INTEGRATE"
             || pending.round != state.round
-            || pending.thread_id.as_deref() != Some(state.facts.primary_thread_id.as_str())
+            || binding.source_primary_thread_id != state.facts.primary_thread_id
+            || pending.thread_id.as_deref() != Some(binding.effective_primary_thread_id.as_str())
+            || pending.participant_binding_generation != Some(binding.generation)
             || pending.turn_id.as_deref().is_none_or(str::is_empty)
         {
             return Err(CoordinatorError::operational(
@@ -678,8 +686,14 @@ where
                 .apply_integration_patch(&state.facts, target, patch)?
         };
         let patch_hash = canonical_json_hash(&json!({"patch": patch}));
-        self.store
-            .record_successful_patch(run_id, request_hash, &patch_hash)?;
+        self.store.record_successful_patch_with_provenance(
+            run_id,
+            request_hash,
+            &patch_hash,
+            Some(&binding.source_primary_thread_id),
+            Some(&binding.effective_primary_thread_id),
+            Some(binding.generation),
+        )?;
         Ok(IntegrationPatchResult {
             run_id: run_id.to_owned(),
             integration_branch: target.to_owned(),
@@ -831,7 +845,13 @@ where
                     return Ok(persisted);
                 }
                 state = persisted;
-                state.record_error(run_diagnostic(&state, action, &error));
+                let active_binding = self.store.active_primary_binding(run_id).ok().flatten();
+                state.record_error(run_diagnostic(
+                    &state,
+                    action,
+                    &error,
+                    active_binding.as_ref(),
+                ));
                 if error.code() == "COMMUNICATION_FAILURE" {
                     state.pause("COMMUNICATION_FAILURE")?;
                     self.store.save_state(&state)?;
@@ -1004,6 +1024,7 @@ where
                     &retry.accepted,
                     &retry.observed_status,
                 )?;
+            self.ensure_primary_participant_binding(&mut state).await?;
             return Ok(state);
         }
         if let Some(action) = retry_execution_tool_action {
@@ -1223,16 +1244,21 @@ where
                 "paused communication action has no task role",
             )
         })?;
-        let expected_thread_id = role_thread_id(state, role);
-        if pending.role != role_name(role) || thread_id != expected_thread_id {
+        if pending.role != role_name(role) {
             return Err(CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
                 "pending turn identity does not match the deterministic current action",
             ));
         }
+        self.validate_recorded_role_thread(
+            state,
+            role,
+            thread_id,
+            pending.participant_binding_generation,
+        )?;
 
         let detail = self.read_thread_with_retry(thread_id).await?;
-        self.verify_thread_identity(state, role, &detail)?;
+        verify_requested_thread_identity(thread_id, &detail)?;
         let turn = find_turn(&detail, turn_id).ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
@@ -1300,7 +1326,6 @@ where
             || state.integration_branch.is_some()
             || state.integration_sha.is_some()
             || state.current_integration_payload.is_some()
-            || thread_id != state.facts.primary_thread_id
             || !turn
                 .get("items")
                 .and_then(Value::as_array)
@@ -1354,7 +1379,7 @@ where
             + std::cmp::min(self.options.wait_timeout, TURN_INTERRUPT_TIMEOUT);
         loop {
             let current = self.read_thread_with_retry(thread_id).await?;
-            self.verify_thread_identity(state, Role::Primary, &current)?;
+            verify_requested_thread_identity(thread_id, &current)?;
             let current_turn = find_turn(&current, turn_id).ok_or_else(|| {
                 CoordinatorError::operational(
                     "HISTORY_UNAVAILABLE",
@@ -1549,16 +1574,19 @@ where
         else {
             return Ok(None);
         };
-        if pending.role != "PRIMARY"
-            || pending.phase != "INTEGRATE"
-            || pending.round != state.round
-            || thread_id != state.facts.primary_thread_id
+        if pending.role != "PRIMARY" || pending.phase != "INTEGRATE" || pending.round != state.round
         {
             return Ok(None);
         }
+        self.validate_recorded_role_thread(
+            state,
+            Role::Primary,
+            thread_id,
+            pending.participant_binding_generation,
+        )?;
 
         let detail = self.read_thread_with_retry(thread_id).await?;
-        self.verify_thread_identity(state, Role::Primary, &detail)?;
+        verify_requested_thread_identity(thread_id, &detail)?;
         let turn = find_turn(&detail, turn_id).ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
@@ -1671,16 +1699,19 @@ where
         else {
             return Ok(None);
         };
-        if pending.role != "PRIMARY"
-            || pending.phase != "INTEGRATE"
-            || pending.round != state.round
-            || thread_id != state.facts.primary_thread_id
+        if pending.role != "PRIMARY" || pending.phase != "INTEGRATE" || pending.round != state.round
         {
             return Ok(None);
         }
+        self.validate_recorded_role_thread(
+            state,
+            Role::Primary,
+            thread_id,
+            pending.participant_binding_generation,
+        )?;
 
         let detail = self.read_thread_with_retry(thread_id).await?;
-        self.verify_thread_identity(state, Role::Primary, &detail)?;
+        verify_requested_thread_identity(thread_id, &detail)?;
         let turn = find_turn(&detail, turn_id).ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
@@ -1771,19 +1802,29 @@ where
                 "integration invalid response has no exact persisted turn identity",
             ));
         };
-        if pending.role != "PRIMARY"
-            || pending.phase != "INTEGRATE"
-            || pending.round != state.round
-            || thread_id != state.facts.primary_thread_id
+        if pending.role != "PRIMARY" || pending.phase != "INTEGRATE" || pending.round != state.round
         {
             return Err(CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
                 "integration invalid-response turn does not match the bound primary request",
             ));
         }
+        if pending.capability_generation.is_none()
+            && pending.participant_binding_generation.is_none()
+            && thread_id == state.facts.primary_thread_id
+        {
+            // Exact pre-binding invalid-integration recovery retained for legacy databases.
+        } else {
+            self.validate_recorded_role_thread(
+                state,
+                Role::Primary,
+                thread_id,
+                pending.participant_binding_generation,
+            )?;
+        }
 
         let detail = self.read_thread_with_retry(thread_id).await?;
-        self.verify_thread_identity(state, Role::Primary, &detail)?;
+        verify_requested_thread_identity(thread_id, &detail)?;
         let turn = find_turn(&detail, turn_id).ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
@@ -1803,8 +1844,7 @@ where
             ));
         }
         let successful_patch_hash = self
-            .store
-            .successful_patch_hash(&run_id, &pending.message_hash)?
+            .validated_successful_patch_hash(state, &pending, true)?
             .ok_or_else(|| {
                 CoordinatorError::operational(
                     "MODEL_RESPONSE_RETRY_UNSAFE",
@@ -1897,20 +1937,24 @@ where
                 "invalid model-response diagnostic is not a pre-integration read-only action",
             )
         })?;
-        let expected_thread_id = role_thread_id(state, role);
         if pending.role != role_name(role)
             || pending.phase != phase_name(expected_phase)
             || pending.round != state.round
-            || thread_id != expected_thread_id
         {
             return Err(CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
                 "invalid model response does not match the deterministic pending action",
             ));
         }
+        self.validate_recorded_role_thread(
+            state,
+            role,
+            thread_id,
+            pending.participant_binding_generation,
+        )?;
 
         let detail = self.read_thread_with_retry(thread_id).await?;
-        self.verify_thread_identity(state, role, &detail)?;
+        verify_requested_thread_identity(thread_id, &detail)?;
         let turn = find_turn(&detail, turn_id).ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
@@ -1983,18 +2027,20 @@ where
                 "verification failure has no exact persisted turn identity",
             ));
         };
-        if pending.role != "PRIMARY"
-            || pending.phase != "VERIFY"
-            || pending.round != state.round
-            || thread_id != state.facts.primary_thread_id
-        {
+        if pending.role != "PRIMARY" || pending.phase != "VERIFY" || pending.round != state.round {
             return Err(CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
                 "verification failure does not match the bound primary request",
             ));
         }
+        self.validate_recorded_role_thread(
+            state,
+            Role::Primary,
+            thread_id,
+            pending.participant_binding_generation,
+        )?;
         let detail = self.read_thread_with_retry(thread_id).await?;
-        self.verify_thread_identity(state, Role::Primary, &detail)?;
+        verify_requested_thread_identity(thread_id, &detail)?;
         let archived_attempts = self
             .store
             .archived_turn_attempts(&run_id, &pending.message_hash)?;
@@ -2157,19 +2203,22 @@ where
                 "verification environment blocker has no accepted turn record",
             )
         })?;
-        if accepted.role != "PRIMARY"
-            || accepted.phase != "VERIFY"
-            || accepted.round != state.round
-            || accepted.thread_id != state.facts.primary_thread_id
+        if accepted.role != "PRIMARY" || accepted.phase != "VERIFY" || accepted.round != state.round
         {
             return Err(CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
                 "verification environment blocker does not match the frozen primary request",
             ));
         }
+        self.validate_recorded_role_thread(
+            state,
+            Role::Primary,
+            &accepted.thread_id,
+            accepted.participant_binding_generation,
+        )?;
 
         let detail = self.read_thread_with_retry(&accepted.thread_id).await?;
-        self.verify_thread_identity(state, Role::Primary, &detail)?;
+        verify_requested_thread_identity(&accepted.thread_id, &detail)?;
         for archived_turn_id in self
             .store
             .archived_turn_ids(&run_id, &accepted.message_hash)?
@@ -2290,19 +2339,22 @@ where
                 "forbidden-operation blocker has no exact persisted turn identity",
             ));
         };
-        if pending.role != "PRIMARY"
-            || pending.phase != "INTEGRATE"
-            || pending.round != state.round
-            || thread_id != state.facts.primary_thread_id
+        if pending.role != "PRIMARY" || pending.phase != "INTEGRATE" || pending.round != state.round
         {
             return Err(CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
                 "forbidden-operation blocker does not match the frozen integration action",
             ));
         }
+        self.validate_recorded_role_thread(
+            state,
+            Role::Primary,
+            thread_id,
+            pending.participant_binding_generation,
+        )?;
 
         let detail = self.read_thread_with_retry(thread_id).await?;
-        self.verify_thread_identity(state, Role::Primary, &detail)?;
+        verify_requested_thread_identity(thread_id, &detail)?;
         let turn = find_turn(&detail, turn_id).ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
@@ -2366,16 +2418,21 @@ where
         if accepted.role != "PRIMARY"
             || accepted.phase != "INTEGRATE"
             || accepted.round != state.round
-            || accepted.thread_id != state.facts.primary_thread_id
         {
             return Err(CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
                 "accepted execution-tool blocker does not match the frozen integration action",
             ));
         }
+        self.validate_recorded_role_thread(
+            state,
+            Role::Primary,
+            &accepted.thread_id,
+            accepted.participant_binding_generation,
+        )?;
 
         let detail = self.read_thread_with_retry(&accepted.thread_id).await?;
-        self.verify_thread_identity(state, Role::Primary, &detail)?;
+        verify_requested_thread_identity(&accepted.thread_id, &detail)?;
         let turn = find_turn(&detail, &accepted.turn_id).ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
@@ -2446,13 +2503,18 @@ where
         if accepted.role != "PRIMARY"
             || accepted.phase != "INTEGRATE"
             || accepted.round != state.round
-            || accepted.thread_id != state.facts.primary_thread_id
         {
             return Err(CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
                 "accepted corrective patch-tool blocker does not match the frozen correction request",
             ));
         }
+        self.validate_legacy_source_primary_thread(
+            state,
+            &accepted.thread_id,
+            accepted.capability_generation.as_deref(),
+            accepted.participant_binding_generation,
+        )?;
         if self
             .store
             .successful_patch_recorded(&run_id, &accepted.message_hash)?
@@ -2464,7 +2526,7 @@ where
         }
 
         let detail = self.read_thread_with_retry(&accepted.thread_id).await?;
-        self.verify_thread_identity(state, Role::Primary, &detail)?;
+        verify_requested_thread_identity(&accepted.thread_id, &detail)?;
         let persisted_turn = find_turn(&detail, &accepted.turn_id).ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
@@ -3183,13 +3245,23 @@ where
                         )
                     })?;
                 let run_id = state.facts.run_id.to_string();
-                let successful_patch_hash = self
-                    .store
-                    .successful_patch_hash(&run_id, &pending.message_hash)?;
+                self.validate_recorded_role_thread(
+                    state,
+                    Role::Primary,
+                    pending.thread_id.as_deref().ok_or_else(|| {
+                        CoordinatorError::operational(
+                            "HISTORY_UNAVAILABLE",
+                            "integration response pending turn has no Effective Primary identity",
+                        )
+                    })?,
+                    pending.participant_binding_generation,
+                )?;
                 let has_archived_attempt = !self
                     .store
                     .archived_turn_ids(&run_id, &pending.message_hash)?
                     .is_empty();
+                let successful_patch_hash =
+                    self.validated_successful_patch_hash(state, &pending, has_archived_attempt)?;
                 verify_integration_execution_items(
                     state,
                     turn,
@@ -3272,7 +3344,37 @@ where
             }
             self.store
                 .bind_unsent_primary_pending_to_active_binding(&run_id)?;
-            return Ok(binding);
+            match self
+                .read_thread_with_retry(&binding.effective_primary_thread_id)
+                .await
+            {
+                Ok(detail) => {
+                    verify_requested_thread_identity(
+                        &binding.effective_primary_thread_id,
+                        &detail,
+                    )?;
+                    return Ok(binding);
+                }
+                Err(error)
+                    if binding.mode == PrimaryBindingMode::EphemeralFork
+                        && error.code() == "COMMUNICATION_FAILURE" =>
+                {
+                    if self.store.pending_send(&run_id)?.is_some() {
+                        return Err(error);
+                    }
+                    let source_thread_id = state.facts.primary_thread_id.clone();
+                    let source = self.read_thread_with_retry(&source_thread_id).await?;
+                    self.verify_thread_identity(state, Role::Primary, &source)?;
+                    let source = if source.summary.is_active() {
+                        self.wait_until_idle(state, &source_thread_id).await?
+                    } else {
+                        source
+                    };
+                    require_idle_thread(&source, "Source Primary before safe mirror recreation")?;
+                    return self.create_ephemeral_primary_binding(state, &source).await;
+                }
+                Err(error) => return Err(error),
+            }
         }
 
         let source_thread_id = state.facts.primary_thread_id.clone();
@@ -3883,6 +3985,123 @@ where
             ));
         }
         Ok(())
+    }
+
+    fn validate_recorded_role_thread(
+        &self,
+        state: &RunState,
+        role: Role,
+        thread_id: &str,
+        participant_binding_generation: Option<u32>,
+    ) -> Result<(), CoordinatorError> {
+        match role {
+            Role::Reviewer => {
+                if thread_id != state.facts.reviewer_thread_id
+                    || participant_binding_generation.is_some()
+                {
+                    return Err(CoordinatorError::operational(
+                        "HISTORY_UNAVAILABLE",
+                        "recorded Reviewer turn does not match the frozen Reviewer identity",
+                    ));
+                }
+            }
+            Role::Primary => {
+                let generation = participant_binding_generation.ok_or_else(|| {
+                    CoordinatorError::operational(
+                        "HISTORY_UNAVAILABLE",
+                        "recorded Primary turn has no participant binding generation",
+                    )
+                })?;
+                let binding = self
+                    .store
+                    .primary_binding(&state.facts.run_id.to_string(), generation)?
+                    .ok_or_else(|| {
+                        CoordinatorError::operational(
+                            "HISTORY_UNAVAILABLE",
+                            format!(
+                                "recorded Primary turn references unknown binding generation {generation}"
+                            ),
+                        )
+                    })?;
+                if binding.source_primary_thread_id != state.facts.primary_thread_id
+                    || binding.effective_primary_thread_id != thread_id
+                    || binding.participant_server != PARTICIPANT_MCP_SERVER
+                {
+                    return Err(CoordinatorError::operational(
+                        "HISTORY_UNAVAILABLE",
+                        "recorded Primary turn does not match its historical participant binding",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_legacy_source_primary_thread(
+        &self,
+        state: &RunState,
+        thread_id: &str,
+        capability_generation: Option<&str>,
+        participant_binding_generation: Option<u32>,
+    ) -> Result<(), CoordinatorError> {
+        if thread_id != state.facts.primary_thread_id
+            || capability_generation != Some(crate::store::LEGACY_PARTICIPANT_CAPABILITY_GENERATION)
+            || participant_binding_generation.is_some()
+        {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "legacy Primary turn does not match the release-bounded Source Primary identity",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validated_successful_patch_hash(
+        &self,
+        state: &RunState,
+        pending: &crate::store::PendingSend,
+        allow_legacy_null_provenance: bool,
+    ) -> Result<Option<String>, CoordinatorError> {
+        let Some(record) = self
+            .store
+            .successful_patch_record(&state.facts.run_id.to_string(), &pending.message_hash)?
+        else {
+            return Ok(None);
+        };
+        match (
+            record.source_primary_thread_id.as_deref(),
+            record.effective_primary_thread_id.as_deref(),
+            record.participant_binding_generation,
+        ) {
+            (Some(source), Some(effective), Some(generation)) => {
+                self.validate_recorded_role_thread(
+                    state,
+                    Role::Primary,
+                    effective,
+                    Some(generation),
+                )?;
+                if source != state.facts.primary_thread_id
+                    || pending.thread_id.as_deref() != Some(effective)
+                    || pending.participant_binding_generation != Some(generation)
+                {
+                    return Err(CoordinatorError::operational(
+                        "HISTORY_UNAVAILABLE",
+                        "successful controlled patch provenance does not match the pending Primary turn",
+                    ));
+                }
+            }
+            (None, None, None)
+                if allow_legacy_null_provenance
+                    && pending.thread_id.as_deref()
+                        == Some(state.facts.primary_thread_id.as_str()) => {}
+            _ => {
+                return Err(CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "successful controlled patch has missing or mixed Primary binding provenance",
+                ));
+            }
+        }
+        Ok(Some(record.patch_hash))
     }
 
     fn required_run(&self, run_id: &str) -> Result<RunState, CoordinatorError> {
@@ -5304,7 +5523,7 @@ fn integration_invalid_response_retry_action(
     if diagnostic.code != "INVALID_RESPONSE"
         || diagnostic.action != NextAction::RequestPrimaryIntegration
         || diagnostic.role != Some(Role::Primary)
-        || diagnostic.thread_id.as_deref() != Some(state.facts.primary_thread_id.as_str())
+        || !diagnostic_matches_primary_identity(state, diagnostic)
     {
         return Ok(None);
     }
@@ -5358,7 +5577,7 @@ fn verification_without_execution_retry_action(
     if diagnostic.code != "TEST_FAILURE"
         || diagnostic.action != NextAction::RequestPrimaryVerification
         || diagnostic.role != Some(Role::Primary)
-        || diagnostic.thread_id.as_deref() != Some(state.facts.primary_thread_id.as_str())
+        || !diagnostic_matches_primary_identity(state, diagnostic)
         || diagnostic.detail
             != "verification must execute each frozen command exactly once and no other command"
     {
@@ -5523,7 +5742,7 @@ fn forbidden_operation_retry_action(
     if diagnostic.code != "FORBIDDEN_OPERATION"
         || diagnostic.action != NextAction::RequestPrimaryIntegration
         || diagnostic.role != Some(Role::Primary)
-        || diagnostic.thread_id.as_deref() != Some(state.facts.primary_thread_id.as_str())
+        || !diagnostic_matches_primary_identity(state, diagnostic)
     {
         return Err(CoordinatorError::operational(
             "TERMINAL_TURN_RETRY_UNSAFE",
@@ -5542,6 +5761,24 @@ fn forbidden_operation_retry_action(
         ));
     }
     Ok(Some(NextAction::RequestPrimaryIntegration))
+}
+
+fn diagnostic_matches_primary_identity(state: &RunState, diagnostic: &RunDiagnostic) -> bool {
+    match diagnostic.participant_binding_generation {
+        Some(_) => {
+            diagnostic.source_thread_id.as_deref() == Some(state.facts.primary_thread_id.as_str())
+                && diagnostic.effective_thread_id.as_deref() == diagnostic.thread_id.as_deref()
+                && diagnostic.participant_binding_mode.is_some()
+                && diagnostic.participant_server.as_deref() == Some(PARTICIPANT_MCP_SERVER)
+        }
+        None => {
+            diagnostic.thread_id.as_deref() == Some(state.facts.primary_thread_id.as_str())
+                && diagnostic.source_thread_id.is_none()
+                && diagnostic.effective_thread_id.is_none()
+                && diagnostic.participant_binding_mode.is_none()
+                && diagnostic.participant_server.is_none()
+        }
+    }
 }
 
 fn validate_execution_tool_unavailable_blocker(
@@ -5926,9 +6163,19 @@ fn communication_error(
     }
 }
 
-fn run_diagnostic(state: &RunState, action: NextAction, error: &CoordinatorError) -> RunDiagnostic {
+fn run_diagnostic(
+    state: &RunState,
+    action: NextAction,
+    error: &CoordinatorError,
+    binding: Option<&PrimaryParticipantBinding>,
+) -> RunDiagnostic {
     let role = action_role(action);
-    let inferred_thread_id = role.map(|role| role_thread_id(state, role).to_owned());
+    let primary_binding = (role == Some(Role::Primary)).then_some(binding).flatten();
+    let inferred_thread_id = match (role, primary_binding) {
+        (Some(Role::Primary), Some(binding)) => Some(binding.effective_primary_thread_id.clone()),
+        (Some(role), _) => Some(role_thread_id(state, role).to_owned()),
+        (None, _) => None,
+    };
     RunDiagnostic {
         code: error.code().to_owned(),
         detail: redact_diagnostic(&error.detail()),
@@ -5936,6 +6183,13 @@ fn run_diagnostic(state: &RunState, action: NextAction, error: &CoordinatorError
         action,
         role,
         thread_id: error.thread_id().map(str::to_owned).or(inferred_thread_id),
+        source_thread_id: primary_binding.map(|binding| binding.source_primary_thread_id.clone()),
+        effective_thread_id: primary_binding
+            .map(|binding| binding.effective_primary_thread_id.clone()),
+        participant_binding_generation: primary_binding.map(|binding| binding.generation),
+        participant_binding_mode: primary_binding
+            .map(|binding| binding.mode.as_database_value().to_owned()),
+        participant_server: primary_binding.map(|binding| binding.participant_server.clone()),
     }
 }
 

@@ -702,6 +702,11 @@ fn completed_read_only_retry_reactivates_a_legacy_blocked_run_atomically() {
         action: NextAction::RequestPrimaryContract,
         role: Some(Role::Primary),
         thread_id: Some("primary-thread".into()),
+        source_thread_id: None,
+        effective_thread_id: None,
+        participant_binding_generation: None,
+        participant_binding_mode: None,
+        participant_server: None,
     });
     blocked.block("INVALID_TEST_COMMAND");
     store.save_state(&blocked).unwrap();
@@ -2013,6 +2018,11 @@ fn record_missing_verification_diagnostic(state: &mut RunState) {
         action: NextAction::RequestPrimaryVerification,
         role: Some(Role::Primary),
         thread_id: Some("primary-thread".into()),
+        source_thread_id: None,
+        effective_thread_id: None,
+        participant_binding_generation: None,
+        participant_binding_mode: None,
+        participant_server: None,
     });
 }
 
@@ -2025,6 +2035,11 @@ fn record_database_completion_collision_diagnostic(state: &mut RunState) {
         action: NextAction::RequestPrimaryVerification,
         role: Some(Role::Primary),
         thread_id: Some("primary-thread".into()),
+        source_thread_id: None,
+        effective_thread_id: None,
+        participant_binding_generation: None,
+        participant_binding_mode: None,
+        participant_server: None,
     });
 }
 

@@ -1699,7 +1699,6 @@ impl SqliteRunStore {
             || accepted.role != "PRIMARY"
             || accepted.phase != "INTEGRATE"
             || accepted.round != blocked_state.round
-            || accepted.thread_id != blocked_state.facts.primary_thread_id
         {
             return Err(StoreError::TerminalTurnNotRetryable(
                 "accepted execution-tool blocker does not match the frozen integration action"
@@ -1709,6 +1708,18 @@ impl SqliteRunStore {
 
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
+        if !recorded_primary_thread_matches(
+            &transaction,
+            &run_id,
+            &blocked_state.facts.primary_thread_id,
+            &accepted.thread_id,
+            accepted.participant_binding_generation,
+        )? {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "accepted execution-tool blocker does not match its historical Primary binding"
+                    .into(),
+            ));
+        }
         let current_json = transaction
             .query_row(
                 "SELECT state_json FROM runs WHERE run_id = ?1",
@@ -1805,6 +1816,7 @@ impl SqliteRunStore {
             || accepted.message_hash.is_empty()
             || accepted.response_hash.is_empty()
             || accepted.turn_id.is_empty()
+            || accepted.participant_binding_generation.is_some()
             || accepted.capability_generation.as_deref()
                 != Some(LEGACY_PARTICIPANT_CAPABILITY_GENERATION)
         {
@@ -1969,7 +1981,6 @@ impl SqliteRunStore {
             || accepted.role != "PRIMARY"
             || accepted.phase != "VERIFY"
             || accepted.round != blocked_state.round
-            || accepted.thread_id != blocked_state.facts.primary_thread_id
         {
             return Err(StoreError::TerminalTurnNotRetryable(
                 "accepted verification environment blocker does not match the frozen request"
@@ -1979,6 +1990,18 @@ impl SqliteRunStore {
 
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
+        if !recorded_primary_thread_matches(
+            &transaction,
+            &run_id,
+            &blocked_state.facts.primary_thread_id,
+            &accepted.thread_id,
+            accepted.participant_binding_generation,
+        )? {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "accepted verification environment blocker does not match its historical Primary binding"
+                    .into(),
+            ));
+        }
         let current_json = transaction
             .query_row(
                 "SELECT state_json FROM runs WHERE run_id = ?1",
@@ -2394,6 +2417,26 @@ fn query_primary_binding(
         )
         .optional()?;
     row.map(decode_primary_binding).transpose()
+}
+
+fn recorded_primary_thread_matches(
+    connection: &Connection,
+    run_id: &str,
+    frozen_source_primary_thread_id: &str,
+    recorded_thread_id: &str,
+    participant_binding_generation: Option<u32>,
+) -> Result<bool, StoreError> {
+    let Some(generation) = participant_binding_generation else {
+        return Ok(false);
+    };
+    let Some(binding) = query_primary_binding(connection, run_id, generation)? else {
+        return Ok(false);
+    };
+    Ok(
+        binding.source_primary_thread_id == frozen_source_primary_thread_id
+            && binding.effective_primary_thread_id == recorded_thread_id
+            && binding.participant_server == app_server_client::PARTICIPANT_MCP_SERVER,
+    )
 }
 
 fn primary_binding_row(row: &rusqlite::Row<'_>) -> Result<PrimaryBindingRow, rusqlite::Error> {

@@ -124,6 +124,16 @@ pub struct RunDiagnostic {
     pub action: NextAction,
     pub role: Option<Role>,
     pub thread_id: Option<String>,
+    #[serde(default)]
+    pub source_thread_id: Option<String>,
+    #[serde(default)]
+    pub effective_thread_id: Option<String>,
+    #[serde(default)]
+    pub participant_binding_generation: Option<u32>,
+    #[serde(default)]
+    pub participant_binding_mode: Option<String>,
+    #[serde(default)]
+    pub participant_server: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
