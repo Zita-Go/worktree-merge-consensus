@@ -507,6 +507,72 @@ fn corrective_patch_tool_retry_rejects_cross_field_failed_verification_mismatche
 }
 
 #[test]
+fn corrective_patch_tool_retry_rejects_evidence_cwd_outside_persisted_verification_worktree() {
+    let mut state = blocked_corrective_patch_tool_state();
+    state.test_evidence[0].cwd = PathBuf::from("/state/verification/other");
+    state.current_integration_payload.as_mut().unwrap()["test_evidence"][0]["cwd"] =
+        json!("/state/verification/other");
+
+    assert_corrective_patch_tool_retry_rejected(state);
+}
+
+#[test]
+fn corrective_patch_tool_retry_rejects_changed_failure_output() {
+    let mut state = blocked_corrective_patch_tool_state();
+    state.current_integration_payload.as_mut().unwrap()["verification_failures"][0]["output"] =
+        json!("changed compiler diagnostic");
+
+    assert_corrective_patch_tool_retry_rejected(state);
+}
+
+#[test]
+fn corrective_patch_tool_retry_rejects_missing_failure_field() {
+    let mut state = blocked_corrective_patch_tool_state();
+    state.current_integration_payload.as_mut().unwrap()["verification_failures"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("output");
+    state.last_result_feedback.as_mut().unwrap()["failed_tests"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("output");
+
+    assert_corrective_patch_tool_retry_rejected(state);
+}
+
+#[test]
+fn corrective_patch_tool_retry_rejects_extra_failure_field() {
+    let mut state = blocked_corrective_patch_tool_state();
+    state.current_integration_payload.as_mut().unwrap()["verification_failures"][0]
+        .as_object_mut()
+        .unwrap()
+        .insert("unexpected".into(), json!(true));
+    state.last_result_feedback.as_mut().unwrap()["failed_tests"][0]
+        .as_object_mut()
+        .unwrap()
+        .insert("unexpected".into(), json!(true));
+
+    assert_corrective_patch_tool_retry_rejected(state);
+}
+
+#[test]
+fn corrective_patch_tool_retry_rejects_wrong_machine_feedback_summary() {
+    let mut state = blocked_corrective_patch_tool_state();
+    state.last_result_feedback.as_mut().unwrap()["summary"] = json!("wrong summary");
+
+    assert_corrective_patch_tool_retry_rejected(state);
+}
+
+#[test]
+fn corrective_patch_tool_retry_rejects_wrong_machine_verification_summary() {
+    let mut state = blocked_corrective_patch_tool_state();
+    state.last_result_feedback.as_mut().unwrap()["verification_summary"] =
+        json!("wrong verification summary");
+
+    assert_corrective_patch_tool_retry_rejected(state);
+}
+
+#[test]
 fn corrective_patch_tool_retry_rejects_an_accepted_result() {
     let mut accepted = fixture_result_state("dddddddddddddddddddddddddddddddddddddddd");
     accepted
@@ -849,10 +915,20 @@ fn blocked_corrective_patch_tool_state() -> RunState {
         "item_id": "test-command-1",
         "output": "a compiler diagnostic"
     }]);
+    verification.payload["verification_summary"] =
+        json!("Authoritative verification completed with failures.");
     state.verification_worktree = Some(PathBuf::from("/state/verification/run"));
     state.apply_message(verification).unwrap();
     state.block("CONTROLLED_PATCH_TOOL_UNAVAILABLE");
     state
+}
+
+fn assert_corrective_patch_tool_retry_rejected(mut state: RunState) {
+    let error = state
+        .retry_blocked_corrective_patch_tool_unavailable()
+        .unwrap_err();
+
+    assert_eq!(error.code(), "NOT_RETRYABLE");
 }
 
 fn facts() -> RunFacts {

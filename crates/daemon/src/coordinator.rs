@@ -3206,6 +3206,7 @@ where
                         "coordinator verification evidence is absent",
                     )
                 })?;
+                let verification_summary = message.payload.get("verification_summary").cloned();
                 let mut canonical = current_integration_payload(state)?.clone();
                 let canonical = canonical.as_object_mut().ok_or_else(|| {
                     CoordinatorError::operational(
@@ -3226,6 +3227,9 @@ where
                         "verification_failures".into(),
                         Value::Array(authoritative.failures),
                     );
+                }
+                if let Some(summary) = verification_summary {
+                    canonical.insert("verification_summary".into(), summary);
                 }
                 message.payload = Value::Object(canonical.clone());
             }

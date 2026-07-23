@@ -673,6 +673,10 @@ async fn coordinator_owned_verification_runs_after_nonzero_and_routes_bounded_di
         .as_str()
         .unwrap();
     assert!(diagnostic.starts_with("[earlier output truncated]\n"));
+    assert_eq!(
+        corrective_payload["result_feedback"]["verification_summary"],
+        "All frozen commands completed."
+    );
     assert!(diagnostic.len() <= 16_384);
 }
 
@@ -5259,6 +5263,7 @@ fn verification_reply(prompt: &str, behavior: VerificationBehavior) -> Value {
         json!({
             "changed_files": payload["changed_files"],
             "integration_evidence": integration_evidence,
+            "verification_summary": "All frozen commands completed.",
             "test_evidence": tests
         }),
     )

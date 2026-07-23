@@ -13,6 +13,7 @@ use crate::{
 pub const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 6;
 pub const DEFAULT_NO_PROGRESS_ROUNDS: u8 = 2;
 pub const RUN_STATE_SCHEMA_VERSION: u32 = 2;
+const MACHINE_VERIFICATION_SUMMARY: &str = "One or more frozen verification commands failed. Correct only the reported failures on the existing integration branch, then return a new integration result for isolated verification.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -85,6 +86,15 @@ pub struct TestEvidence {
     pub turn_id: String,
     pub item_id: String,
     pub cwd: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerificationFailure {
+    command: String,
+    exit_code: i64,
+    item_id: String,
+    output: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -756,6 +766,22 @@ impl RunState {
                     "corrective controlled-patch recovery requires complete frozen test evidence",
                 )
             })?;
+        let verification_worktree = self.verification_worktree.as_ref().ok_or_else(|| {
+            state_error(
+                "NOT_RETRYABLE",
+                "corrective controlled-patch recovery requires a persisted verification worktree",
+            )
+        })?;
+        if self
+            .test_evidence
+            .iter()
+            .any(|evidence| &evidence.cwd != verification_worktree)
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "corrective controlled-patch recovery evidence must come from the persisted verification worktree",
+            ));
+        }
         if !self
             .test_evidence
             .iter()
@@ -784,14 +810,22 @@ impl RunState {
                 "corrective controlled-patch recovery test evidence fields disagree",
             ));
         }
-        let expected_failures = failed_test_identities_from_evidence(&self.test_evidence);
         let payload_failures = integration_payload
             .get("verification_failures")
-            .and_then(failed_test_identities)
+            .and_then(|value| canonical_verification_failures(value, &self.test_evidence))
             .ok_or_else(|| {
                 state_error(
                     "NOT_RETRYABLE",
-                    "corrective controlled-patch recovery requires structured verification failures",
+                    "corrective controlled-patch recovery requires canonical production verification failures",
+                )
+            })?;
+        let verification_summary = integration_payload
+            .get("verification_summary")
+            .filter(|summary| summary.is_string())
+            .ok_or_else(|| {
+                state_error(
+                    "NOT_RETRYABLE",
+                    "corrective controlled-patch recovery requires the production verification summary",
                 )
             })?;
         let feedback = self.last_result_feedback.as_ref().ok_or_else(|| {
@@ -800,12 +834,13 @@ impl RunState {
                 "corrective controlled-patch recovery requires machine verification feedback",
             )
         })?;
-        let feedback_failures = feedback
-            .get("failed_tests")
-            .and_then(failed_test_identities);
+        let feedback_failures = feedback.get("failed_tests");
         if feedback.get("format").and_then(Value::as_str) != Some("machine_verification")
-            || payload_failures != expected_failures
-            || feedback_failures.as_ref() != Some(&expected_failures)
+            || feedback.get("summary").and_then(Value::as_str) != Some(MACHINE_VERIFICATION_SUMMARY)
+            || feedback.get("verification_summary") != Some(verification_summary)
+            || feedback_failures.is_none_or(|failures| {
+                canonical_json_hash(failures) != canonical_json_hash(&payload_failures)
+            })
         {
             return Err(state_error(
                 "NOT_RETRYABLE",
@@ -1227,7 +1262,7 @@ impl RunState {
             self.result_approved_sha = None;
             self.last_result_feedback = Some(json!({
                 "format": "machine_verification",
-                "summary": "One or more frozen verification commands failed. Correct only the reported failures on the existing integration branch, then return a new integration result for isolated verification.",
+                "summary": MACHINE_VERIFICATION_SUMMARY,
                 "failed_tests": message
                     .payload
                     .get("verification_failures")
@@ -1553,40 +1588,24 @@ fn test_evidence(payload: &Value) -> Result<Vec<TestEvidence>, StateError> {
         .collect()
 }
 
-fn failed_test_identities_from_evidence(evidence: &[TestEvidence]) -> Vec<(String, i64, String)> {
-    evidence
+fn canonical_verification_failures(value: &Value, evidence: &[TestEvidence]) -> Option<Value> {
+    let failures = serde_json::from_value::<Vec<VerificationFailure>>(value.clone()).ok()?;
+    let expected = evidence
         .iter()
         .filter(|entry| entry.exit_code != 0)
-        .map(|entry| {
-            (
-                entry.command.clone(),
-                entry.exit_code,
-                entry.item_id.clone(),
-            )
+        .collect::<Vec<_>>();
+    if failures.is_empty()
+        || failures.len() != expected.len()
+        || failures.iter().zip(expected).any(|(failure, evidence)| {
+            failure.command != evidence.command
+                || failure.exit_code != evidence.exit_code
+                || failure.item_id != evidence.item_id
         })
-        .collect()
-}
-
-fn failed_test_identities(value: &Value) -> Option<Vec<(String, i64, String)>> {
-    let failures = value.as_array().filter(|failures| !failures.is_empty())?;
-    failures
-        .iter()
-        .map(|failure| {
-            let command = failure
-                .get("command")
-                .and_then(Value::as_str)
-                .filter(|command| !command.trim().is_empty())?;
-            let exit_code = failure
-                .get("exit_code")
-                .and_then(Value::as_i64)
-                .filter(|exit_code| *exit_code != 0)?;
-            let item_id = failure
-                .get("item_id")
-                .and_then(Value::as_str)
-                .filter(|item_id| !item_id.trim().is_empty())?;
-            Some((command.to_owned(), exit_code, item_id.to_owned()))
-        })
-        .collect()
+    {
+        return None;
+    }
+    let canonical = serde_json::to_value(failures).ok()?;
+    (canonical_json_hash(value) == canonical_json_hash(&canonical)).then_some(canonical)
 }
 
 fn normalized_issue_hash(payload: &Value) -> String {

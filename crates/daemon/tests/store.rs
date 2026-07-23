@@ -1619,7 +1619,8 @@ fn fixture_blocked_corrective_patch_run() -> RunState {
                     "exit_code": 1,
                     "item_id": "test-command-1",
                     "output": "a compiler diagnostic"
-                }]
+                }],
+                "verification_summary": "Authoritative verification completed with failures."
             }
         })))
         .unwrap();
