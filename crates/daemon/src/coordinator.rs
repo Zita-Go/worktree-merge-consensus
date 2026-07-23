@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -9,7 +9,8 @@ use std::{
 use app_server_client::{
     AppEvent, AppServer, AppServerError, CONTROLLED_PATCH_APPROVAL_KEY,
     CONTROLLED_PATCH_APPROVAL_MODE, CommandExecRequest, McpServerStatus, PARTICIPANT_MCP_SERVER,
-    PARTICIPANT_PATCH_TOOL, ThreadDetail, ThreadResumePolicy, TurnExecutionPolicy,
+    PARTICIPANT_PATCH_TOOL, ParticipantMcpConfig, ThreadDetail, ThreadForkPolicy,
+    ThreadResumePolicy, ThreadRuntimeStatus, TurnExecutionPolicy,
 };
 use consensus_core::{
     canonical_json_hash,
@@ -39,6 +40,7 @@ use crate::store::{
     AcceptedTurn, PARTICIPANT_CAPABILITY_GENERATION, SqliteRunStore, StoreError,
     VerificationCommandClaim, VerificationCommandRecord,
 };
+use crate::{PrimaryBindingMode, PrimaryParticipantBinding};
 
 const MAX_DRIVER_STEPS: usize = 128;
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(1_800);
@@ -51,6 +53,11 @@ const VERIFICATION_OUTPUT_TRUNCATION_MARKER: &str = "[earlier output truncated]\
 struct CompletedTurn {
     response: String,
     turn: Value,
+}
+
+struct PreparedActionThread {
+    thread_id: String,
+    primary_binding: Option<PrimaryParticipantBinding>,
 }
 
 struct RetryableCompletedTurn {
@@ -2542,29 +2549,9 @@ where
         let role = action_role(action).ok_or_else(|| {
             CoordinatorError::operational("INVALID_STATE", "action has no task role")
         })?;
-        let thread_id = role_thread_id(state, role).to_owned();
-        let detail = self.wait_until_idle(state, role, &thread_id).await?;
-        self.verify_thread_identity(state, role, &detail)?;
-        let resume_policy = if action == NextAction::RequestPrimaryIntegration {
-            ThreadResumePolicy::PrimaryIntegration {
-                participant_executable: self.options.participant_mcp_executable.clone(),
-            }
-        } else {
-            ThreadResumePolicy::Default
-        };
-        let resumed = self
-            .resume_thread_with_retry(&thread_id, &resume_policy)
-            .await?;
-        self.verify_thread_identity(state, role, &resumed)?;
-        if action == NextAction::RequestPrimaryIntegration {
-            let statuses = self
-                .list_mcp_server_status_for_preflight(&thread_id)
-                .await?;
-            verify_participant_patch_capability(&thread_id, &statuses)?;
-        }
-        if resumed.summary.is_active() {
-            self.wait_until_idle(state, role, &thread_id).await?;
-        }
+        let prepared = self.prepare_action_thread(state, role).await?;
+        let thread_id = prepared.thread_id;
+        let primary_binding = prepared.primary_binding;
 
         self.load_history(state).await?;
         self.revalidate_before_action(state, action)?;
@@ -2580,6 +2567,9 @@ where
         }));
         let run_id = state.facts.run_id.to_string();
         let mut prompt = build_turn_prompt(role, action, state, &payload)?;
+        if let Some(binding) = &primary_binding {
+            append_primary_execution_identity(&mut prompt, binding)?;
+        }
         if action == NextAction::RequestPrimaryIntegration
             && self
                 .store
@@ -2608,12 +2598,13 @@ where
                 ));
             }
         } else {
-            self.store.record_pending_send(
+            self.store.record_pending_send_with_binding(
                 &run_id,
                 role_name(role),
                 phase_name(state.phase),
                 state.round,
                 &request_hash,
+                primary_binding.as_ref().map(|binding| binding.generation),
             )?;
             pending = self.store.pending_send(&run_id)?;
         }
@@ -2623,6 +2614,14 @@ where
                 "pending turn could not be reloaded",
             )
         })?;
+        if pending.participant_binding_generation
+            != primary_binding.as_ref().map(|binding| binding.generation)
+        {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "pending turn does not match the active Primary participant binding",
+            ));
+        }
 
         let current_detail = self.read_thread_with_retry(&thread_id).await?;
         let archived_turn_ids = self.store.archived_turn_ids(&run_id, &request_hash)?;
@@ -3259,10 +3258,217 @@ where
         Ok(())
     }
 
-    async fn wait_until_idle(
+    async fn ensure_primary_participant_binding(
+        &self,
+        state: &mut RunState,
+    ) -> Result<PrimaryParticipantBinding, CoordinatorError> {
+        let run_id = state.facts.run_id.to_string();
+        if let Some(binding) = self.store.active_primary_binding(&run_id)? {
+            if binding.source_primary_thread_id != state.facts.primary_thread_id {
+                return Err(CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "active Primary participant binding does not match the frozen Source Primary",
+                ));
+            }
+            self.store
+                .bind_unsent_primary_pending_to_active_binding(&run_id)?;
+            return Ok(binding);
+        }
+
+        let source_thread_id = state.facts.primary_thread_id.clone();
+        loop {
+            let source = self.read_thread_with_retry(&source_thread_id).await?;
+            self.verify_thread_identity(state, Role::Primary, &source)?;
+            match runtime_status(&source)? {
+                ThreadRuntimeStatus::Active => {
+                    self.wait_until_idle(state, &source_thread_id).await?;
+                }
+                ThreadRuntimeStatus::NotLoaded => {
+                    let resumed = self
+                        .resume_thread_with_retry(
+                            &source_thread_id,
+                            &ThreadResumePolicy::Participant(self.participant_mcp_config()),
+                        )
+                        .await?;
+                    verify_requested_thread_identity(&source_thread_id, &resumed)?;
+                    let ready = if resumed.summary.is_active() {
+                        self.wait_until_idle(state, &source_thread_id).await?
+                    } else {
+                        resumed
+                    };
+                    require_idle_thread(&ready, "configured Source Primary")?;
+                    let statuses = self
+                        .list_mcp_server_status_for_preflight(&source_thread_id)
+                        .await?;
+                    verify_participant_patch_capability(&source_thread_id, &statuses)?;
+                    return self.activate_direct_primary_binding(&run_id, &source_thread_id);
+                }
+                ThreadRuntimeStatus::Idle => {
+                    let statuses = self
+                        .list_mcp_server_status_for_preflight(&source_thread_id)
+                        .await?;
+                    if participant_patch_capability_is_exact(&statuses) {
+                        return self.activate_direct_primary_binding(&run_id, &source_thread_id);
+                    }
+                    if self.store.pending_send(&run_id)?.is_some() {
+                        return Err(CoordinatorError::operational(
+                            "COMMUNICATION_FAILURE",
+                            "cannot create an ephemeral Primary binding while a turn outcome is pending or uncertain",
+                        ));
+                    }
+                    return self.create_ephemeral_primary_binding(state, &source).await;
+                }
+                ThreadRuntimeStatus::SystemError => {
+                    return Err(CoordinatorError::operational(
+                        "HISTORY_UNAVAILABLE",
+                        "Source Primary is in systemError state",
+                    ));
+                }
+            }
+        }
+    }
+
+    fn activate_direct_primary_binding(
+        &self,
+        run_id: &str,
+        source_thread_id: &str,
+    ) -> Result<PrimaryParticipantBinding, CoordinatorError> {
+        if self.store.pending_send(run_id)?.is_some() {
+            return self
+                .store
+                .activate_initial_direct_binding_for_pending_send(
+                    run_id,
+                    source_thread_id,
+                    PARTICIPANT_MCP_SERVER,
+                )
+                .map_err(Into::into);
+        }
+        self.store
+            .activate_primary_binding(
+                run_id,
+                source_thread_id,
+                source_thread_id,
+                PrimaryBindingMode::Direct,
+                PARTICIPANT_MCP_SERVER,
+            )
+            .map_err(Into::into)
+    }
+
+    async fn create_ephemeral_primary_binding(
+        &self,
+        state: &RunState,
+        source: &ThreadDetail,
+    ) -> Result<PrimaryParticipantBinding, CoordinatorError> {
+        let source_thread_id = state.facts.primary_thread_id.as_str();
+        self.verify_thread_identity(state, Role::Primary, source)?;
+        require_idle_thread(source, "Source Primary before participant fork")?;
+
+        let policy = ThreadForkPolicy::EphemeralParticipant(self.participant_mcp_config());
+        let forked = self
+            .app
+            .fork_thread(source_thread_id, &policy)
+            .await
+            .map_err(|error| communication_error("thread/fork", Some(source_thread_id), error))?;
+        let effective_thread_id = forked.summary.id.as_str();
+        if effective_thread_id.trim().is_empty()
+            || effective_thread_id == source_thread_id
+            || effective_thread_id == state.facts.reviewer_thread_id
+        {
+            return Err(CoordinatorError::operational(
+                "AMBIGUOUS_THREAD",
+                "ephemeral Primary fork returned an invalid task identity",
+            ));
+        }
+        verify_full_history_fork(source, &forked)?;
+        require_idle_thread(&forked, "ephemeral Primary fork")?;
+        let goal = self.get_thread_goal_with_retry(effective_thread_id).await?;
+        if goal.is_some() {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "ephemeral Primary fork unexpectedly inherited an active goal",
+            ));
+        }
+        let statuses = self
+            .list_mcp_server_status_for_preflight(effective_thread_id)
+            .await?;
+        verify_participant_patch_capability(effective_thread_id, &statuses)?;
+        self.store
+            .activate_primary_binding(
+                &state.facts.run_id.to_string(),
+                source_thread_id,
+                effective_thread_id,
+                PrimaryBindingMode::EphemeralFork,
+                PARTICIPANT_MCP_SERVER,
+            )
+            .map_err(Into::into)
+    }
+
+    async fn prepare_action_thread(
         &self,
         state: &mut RunState,
         role: Role,
+    ) -> Result<PreparedActionThread, CoordinatorError> {
+        let binding = if role == Role::Primary {
+            Some(self.ensure_primary_participant_binding(state).await?)
+        } else {
+            None
+        };
+        let thread_id = binding
+            .as_ref()
+            .map(|binding| binding.effective_primary_thread_id.clone())
+            .unwrap_or_else(|| state.facts.reviewer_thread_id.clone());
+        let detail = self.wait_until_idle(state, &thread_id).await?;
+        let resume_policy = match (role, runtime_status(&detail)?) {
+            (Role::Primary, ThreadRuntimeStatus::NotLoaded) => {
+                ThreadResumePolicy::Participant(self.participant_mcp_config())
+            }
+            (_, ThreadRuntimeStatus::Idle | ThreadRuntimeStatus::NotLoaded) => {
+                ThreadResumePolicy::Default
+            }
+            (_, ThreadRuntimeStatus::Active) => {
+                return Err(CoordinatorError::operational(
+                    "COMMUNICATION_FAILURE",
+                    "task remained active after the bounded idle wait",
+                ));
+            }
+            (_, ThreadRuntimeStatus::SystemError) => {
+                return Err(CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "task is in systemError state",
+                ));
+            }
+        };
+        let resumed = self
+            .resume_thread_with_retry(&thread_id, &resume_policy)
+            .await?;
+        verify_requested_thread_identity(&thread_id, &resumed)?;
+        let ready = if resumed.summary.is_active() {
+            self.wait_until_idle(state, &thread_id).await?
+        } else {
+            resumed
+        };
+        require_idle_thread(&ready, "task prepared for coordinator action")?;
+        if role == Role::Primary {
+            let statuses = self
+                .list_mcp_server_status_for_preflight(&thread_id)
+                .await?;
+            verify_participant_patch_capability(&thread_id, &statuses)?;
+        }
+        Ok(PreparedActionThread {
+            thread_id,
+            primary_binding: binding,
+        })
+    }
+
+    fn participant_mcp_config(&self) -> ParticipantMcpConfig {
+        ParticipantMcpConfig {
+            participant_executable: self.options.participant_mcp_executable.clone(),
+        }
+    }
+
+    async fn wait_until_idle(
+        &self,
+        state: &mut RunState,
         thread_id: &str,
     ) -> Result<ThreadDetail, CoordinatorError> {
         let mut idle_deadline = tokio::time::Instant::now() + self.options.wait_timeout;
@@ -3277,7 +3483,7 @@ where
                 ));
             }
             let detail = self.read_thread_with_retry(thread_id).await?;
-            self.verify_thread_identity(state, role, &detail)?;
+            verify_requested_thread_identity(thread_id, &detail)?;
             let progress = thread_progress_fingerprint(&detail);
             if last_progress.as_deref() != Some(progress.as_str()) {
                 last_progress = Some(progress);
@@ -3597,6 +3803,30 @@ where
         ))
     }
 
+    async fn get_thread_goal_with_retry(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<Value>, CoordinatorError> {
+        let attempts = self.options.communication_attempts.max(1);
+        let mut last_error = None;
+        for attempt in 0..attempts {
+            match self.app.get_thread_goal(thread_id).await {
+                Ok(goal) => return Ok(goal),
+                Err(error) => last_error = Some(error),
+            }
+            if attempt + 1 < attempts {
+                tokio::time::sleep(self.options.poll_interval).await;
+            }
+        }
+        Err(communication_error(
+            "thread/goal/get",
+            Some(thread_id),
+            last_error.unwrap_or_else(|| {
+                AppServerError::InvalidResponse("thread goal read failed without an error".into())
+            }),
+        ))
+    }
+
     async fn list_mcp_server_status_for_preflight(
         &self,
         thread_id: &str,
@@ -3666,21 +3896,7 @@ fn verify_participant_patch_capability(
     thread_id: &str,
     statuses: &[McpServerStatus],
 ) -> Result<(), CoordinatorError> {
-    let participant_servers = statuses
-        .iter()
-        .filter(|status| status.name == PARTICIPANT_MCP_SERVER)
-        .collect::<Vec<_>>();
-    let valid = match participant_servers.as_slice() {
-        [server] => {
-            server.tools.len() == 1
-                && server
-                    .tools
-                    .get(PARTICIPANT_PATCH_TOOL)
-                    .is_some_and(Value::is_object)
-        }
-        _ => false,
-    };
-    if !valid {
+    if !participant_patch_capability_is_exact(statuses) {
         return Err(CoordinatorError::app_server(
             "PATCH_TOOL_UNAVAILABLE",
             format!(
@@ -3690,6 +3906,123 @@ fn verify_participant_patch_capability(
             Some(thread_id),
         ));
     }
+    Ok(())
+}
+
+fn participant_patch_capability_is_exact(statuses: &[McpServerStatus]) -> bool {
+    let participant_servers = statuses
+        .iter()
+        .filter(|status| status.name == PARTICIPANT_MCP_SERVER)
+        .collect::<Vec<_>>();
+    match participant_servers.as_slice() {
+        [server] => {
+            server.tools.len() == 1
+                && server
+                    .tools
+                    .get(PARTICIPANT_PATCH_TOOL)
+                    .is_some_and(Value::is_object)
+        }
+        _ => false,
+    }
+}
+
+fn runtime_status(detail: &ThreadDetail) -> Result<ThreadRuntimeStatus, CoordinatorError> {
+    detail.summary.runtime_status().map_err(|detail| {
+        CoordinatorError::operational(
+            "HISTORY_UNAVAILABLE",
+            format!("task has an unsupported runtime status: {detail}"),
+        )
+    })
+}
+
+fn require_idle_thread(detail: &ThreadDetail, description: &str) -> Result<(), CoordinatorError> {
+    if runtime_status(detail)? != ThreadRuntimeStatus::Idle {
+        return Err(CoordinatorError::operational(
+            "HISTORY_UNAVAILABLE",
+            format!("{description} is not idle"),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_requested_thread_identity(
+    requested_thread_id: &str,
+    detail: &ThreadDetail,
+) -> Result<(), CoordinatorError> {
+    if detail.summary.id != requested_thread_id {
+        return Err(CoordinatorError::operational(
+            "AMBIGUOUS_THREAD",
+            "App Server returned a different task than requested",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_full_history_fork(
+    source: &ThreadDetail,
+    forked: &ThreadDetail,
+) -> Result<(), CoordinatorError> {
+    let source_ids = canonical_turn_id_sequence(source, "Source Primary")?;
+    let forked_ids = canonical_turn_id_sequence(forked, "ephemeral Primary fork")?;
+    if source_ids != forked_ids {
+        return Err(CoordinatorError::operational(
+            "HISTORY_UNAVAILABLE",
+            "ephemeral Primary fork does not preserve the complete Source Primary turn history",
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_turn_id_sequence(
+    detail: &ThreadDetail,
+    description: &str,
+) -> Result<Vec<String>, CoordinatorError> {
+    let mut seen = HashSet::new();
+    let mut ids = Vec::with_capacity(detail.turns.len());
+    for turn in &detail.turns {
+        let id = turn
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    format!("{description} contains a turn without a canonical ID"),
+                )
+            })?;
+        if !seen.insert(id.to_owned()) {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                format!("{description} contains duplicate turn ID {id}"),
+            ));
+        }
+        ids.push(id.to_owned());
+    }
+    Ok(ids)
+}
+
+fn append_primary_execution_identity(
+    prompt: &mut String,
+    binding: &PrimaryParticipantBinding,
+) -> Result<(), CoordinatorError> {
+    prompt.push_str(
+        "\nPrimary participant execution identity:\n\
+         The Effective Primary below represents the Source Primary and must preserve its complete implementation contract. \
+         It may write only to the coordinator-authorized integration worktree.\n\
+         ```json\n",
+    );
+    prompt.push_str(
+        &serde_json::to_string(&json!({
+            "source_primary_thread_id": binding.source_primary_thread_id,
+            "effective_primary_thread_id": binding.effective_primary_thread_id,
+            "binding_mode": binding.mode,
+            "binding_generation": binding.generation,
+        }))
+        .map_err(|error| {
+            CoordinatorError::operational("SERIALIZATION_FAILURE", error.to_string())
+        })?,
+    );
+    prompt.push_str("\n```\n");
     Ok(())
 }
 

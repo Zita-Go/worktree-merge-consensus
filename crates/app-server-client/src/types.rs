@@ -42,10 +42,6 @@ pub struct ParticipantMcpConfig {
 pub enum ThreadResumePolicy {
     Default,
     Participant(ParticipantMcpConfig),
-    #[doc(hidden)]
-    PrimaryIntegration {
-        participant_executable: PathBuf,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

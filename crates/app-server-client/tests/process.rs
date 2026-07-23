@@ -228,9 +228,9 @@ async fn reconnecting_client_preserves_participant_resume_policy() {
     client
         .resume_thread(
             "thread-1",
-            &ThreadResumePolicy::PrimaryIntegration {
+            &ThreadResumePolicy::Participant(ParticipantMcpConfig {
                 participant_executable: std::path::PathBuf::from("/opt/codex-consensus"),
-            },
+            }),
         )
         .await
         .unwrap();

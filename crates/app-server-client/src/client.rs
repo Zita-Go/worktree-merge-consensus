@@ -978,14 +978,6 @@ fn resume_params(thread_id: &str, policy: &ThreadResumePolicy) -> Result<Value, 
             "threadId": thread_id,
             "config": participant_mcp_config(participant)?,
         })),
-        ThreadResumePolicy::PrimaryIntegration {
-            participant_executable,
-        } => Ok(json!({
-            "threadId": thread_id,
-            "config": participant_mcp_config(&ParticipantMcpConfig {
-                participant_executable: participant_executable.clone(),
-            })?,
-        })),
     }
 }
 

@@ -570,6 +570,190 @@ impl SqliteRunStore {
         query_active_primary_binding(&connection, run_id)
     }
 
+    pub fn activate_initial_direct_binding_for_pending_send(
+        &self,
+        run_id: &str,
+        source_primary_thread_id: &str,
+        participant_server: &str,
+    ) -> Result<PrimaryParticipantBinding, StoreError> {
+        if source_primary_thread_id.trim().is_empty() || participant_server.trim().is_empty() {
+            return Err(StoreError::IncompatibleState(
+                "initial direct binding identities must be nonempty".to_owned(),
+            ));
+        }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        ensure_run_exists(&transaction, run_id)?;
+        let frozen_primary = transaction.query_row(
+            "SELECT primary_thread_id FROM source_facts WHERE run_id = ?1",
+            [run_id],
+            |row| row.get::<_, String>(0),
+        )?;
+        if source_primary_thread_id != frozen_primary {
+            return Err(StoreError::IncompatibleState(format!(
+                "run {run_id} initial direct binding does not match frozen Primary task"
+            )));
+        }
+        if query_active_primary_binding(&transaction, run_id)?.is_some() {
+            return Err(StoreError::IncompatibleState(format!(
+                "run {run_id} already has an active Primary binding"
+            )));
+        }
+        let pending = transaction
+            .query_row(
+                "SELECT role, thread_id, participant_binding_generation
+                 FROM turns
+                 WHERE run_id = ?1 AND delivery_state IN ('PENDING', 'SENT')
+                 ORDER BY id DESC LIMIT 1",
+                [run_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<u32>>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::IncompatibleState(format!(
+                    "run {run_id} has no pending send for initial direct binding migration"
+                ))
+            })?;
+        let pending_count = transaction.query_row(
+            "SELECT COUNT(*) FROM turns
+             WHERE run_id = ?1 AND delivery_state IN ('PENDING', 'SENT')",
+            [run_id],
+            |row| row.get::<_, u64>(0),
+        )?;
+        if pending_count != 1
+            || pending.0 != "PRIMARY"
+            || pending
+                .1
+                .as_deref()
+                .is_some_and(|id| id != source_primary_thread_id)
+            || pending.2.is_some()
+        {
+            return Err(StoreError::IncompatibleState(format!(
+                "run {run_id} pending send is not eligible for initial direct binding migration"
+            )));
+        }
+
+        let generation = transaction.query_row(
+            "SELECT COALESCE(MAX(generation), 0) + 1
+             FROM primary_participant_bindings WHERE run_id = ?1",
+            [run_id],
+            |row| row.get::<_, u32>(0),
+        )?;
+        let timestamp = now_unix();
+        transaction.execute(
+            "INSERT INTO primary_participant_bindings (
+                run_id, generation, source_primary_thread_id,
+                effective_primary_thread_id, mode, participant_server,
+                active, created_at, verified_at
+             ) VALUES (?1, ?2, ?3, ?3, 'DIRECT', ?4, 1, ?5, ?5)",
+            params![
+                run_id,
+                generation,
+                source_primary_thread_id,
+                participant_server,
+                timestamp,
+            ],
+        )?;
+        let changed = transaction.execute(
+            "UPDATE turns
+             SET participant_binding_generation = ?1
+             WHERE run_id = ?2 AND delivery_state IN ('PENDING', 'SENT')
+               AND participant_binding_generation IS NULL",
+            params![generation, run_id],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::IncompatibleState(format!(
+                "run {run_id} pending send changed during initial direct binding migration"
+            )));
+        }
+        transaction.commit()?;
+        Ok(PrimaryParticipantBinding {
+            run_id: run_id.to_owned(),
+            source_primary_thread_id: source_primary_thread_id.to_owned(),
+            effective_primary_thread_id: source_primary_thread_id.to_owned(),
+            mode: PrimaryBindingMode::Direct,
+            generation,
+            participant_server: participant_server.to_owned(),
+            created_at: timestamp,
+            verified_at: timestamp,
+        })
+    }
+
+    pub fn bind_unsent_primary_pending_to_active_binding(
+        &self,
+        run_id: &str,
+    ) -> Result<(), StoreError> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let Some(binding) = query_active_primary_binding(&transaction, run_id)? else {
+            return Err(StoreError::IncompatibleState(format!(
+                "run {run_id} has no active Primary binding"
+            )));
+        };
+        let pending = transaction
+            .query_row(
+                "SELECT role, thread_id, turn_id, participant_binding_generation
+                 FROM turns
+                 WHERE run_id = ?1 AND delivery_state IN ('PENDING', 'SENT')
+                 ORDER BY id DESC LIMIT 1",
+                [run_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<u32>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((role, thread_id, turn_id, generation)) = pending else {
+            transaction.commit()?;
+            return Ok(());
+        };
+        if role != "PRIMARY" {
+            return Err(StoreError::IncompatibleState(format!(
+                "run {run_id} pending send belongs to Reviewer, not Primary"
+            )));
+        }
+        if let Some(generation) = generation {
+            if generation != binding.generation {
+                return Err(StoreError::IncompatibleState(format!(
+                    "run {run_id} pending send does not match the active Primary binding"
+                )));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
+        if thread_id.is_some() || turn_id.is_some() {
+            return Err(StoreError::IncompatibleState(format!(
+                "run {run_id} cannot bind a sent or uncertain legacy turn to a new Primary binding"
+            )));
+        }
+        let changed = transaction.execute(
+            "UPDATE turns
+             SET participant_binding_generation = ?1
+             WHERE run_id = ?2 AND delivery_state = 'PENDING'
+               AND thread_id IS NULL AND turn_id IS NULL
+               AND participant_binding_generation IS NULL",
+            params![binding.generation, run_id],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::IncompatibleState(format!(
+                "run {run_id} unsent Primary pending changed while binding it"
+            )));
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn primary_binding(
         &self,
         run_id: &str,

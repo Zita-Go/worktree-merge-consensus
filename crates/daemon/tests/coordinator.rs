@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -12,8 +12,9 @@ use std::{
 
 use app_server_client::{
     AppEvent, AppServer, AppServerError, CommandExecRequest, CommandExecResult, InitializeInfo,
-    McpServerStatus, PARTICIPANT_MCP_SERVER, PARTICIPANT_PATCH_TOOL, ThreadDetail, ThreadPage,
-    ThreadResumePolicy, ThreadSummary, TurnExecutionPolicy, TurnHandle,
+    McpServerStatus, PARTICIPANT_MCP_SERVER, PARTICIPANT_PATCH_TOOL, ParticipantMcpConfig,
+    ThreadDetail, ThreadForkPolicy, ThreadPage, ThreadResumePolicy, ThreadRuntimeStatus,
+    ThreadSummary, TurnExecutionPolicy, TurnHandle,
 };
 use async_trait::async_trait;
 use consensus_core::{
@@ -22,6 +23,7 @@ use consensus_core::{
     state::{NextAction, Phase, Role, RunDiagnostic, RunFacts, RunState, RunStatus, TestEvidence},
 };
 use consensus_daemon::{
+    PrimaryBindingMode,
     coordinator::{
         Coordinator, CoordinatorOptions, GitRepositorySafety, RepositorySafety, SafetyError,
         StartRequest,
@@ -386,18 +388,270 @@ async fn participant_patch_preflight_orders_resume_inventory_and_turn_start() {
         ]
     );
     let resume_policies = app.resume_policies();
-    assert!(matches!(
-        &resume_policies[4],
-        ThreadResumePolicy::PrimaryIntegration {
-            participant_executable
-        } if participant_executable == &participant_mcp_executable()
-    ));
     assert!(
         resume_policies
             .iter()
-            .enumerate()
-            .all(|(index, policy)| index == 4 || policy == &ThreadResumePolicy::Default)
+            .all(|policy| policy == &ThreadResumePolicy::Default)
     );
+    assert_primary_turns_have_exact_preflight(&app, "primary");
+}
+
+#[tokio::test]
+async fn not_loaded_primary_binds_directly_before_the_first_primary_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let inspection_store = store.clone();
+    let app = Arc::new(
+        FakeAppServer::new(conflict_free_replies())
+            .without_primary_participant()
+            .with_primary_runtime_status(ThreadRuntimeStatus::NotLoaded),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let result = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Accepted);
+    let binding = inspection_store
+        .active_primary_binding(RUN_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.mode, PrimaryBindingMode::Direct);
+    assert_eq!(binding.generation, 1);
+    assert_eq!(binding.source_primary_thread_id, "primary");
+    assert_eq!(binding.effective_primary_thread_id, "primary");
+    assert!(app.forks().is_empty());
+    assert!(matches!(
+        app.resume_policies().first(),
+        Some(ThreadResumePolicy::Participant(ParticipantMcpConfig {
+            participant_executable
+        })) if participant_executable == &participant_mcp_executable()
+    ));
+    assert_primary_turns_have_exact_preflight(&app, "primary");
+    assert!(
+        app.request_order()
+            .iter()
+            .filter(|request| request.starts_with("reviewer:"))
+            .all(|request| request.starts_with("reviewer:"))
+    );
+}
+
+#[tokio::test]
+async fn loaded_primary_with_existing_participant_binds_directly_without_fork() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let inspection_store = store.clone();
+    let app = Arc::new(FakeAppServer::new(conflict_free_replies()));
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let result = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Accepted);
+    let binding = inspection_store
+        .active_primary_binding(RUN_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.mode, PrimaryBindingMode::Direct);
+    assert_eq!(binding.source_primary_thread_id, "primary");
+    assert_eq!(binding.effective_primary_thread_id, "primary");
+    assert!(app.forks().is_empty());
+    assert_primary_turns_have_exact_preflight(&app, "primary");
+    let prompts = app.prompts();
+    let primary_prompt = prompts
+        .iter()
+        .find(|prompt| prompt.contains("REQUEST_PRIMARY_CONTRACT"))
+        .unwrap();
+    assert_eq!(
+        prompt_json_block(primary_prompt, "Primary participant execution identity:"),
+        json!({
+            "source_primary_thread_id": "primary",
+            "effective_primary_thread_id": "primary",
+            "binding_mode": "DIRECT",
+            "binding_generation": 1
+        })
+    );
+    assert!(
+        prompts
+            .iter()
+            .filter(|prompt| prompt.contains("REQUEST_REVIEWER"))
+            .all(|prompt| !prompt.contains("Primary participant execution identity:"))
+    );
+}
+
+#[tokio::test]
+async fn loaded_primary_uses_one_full_history_ephemeral_mirror() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let inspection_store = store.clone();
+    let app = Arc::new(FakeAppServer::new(conflict_free_replies()).without_primary_participant());
+    app.inject_completed_turn(
+        "primary",
+        "source-history-1",
+        "historical source prompt one",
+        json!("historical source response one"),
+    );
+    app.inject_completed_turn(
+        "primary",
+        "source-history-2",
+        "historical source prompt two",
+        json!("historical source response two"),
+    );
+    let source_turn_ids = app.turn_ids("primary");
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store,
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let result = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Accepted);
+    let binding = inspection_store
+        .active_primary_binding(RUN_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.mode, PrimaryBindingMode::EphemeralFork);
+    assert_eq!(binding.generation, 1);
+    assert_eq!(binding.source_primary_thread_id, "primary");
+    assert_eq!(
+        binding.effective_primary_thread_id,
+        "primary-consensus-mirror-1"
+    );
+    let forks = app.forks();
+    assert_eq!(forks.len(), 1);
+    assert!(matches!(
+        &forks[0],
+        (source, effective, ThreadForkPolicy::EphemeralParticipant(
+            ParticipantMcpConfig {
+                participant_executable
+            }
+        )) if source == "primary"
+            && effective == "primary-consensus-mirror-1"
+            && participant_executable == &participant_mcp_executable()
+    ));
+    assert!(
+        app.request_order()
+            .iter()
+            .filter(|request| request.contains("REQUEST_PRIMARY"))
+            .all(|request| request.starts_with("primary-consensus-mirror-1:"))
+    );
+    assert!(
+        app.request_order()
+            .iter()
+            .filter(|request| request.contains("REQUEST_REVIEWER"))
+            .all(|request| request.starts_with("reviewer:"))
+    );
+    assert_primary_turns_have_exact_preflight(&app, "primary-consensus-mirror-1");
+    assert_eq!(app.turn_ids("primary"), source_turn_ids);
+    assert!(
+        app.turn_ids("primary-consensus-mirror-1")
+            .starts_with(&source_turn_ids)
+    );
+    let primary_prompt = app
+        .prompts()
+        .into_iter()
+        .find(|prompt| prompt.contains("REQUEST_PRIMARY_CONTRACT"))
+        .unwrap();
+    assert_eq!(
+        prompt_json_block(&primary_prompt, "Primary participant execution identity:"),
+        json!({
+            "source_primary_thread_id": "primary",
+            "effective_primary_thread_id": "primary-consensus-mirror-1",
+            "binding_mode": "EPHEMERAL_FORK",
+            "binding_generation": 1
+        })
+    );
+}
+
+#[tokio::test]
+async fn invalid_primary_mirror_fails_before_any_model_turn() {
+    for (case, expected_reason) in [
+        ("source-id", "AMBIGUOUS_THREAD"),
+        ("reviewer-id", "AMBIGUOUS_THREAD"),
+        ("missing-history", "HISTORY_UNAVAILABLE"),
+        ("reordered-history", "HISTORY_UNAVAILABLE"),
+        ("goal", "HISTORY_UNAVAILABLE"),
+        ("active", "HISTORY_UNAVAILABLE"),
+        ("missing-tool", "PATCH_TOOL_UNAVAILABLE"),
+        ("expanded-inventory", "PATCH_TOOL_UNAVAILABLE"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+        let base = FakeAppServer::new(conflict_free_replies()).without_primary_participant();
+        let configured = match case {
+            "source-id" => base.with_fork_identity(ForkIdentity::Source),
+            "reviewer-id" => base.with_fork_identity(ForkIdentity::Reviewer),
+            "missing-history" => base.with_fork_history(ForkHistory::MissingLast),
+            "reordered-history" => base.with_fork_history(ForkHistory::Reversed),
+            "goal" => base.with_fork_goal(json!({"status": "active"})),
+            "active" => base.with_fork_runtime_status(ThreadRuntimeStatus::Active),
+            "missing-tool" => base.with_participant_inventory(ParticipantInventory::MissingTool),
+            "expanded-inventory" => {
+                base.with_participant_inventory(ParticipantInventory::ExtraTool)
+            }
+            _ => unreachable!(),
+        };
+        let app = Arc::new(configured);
+        app.inject_completed_turn(
+            "primary",
+            "source-history-1",
+            "historical source prompt one",
+            json!("historical source response one"),
+        );
+        app.inject_completed_turn(
+            "primary",
+            "source-history-2",
+            "historical source prompt two",
+            json!("historical source response two"),
+        );
+        let safety = Arc::new(RecordingSafety::default());
+        let coordinator =
+            Coordinator::new(Arc::clone(&app), store, Arc::clone(&safety), fast_options());
+
+        coordinator
+            .start(fixture_run(), start_request())
+            .await
+            .unwrap();
+        let blocked = coordinator.drive(RUN_ID).await.unwrap();
+
+        assert_eq!(blocked.status, RunStatus::Blocked, "case={case}");
+        assert_eq!(
+            blocked.reason_code.as_deref(),
+            Some(expected_reason),
+            "case={case}"
+        );
+        assert_eq!(app.forks().len(), 1, "case={case}");
+        assert!(app.request_order().is_empty(), "case={case}");
+        assert!(
+            safety
+                .events()
+                .iter()
+                .all(|event| !event.starts_with("result:")),
+            "case={case}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -4265,6 +4519,14 @@ struct FakeAppServer {
     start_error: Option<String>,
     lose_next_start_response: AtomicBool,
     participant_inventory: ParticipantInventory,
+    primary_runtime_status: Mutex<ThreadRuntimeStatus>,
+    participant_threads: Mutex<BTreeSet<String>>,
+    forks: Mutex<Vec<(String, String, ThreadForkPolicy)>>,
+    goals: Mutex<BTreeMap<String, Option<Value>>>,
+    fork_identity: ForkIdentity,
+    fork_history: ForkHistory,
+    fork_runtime_status: ThreadRuntimeStatus,
+    fork_goal: Option<Value>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -4276,6 +4538,22 @@ enum ParticipantInventory {
     ExtraTool,
     MalformedDefinition,
     StatusUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ForkIdentity {
+    #[default]
+    Mirror,
+    Source,
+    Reviewer,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ForkHistory {
+    #[default]
+    Exact,
+    MissingLast,
+    Reversed,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -4346,6 +4624,14 @@ impl FakeAppServer {
             start_error: None,
             lose_next_start_response: AtomicBool::new(false),
             participant_inventory: ParticipantInventory::Available,
+            primary_runtime_status: Mutex::new(ThreadRuntimeStatus::Idle),
+            participant_threads: Mutex::new(BTreeSet::from(["primary".to_owned()])),
+            forks: Mutex::new(Vec::new()),
+            goals: Mutex::new(BTreeMap::new()),
+            fork_identity: ForkIdentity::Mirror,
+            fork_history: ForkHistory::Exact,
+            fork_runtime_status: ThreadRuntimeStatus::Idle,
+            fork_goal: None,
         }
     }
 
@@ -4385,6 +4671,36 @@ impl FakeAppServer {
         self
     }
 
+    fn with_primary_runtime_status(self, status: ThreadRuntimeStatus) -> Self {
+        *self.primary_runtime_status.lock().unwrap() = status;
+        self
+    }
+
+    fn without_primary_participant(self) -> Self {
+        self.participant_threads.lock().unwrap().remove("primary");
+        self
+    }
+
+    fn with_fork_identity(mut self, identity: ForkIdentity) -> Self {
+        self.fork_identity = identity;
+        self
+    }
+
+    fn with_fork_history(mut self, history: ForkHistory) -> Self {
+        self.fork_history = history;
+        self
+    }
+
+    fn with_fork_runtime_status(mut self, status: ThreadRuntimeStatus) -> Self {
+        self.fork_runtime_status = status;
+        self
+    }
+
+    fn with_fork_goal(mut self, goal: Value) -> Self {
+        self.fork_goal = Some(goal);
+        self
+    }
+
     fn with_approval_mode(self, mode: Option<&str>) -> Self {
         *self.approval_mode.lock().unwrap() = mode.map(str::to_owned);
         self
@@ -4410,6 +4726,17 @@ impl FakeAppServer {
 
     fn resume_policies(&self) -> Vec<ThreadResumePolicy> {
         self.resume_policies.lock().unwrap().clone()
+    }
+
+    fn forks(&self) -> Vec<(String, String, ThreadForkPolicy)> {
+        self.forks.lock().unwrap().clone()
+    }
+
+    fn turn_ids(&self, thread_id: &str) -> Vec<String> {
+        self.threads.lock().unwrap()[thread_id]
+            .iter()
+            .map(|turn| turn["id"].as_str().unwrap().to_owned())
+            .collect()
     }
 
     fn reply_types(&self) -> Vec<String> {
@@ -4716,6 +5043,11 @@ impl FakeAppServer {
             .cloned()
             .unwrap();
         let mut summary = summary(thread_id);
+        if thread_id == "primary" {
+            summary.status = runtime_status_json(*self.primary_runtime_status.lock().unwrap());
+        } else if thread_id.contains("-consensus-mirror-") {
+            summary.status = runtime_status_json(self.fork_runtime_status);
+        }
         if turns
             .iter()
             .any(|turn| turn.get("status").and_then(Value::as_str) == Some("inProgress"))
@@ -4790,13 +5122,85 @@ impl AppServer for FakeAppServer {
             .push(format!("thread/resume:{thread_id}"));
         self.resumes.lock().unwrap().push(thread_id.to_owned());
         self.resume_policies.lock().unwrap().push(policy.clone());
+        if thread_id == "primary"
+            && *self.primary_runtime_status.lock().unwrap() == ThreadRuntimeStatus::NotLoaded
+        {
+            if let ThreadResumePolicy::Participant(ParticipantMcpConfig { .. }) = policy {
+                self.participant_threads
+                    .lock()
+                    .unwrap()
+                    .insert(thread_id.to_owned());
+            }
+            *self.primary_runtime_status.lock().unwrap() = ThreadRuntimeStatus::Idle;
+        }
         *self
             .resume_tickets
             .lock()
             .unwrap()
-            .get_mut(thread_id)
-            .unwrap() += 1;
+            .entry(thread_id.to_owned())
+            .or_default() += 1;
         Ok(self.detail(thread_id))
+    }
+
+    async fn fork_thread(
+        &self,
+        source_thread_id: &str,
+        policy: &ThreadForkPolicy,
+    ) -> Result<ThreadDetail, AppServerError> {
+        let effective_thread_id = match self.fork_identity {
+            ForkIdentity::Mirror => format!("{source_thread_id}-consensus-mirror-1"),
+            ForkIdentity::Source => source_thread_id.to_owned(),
+            ForkIdentity::Reviewer => "reviewer".to_owned(),
+        };
+        let mut source_turns = self
+            .threads
+            .lock()
+            .unwrap()
+            .get(source_thread_id)
+            .cloned()
+            .ok_or_else(|| AppServerError::InvalidResponse("source task missing".to_owned()))?;
+        match self.fork_history {
+            ForkHistory::Exact => {}
+            ForkHistory::MissingLast => {
+                source_turns.pop();
+            }
+            ForkHistory::Reversed => source_turns.reverse(),
+        }
+        self.threads
+            .lock()
+            .unwrap()
+            .insert(effective_thread_id.clone(), source_turns);
+        self.resume_tickets
+            .lock()
+            .unwrap()
+            .insert(effective_thread_id.clone(), 0);
+        self.participant_threads
+            .lock()
+            .unwrap()
+            .insert(effective_thread_id.clone());
+        if let Some(goal) = &self.fork_goal {
+            self.goals
+                .lock()
+                .unwrap()
+                .insert(effective_thread_id.clone(), Some(goal.clone()));
+        }
+        self.forks.lock().unwrap().push((
+            source_thread_id.to_owned(),
+            effective_thread_id.clone(),
+            policy.clone(),
+        ));
+        self.method_order.lock().unwrap().push(format!(
+            "thread/fork:{source_thread_id}:{effective_thread_id}"
+        ));
+        Ok(self.detail(&effective_thread_id))
+    }
+
+    async fn get_thread_goal(&self, thread_id: &str) -> Result<Option<Value>, AppServerError> {
+        self.method_order
+            .lock()
+            .unwrap()
+            .push(format!("thread/goal/get:{thread_id}"));
+        Ok(self.goals.lock().unwrap().get(thread_id).cloned().flatten())
     }
 
     async fn list_mcp_server_status(
@@ -4807,6 +5211,12 @@ impl AppServer for FakeAppServer {
             .lock()
             .unwrap()
             .push(format!("mcpServerStatus/list:{thread_id}"));
+        if !self.participant_threads.lock().unwrap().contains(thread_id) {
+            return Ok(vec![McpServerStatus {
+                name: "unrelatedServer".to_owned(),
+                tools: BTreeMap::new(),
+            }]);
+        }
         let patch_definition = match self.participant_inventory {
             ParticipantInventory::MalformedDefinition => json!("not-an-object"),
             _ => json!({"inputSchema": {"type": "object"}}),
@@ -5190,6 +5600,15 @@ fn summary(thread_id: &str) -> ThreadSummary {
     }
 }
 
+fn runtime_status_json(status: ThreadRuntimeStatus) -> Value {
+    match status {
+        ThreadRuntimeStatus::NotLoaded => json!({"type": "notLoaded"}),
+        ThreadRuntimeStatus::Idle => json!({"type": "idle"}),
+        ThreadRuntimeStatus::Active => json!({"type": "active", "activeFlags": []}),
+        ThreadRuntimeStatus::SystemError => json!({"type": "systemError"}),
+    }
+}
+
 fn prompt_action(prompt: &str) -> &'static str {
     for action in [
         "REQUEST_PRIMARY_CONTRACT",
@@ -5205,6 +5624,24 @@ fn prompt_action(prompt: &str) -> &'static str {
         }
     }
     panic!("prompt did not contain a known action")
+}
+
+fn assert_primary_turns_have_exact_preflight(app: &FakeAppServer, thread_id: &str) {
+    let methods = app.method_order();
+    let turn_prefix = format!("turn/start:{thread_id}:REQUEST_PRIMARY");
+    let resume = format!("thread/resume:{thread_id}");
+    let inventory = format!("mcpServerStatus/list:{thread_id}");
+    let primary_turns = methods
+        .iter()
+        .enumerate()
+        .filter(|(_, method)| method.starts_with(&turn_prefix))
+        .collect::<Vec<_>>();
+    assert!(!primary_turns.is_empty());
+    for (index, _) in primary_turns {
+        assert!(index >= 2);
+        assert_eq!(methods[index - 2], resume);
+        assert_eq!(methods[index - 1], inventory);
+    }
 }
 
 fn prompt_json_block(prompt: &str, heading: &str) -> Value {
@@ -5547,7 +5984,8 @@ async fn seed_corrective_patch_tool_blocker(
     RunState,
 ) {
     let temp = tempfile::tempdir().unwrap();
-    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let store_path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&store_path).unwrap();
     let app = Arc::new(
         FakeAppServer::new(corrective_recovery_replies())
             .with_verification_behavior(VerificationBehavior::FailedExecutionThenPass),
@@ -5573,6 +6011,24 @@ async fn seed_corrective_patch_tool_blocker(
     assert_eq!(blocked.integration_sha.as_deref(), Some(INTEGRATION_SHA));
     assert!(blocked.test_evidence.iter().any(|item| item.exit_code != 0));
     assert!(blocked.accepted_result.is_none());
+    Connection::open(store_path)
+        .unwrap()
+        .execute(
+            "UPDATE turns
+             SET capability_generation = ?1,
+                 participant_binding_generation = NULL
+             WHERE id = (
+                 SELECT id FROM turns
+                 WHERE run_id = ?2 AND delivery_state = 'ACCEPTED'
+                   AND role = 'PRIMARY' AND phase = 'INTEGRATE'
+                 ORDER BY id DESC LIMIT 1
+             )",
+            params![
+                consensus_daemon::store::LEGACY_PARTICIPANT_CAPABILITY_GENERATION,
+                RUN_ID
+            ],
+        )
+        .unwrap();
     (temp, coordinator, app, store, blocked)
 }
 
