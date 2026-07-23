@@ -163,10 +163,12 @@ Version 0.2.7 adds task-scoped participant patch-tool injection for Primary
 integration turns. The coordinator, not the operator plugin, resumes the
 existing Primary task with the `worktreeMergeConsensusParticipant` MCP server,
 whose hidden command is `participant-mcp-server` and whose inventory must be
-exactly `consensus_apply_patch`. Before every Primary integration `turn/start`,
-it calls `mcpServerStatus/list` for that task with `detail:
-"toolsAndAuthOnly"`; missing, malformed, or additional tools fail closed before
-the turn starts. Ordinary and non-integration resumes remain `threadId`-only.
+exactly `consensus_apply_patch`. The Primary integration
+`thread/resume.primaryIntegration` variant uses `threadId` plus `config`; the
+default `thread/resume.default` variant remains `threadId`-only. Before every
+Primary integration `turn/start`, it calls
+`mcpServerStatus/list` for that task with `detail: "toolsAndAuthOnly"`; missing,
+malformed, or additional tools fail closed before the turn starts.
 The operator plugin's eight tools are not evidence that the participant server
 is visible: coordinator-owned injection and per-turn preflight are required.
 

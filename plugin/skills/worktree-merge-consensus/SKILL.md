@@ -65,10 +65,11 @@ Release 0.2.7 makes that participant capability coordinator-owned rather than
 an inference from the operator plugin. For every Primary integration turn, the
 coordinator injects the task-scoped `worktreeMergeConsensusParticipant` server
 through `participant-mcp-server` and preflights `mcpServerStatus/list` with
-`detail: "toolsAndAuthOnly"`. The participant server must expose exactly
-`consensus_apply_patch`; the operator plugin's eight tools do not prove that
-the participant task can see it. Ordinary and non-integration task resumes do
-not receive this configuration.
+`detail: "toolsAndAuthOnly"` before `turn/start`. The participant server must
+expose exactly `consensus_apply_patch`; the operator plugin's eight tools do
+not prove that the participant task can see it. Only the Primary integration
+resume variant carries `config`; default, ordinary, and non-integration task
+resumes remain `threadId`-only.
 
 Use those CLI commands only for diagnostics or when the user explicitly requests the CLI surface. If no `consensus_*` MCP tools are exposed, run `codex mcp list --json`, `command -v codex-consensus`, and `codex-consensus doctor` when shell access is available. Report whether `worktreeMergeConsensus` is absent, disabled, or unable to start, then stop. A successful CLI doctor does not prove that the plugin MCP tools were loaded. Do not search for a `consensus_doctor` binary or substitute ordinary task/thread tools.
 

@@ -62,7 +62,9 @@ configuration for `worktreeMergeConsensusParticipant`; it launches the hidden
 `consensus_apply_patch`. The coordinator calls `mcpServerStatus/list` with the
 task ID and `detail: "toolsAndAuthOnly"` before every such turn. The operator
 plugin's eight-tool inventory is separate and never proves participant tool
-visibility. Ordinary, non-integration resumes remain task-ID-only. Reading task
+visibility. The `primaryIntegration` resume variant carries task ID plus
+`config`; the default, ordinary, and non-integration variant remains
+`threadId`-only. Reading task
 history is not a substitute for resuming a task that App Server reports as
 `notLoaded`. Version 0.1.26 treats this as a bounded inactivity wait: the
 default idle window is 30 minutes and renews only when canonical task status or

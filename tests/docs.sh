@@ -74,23 +74,104 @@ for method in turn/interrupt command/exec config/read config/batchWrite mcpServe
     fail "compatibility policy is missing $method"
 done
 
-for document in \
-  README.md \
-  README.zh-CN.md \
-  docs/compatibility.md \
-  docs/protocol-v1.md \
-  docs/protocol-v2.md \
-  plugin/skills/worktree-merge-consensus/SKILL.md \
-  plugin/skills/worktree-merge-consensus/references/protocol.md; do
-  for marker in \
-    mcpServerStatus/list \
-    worktreeMergeConsensusParticipant \
-    participant-mcp-server \
-    CONTROLLED_PATCH_TOOL_UNAVAILABLE; do
-    grep -Fq "$marker" "$document" ||
-      fail "$document is missing the participant injection contract: $marker"
-  done
-done
+python3 - <<'PY'
+from pathlib import Path
+import json
+import re
+import sys
+
+root = Path.cwd()
+fixture = json.loads((root / "schemas/app-server/supported-methods.json").read_text())
+errors = []
+
+if fixture["requestShape"].get("thread/resume") != {
+    "default": ["threadId"],
+    "primaryIntegration": ["threadId", "config"],
+}:
+    errors.append(
+        "thread/resume must distinguish default [threadId] from "
+        "primaryIntegration [threadId, config]"
+    )
+
+def text_for(path):
+    return re.sub(r"\s+", " ", (root / path).read_text(encoding="utf-8")).replace("`", " ")
+
+def require(path, claim, patterns):
+    text = text_for(path)
+    missing = [pattern for pattern in patterns if not re.search(pattern, text, re.I | re.S)]
+    if missing:
+        errors.append(f"{path} is missing semantic claim {claim}: {missing[0]}")
+
+def forbid(path, claim, pattern):
+    if re.search(pattern, text_for(path), re.I | re.S):
+        errors.append(f"{path} contradicts the participant contract: {claim}")
+
+variant_documents = [
+    "docs/compatibility.md",
+    "docs/protocol-v1.md",
+    "docs/protocol-v2.md",
+]
+for path in variant_documents:
+    require(path, "default resume stays threadId-only", [
+        r"(?:default|ordinary|non-integration).{0,100}thread.?id.{0,100}(?:only|alone)",
+    ])
+    require(path, "Primary integration resume carries config", [
+        r"primary.{0,80}integration.{0,120}(?:resume|resuming).{0,160}config",
+    ])
+    forbid(
+        path,
+        "config is universal for thread/resume",
+        r"(?:all|every|ordinary|default).{0,80}(?:thread.?resume|resumes?).{0,80}config",
+    )
+
+semantic_documents = [
+    "README.md",
+    "docs/compatibility.md",
+    "docs/protocol-v1.md",
+    "docs/protocol-v2.md",
+    "plugin/skills/worktree-merge-consensus/SKILL.md",
+    "plugin/skills/worktree-merge-consensus/references/protocol.md",
+]
+for path in semantic_documents:
+    require(path, "one-tool participant inventory", [
+        r"(?:inventory|server|participant).{0,160}(?:exactly|only).{0,100}consensus_apply_patch|(?:exactly|only).{0,100}consensus_apply_patch.{0,160}(?:tool|inventory)",
+    ])
+    require(path, "preflight before every Primary integration turn", [
+        r"(?:before every|every).{0,120}(?:primary.{0,40})?integration",
+        r"mcpServerStatus/list",
+        r"(?:before every.{0,80}(?:turn/start|such turn)|before.{0,80}turn/start)",
+    ])
+    require(path, "matching deployment and explicit resume", [
+        r"(?:matching.{0,80}0\.2\.7|0\.2\.7.{0,80}matching)",
+        r"explicit.{0,80}resume|consensus_resume",
+    ])
+    require(path, "same recovery identity", [
+        r"same.{0,80}Run",
+        r"round",
+        r"branch",
+        r"(?:old|prior).{0,40}(?:integration )?SHA",
+        r"(?:failed.{0,80}verification|verification.{0,80}failed).{0,80}evidence",
+    ])
+    require(path, "one corrective patch and commit", [
+        r"(?:at most one|one).{0,120}request-bound.{0,120}(?:patch|commit)",
+    ])
+    require(path, "SHA advance and complete frozen verification rerun", [
+        r"(?:SHA.{0,80}(?:must )?advance|advance.{0,80}SHA)",
+        r"(?:all|every).{0,80}frozen verification.{0,100}(?:rerun|runs again|reruns)",
+    ])
+    require(path, "installation alone does not mutate or recover", [
+        r"(?:installing|installation|enablement).{0,160}(?:alone|never).{0,160}(?:mutat|recover)",
+    ])
+    forbid(
+        path,
+        "installation alone recovers a blocked Run",
+        r"installation alone(?![^.]{0,80}(?:never|does not))[^.]{0,120}(?:mutat|recover)",
+    )
+
+if errors:
+    print("\n".join(errors), file=sys.stderr)
+    raise SystemExit(1)
+PY
 
 for notification in item/started item/completed turn/completed; do
   grep -Fq "\"$notification\"" schemas/app-server/supported-methods.json ||

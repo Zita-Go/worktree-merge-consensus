@@ -160,7 +160,9 @@ requires `mcpServerStatus/list` with the task ID and `detail:
 "toolsAndAuthOnly"` before every integration `turn/start`; the discovered tool
 inventory must be exactly `consensus_apply_patch`. The operator plugin's eight
 tools do not prove this participant visibility. A missing or expanded
-participant inventory fails closed before the turn starts.
+participant inventory fails closed before the turn starts. This
+`primaryIntegration` resume variant carries task ID plus `config`; the default,
+ordinary, and non-integration variant remains `threadId`-only.
 
 After a matching 0.2.7 deployment, explicit resume may recover only the exact
 post-0.2.6 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` correction blocker: the same
@@ -169,7 +171,8 @@ evidence, with one otherwise empty side-effect-free correction turn. Recovery
 archives only that turn, reacquires the Run lock, repeats participant preflight,
 and retries the same request. It permits one request-bound corrective patch and
 commit only; the integration SHA must advance and all frozen verification is
-rerun. Installing or enabling the operator plugin never changes a blocked Run.
+rerun. Installing or enabling the operator plugin alone never mutates or
+recovers a blocked Run.
 
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the

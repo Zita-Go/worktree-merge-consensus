@@ -120,7 +120,10 @@ fn pinned_fixture_keeps_open_ended_version_gate_and_unattended_execution_contrac
     );
     assert_eq!(
         fixture["requestShape"]["thread/resume"],
-        serde_json::json!(["threadId", "config"])
+        serde_json::json!({
+            "default": ["threadId"],
+            "primaryIntegration": ["threadId", "config"]
+        })
     );
     assert_eq!(
         fixture["requestShape"]["mcpServerStatus/list"],

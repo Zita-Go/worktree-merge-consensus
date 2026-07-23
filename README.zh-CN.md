@@ -126,7 +126,7 @@ App Server `command/exec` 完成的协调器自有验证。结构化命令结果
 `participant-mcp-server` 注入任务作用域的 `worktreeMergeConsensusParticipant` 服务，并在
 `turn/start` 前以 `detail: "toolsAndAuthOnly"` 调用 `mcpServerStatus/list`。该服务必须只暴露
 `consensus_apply_patch`；操作者插件仍有 8 个工具，但其可见并不能证明主修参与任务可见。普通和
-非集成恢复仍只传 task ID。
+非集成恢复仍只传 task ID；只有主修集成恢复变体携带 `config`，默认恢复仍只传 `threadId`。
 
 部署匹配的 0.2.7 后，必须显式调用 `consensus_resume`，才可能恢复精确的 post-0.2.6
 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` 修正阻塞。恢复保留同一 Run、轮次、分支、旧 SHA 与失败的

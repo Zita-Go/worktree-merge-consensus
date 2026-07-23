@@ -43,8 +43,9 @@ launches `participant-mcp-server`. It then calls `mcpServerStatus/list` with
 that task ID and `detail: "toolsAndAuthOnly"` before `turn/start`. The only
 accepted participant tool inventory is `consensus_apply_patch`. The operator
 plugin exposes eight tools for launch and control; that separate inventory does
-not prove participant visibility. Ordinary and non-integration resumes remain
-task-ID-only.
+not prove participant visibility. Only the Primary integration resume variant
+carries `config`; default, ordinary, and non-integration resumes remain
+`threadId`-only.
 
 ## Statuses
 

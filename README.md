@@ -189,8 +189,8 @@ every Primary integration resume, the coordinator injects the task-scoped
 then calls `mcpServerStatus/list` with `detail: "toolsAndAuthOnly"` before
 `turn/start`. That server must expose exactly `consensus_apply_patch`; the
 operator plugin still exposes eight tools, but its visibility does not prove
-participant visibility. Ordinary and non-integration resumes remain
-thread-ID-only.
+participant visibility. Only the Primary integration resume variant carries
+`config`; default, ordinary, and non-integration resumes remain thread-ID-only.
 
 After a matching 0.2.7 deployment, explicit `consensus_resume` may recover
 only the exact post-0.2.6 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` correction
