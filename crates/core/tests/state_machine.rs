@@ -425,6 +425,118 @@ fn completed_failed_verification_routes_machine_feedback_to_integration() {
 }
 
 #[test]
+fn corrective_patch_tool_blocker_restores_the_same_post_verification_round() {
+    let mut state = blocked_corrective_patch_tool_state();
+    let blocked = state.clone();
+
+    let action = state
+        .retry_blocked_corrective_patch_tool_unavailable()
+        .unwrap();
+
+    assert_eq!(action, NextAction::RequestPrimaryIntegration);
+    assert_eq!(state.status, RunStatus::Running);
+    assert_eq!(state.phase, Phase::Integrate);
+    assert_eq!(state.next_action, NextAction::RequestPrimaryIntegration);
+    assert_eq!(state.round, blocked.round);
+    assert_eq!(state.integration_branch, blocked.integration_branch);
+    assert_eq!(state.integration_sha, blocked.integration_sha);
+    assert_eq!(
+        state.current_integration_payload,
+        blocked.current_integration_payload
+    );
+    assert_eq!(state.test_evidence, blocked.test_evidence);
+    assert_eq!(state.last_result_feedback, blocked.last_result_feedback);
+    assert_eq!(state.facts, blocked.facts);
+    assert!(state.reason_code.is_none());
+    assert!(state.accepted_result.is_none());
+}
+
+#[test]
+fn corrective_patch_tool_retry_rejects_missing_failed_verification() {
+    let mut state = blocked_corrective_patch_tool_state();
+    state.test_evidence[0].exit_code = 0;
+
+    let error = state
+        .retry_blocked_corrective_patch_tool_unavailable()
+        .unwrap_err();
+
+    assert_eq!(error.code(), "NOT_RETRYABLE");
+}
+
+#[test]
+fn corrective_patch_tool_retry_rejects_an_accepted_result() {
+    let mut accepted = fixture_result_state("dddddddddddddddddddddddddddddddddddddddd");
+    accepted
+        .apply_message(approved_result("dddddddddddddddddddddddddddddddddddddddd"))
+        .unwrap();
+    accepted.accept_after_revalidation().unwrap();
+    let mut state = blocked_corrective_patch_tool_state();
+    state.accepted_result = accepted.accepted_result;
+
+    let error = state
+        .retry_blocked_corrective_patch_tool_unavailable()
+        .unwrap_err();
+
+    assert_eq!(error.code(), "NOT_RETRYABLE");
+}
+
+#[test]
+fn corrective_patch_tool_retry_rejects_absent_integration_identity() {
+    let mut state = blocked_corrective_patch_tool_state();
+    state.integration_branch = None;
+
+    let error = state
+        .retry_blocked_corrective_patch_tool_unavailable()
+        .unwrap_err();
+
+    assert_eq!(error.code(), "NOT_RETRYABLE");
+}
+
+#[test]
+fn corrective_patch_tool_retry_rejects_wrong_reason() {
+    let mut state = blocked_corrective_patch_tool_state();
+    state.reason_code = Some("EXECUTION_TOOL_UNAVAILABLE".into());
+
+    let error = state
+        .retry_blocked_corrective_patch_tool_unavailable()
+        .unwrap_err();
+
+    assert_eq!(error.code(), "NOT_RETRYABLE");
+}
+
+#[test]
+fn corrective_patch_tool_retry_rejects_preintegration_shape() {
+    let mut state = fixture_plan_state();
+    let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
+    state.apply_message(approved_plan(&plan_hash)).unwrap();
+    state.block("CONTROLLED_PATCH_TOOL_UNAVAILABLE");
+
+    let error = state
+        .retry_blocked_corrective_patch_tool_unavailable()
+        .unwrap_err();
+
+    assert_eq!(error.code(), "NOT_RETRYABLE");
+}
+
+#[test]
+fn corrective_patch_tool_retried_correction_must_advance_integration_sha() {
+    let mut state = blocked_corrective_patch_tool_state();
+    let prior_sha = state.integration_sha.clone();
+    state
+        .retry_blocked_corrective_patch_tool_unavailable()
+        .unwrap();
+    let mut unchanged = integration_created(prior_sha.as_deref().unwrap());
+    unchanged.envelope.round = state.round;
+
+    let error = state.apply_message(unchanged).unwrap_err();
+
+    assert_eq!(error.code(), "STALE_INTEGRATION_SHA");
+    assert_eq!(state.integration_sha, prior_sha);
+    assert_eq!(state.phase, Phase::Integrate);
+    assert_eq!(state.next_action, NextAction::RequestPrimaryIntegration);
+}
+
+#[test]
 fn integration_invalid_response_retry_rejects_an_already_accepted_result() {
     let mut state = fixture_result_state("cccccccccccccccccccccccccccccccccccccccc");
     state.record_error(RunDiagnostic {
@@ -675,6 +787,27 @@ fn fixture_result_state(integration_sha: &str) -> RunState {
         .apply_message(integration_ready(integration_sha))
         .unwrap();
     assert_eq!(state.phase, Phase::ResultReview);
+    state
+}
+
+fn blocked_corrective_patch_tool_state() -> RunState {
+    let integration_sha = "cccccccccccccccccccccccccccccccccccccccc";
+    let mut state = fixture_plan_state();
+    let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
+    state.apply_message(approved_plan(&plan_hash)).unwrap();
+    state
+        .apply_message(integration_created(integration_sha))
+        .unwrap();
+    let mut verification = integration_ready(integration_sha);
+    verification.payload["test_evidence"][0]["exit_code"] = json!(1);
+    verification.payload["verification_failures"] = json!([{
+        "command": "cargo test",
+        "exit_code": 1,
+        "item_id": "test-command-1",
+        "output": "a compiler diagnostic"
+    }]);
+    state.apply_message(verification).unwrap();
+    state.block("CONTROLLED_PATCH_TOOL_UNAVAILABLE");
     state
 }
 

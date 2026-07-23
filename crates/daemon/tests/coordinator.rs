@@ -36,6 +36,7 @@ const RUN_ID: &str = "4b230bd8-d870-4ef4-bf20-05a4c61020af";
 const PRIMARY_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const REVIEWER_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const INTEGRATION_SHA: &str = "cccccccccccccccccccccccccccccccccccccccc";
+const CORRECTED_INTEGRATION_SHA: &str = "dddddddddddddddddddddddddddddddddddddddd";
 
 #[test]
 fn checked_in_transcript_fixtures_are_valid_json() {
@@ -509,7 +510,7 @@ async fn coordinator_owned_verification_runs_after_nonzero_and_routes_bounded_di
     let coordinator = Coordinator::new(
         Arc::clone(&app),
         store,
-        Arc::new(RecordingSafety::default()),
+        Arc::new(AdvancingIntegrationSafety::default()),
         fast_options(),
     );
     coordinator
@@ -531,6 +532,10 @@ async fn coordinator_owned_verification_runs_after_nonzero_and_routes_bounded_di
     assert_eq!(accepted.facts.run_id.to_string(), RUN_ID);
     assert_eq!(accepted.status, RunStatus::Accepted);
     assert_eq!(accepted.round, 2);
+    assert_eq!(
+        accepted.integration_sha.as_deref(),
+        Some(CORRECTED_INTEGRATION_SHA)
+    );
     assert_eq!(
         &app.executed_commands()[..3],
         &[
@@ -1141,7 +1146,7 @@ async fn failed_required_test_routes_machine_feedback_to_a_corrective_integratio
             2,
             Some(1),
             Some("consensus/test-run"),
-            Some(INTEGRATION_SHA),
+            Some(CORRECTED_INTEGRATION_SHA),
             json!({
                 "changed_files": ["combined.txt"],
                 "integration_evidence": {"summary": "verification failures corrected"}
@@ -1149,6 +1154,8 @@ async fn failed_required_test_routes_machine_feedback_to_a_corrective_integratio
         ),
     );
     replies[6]["round"] = json!(2);
+    replies[6]["integration_sha"] = json!(CORRECTED_INTEGRATION_SHA);
+    replies[6]["payload"]["approved_integration_sha"] = json!(CORRECTED_INTEGRATION_SHA);
     let app = Arc::new(
         FakeAppServer::new(replies)
             .with_verification_behavior(VerificationBehavior::FailedExecutionThenPass),
@@ -1193,6 +1200,265 @@ async fn failed_required_test_routes_machine_feedback_to_a_corrective_integratio
 }
 
 #[tokio::test]
+async fn corrective_patch_tool_blocker_reactivates_the_exact_same_run_and_correction_round() {
+    let safety = Arc::new(CorrectiveRecoverySafety::default());
+    let (_temp, coordinator, app, store, blocked) =
+        seed_corrective_patch_tool_blocker(Arc::clone(&safety)).await;
+    let accepted = store.latest_accepted_turn(RUN_ID).unwrap().unwrap();
+    let absent_before = safety.branch_absent_calls();
+    let integration_payload = blocked.current_integration_payload.clone();
+    let failed_evidence = blocked.test_evidence.clone();
+    let failure_feedback = blocked.last_result_feedback.clone();
+    let facts = blocked.facts.clone();
+
+    let resumed = coordinator.prepare_resume(RUN_ID).await.unwrap();
+
+    assert_eq!(resumed.facts.run_id.to_string(), RUN_ID);
+    assert_eq!(resumed.status, RunStatus::Running);
+    assert_eq!(resumed.phase, Phase::Integrate);
+    assert_eq!(resumed.next_action, NextAction::RequestPrimaryIntegration);
+    assert_eq!(resumed.round, blocked.round);
+    assert_eq!(resumed.integration_branch, blocked.integration_branch);
+    assert_eq!(resumed.integration_sha, blocked.integration_sha);
+    assert_eq!(resumed.current_integration_payload, integration_payload);
+    assert_eq!(resumed.test_evidence, failed_evidence);
+    assert_eq!(resumed.last_result_feedback, failure_feedback);
+    assert_eq!(resumed.facts, facts);
+    assert!(resumed.reason_code.is_none());
+    assert!(resumed.accepted_result.is_none());
+    assert_eq!(safety.branch_absent_calls(), absent_before);
+    assert!(
+        safety
+            .verified_results()
+            .contains(&format!("consensus/test-run:{INTEGRATION_SHA}"))
+    );
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    assert_eq!(pending.message_hash, accepted.message_hash);
+    assert!(pending.thread_id.is_none());
+    assert!(pending.turn_id.is_none());
+    assert_eq!(
+        store
+            .archived_turn_ids(RUN_ID, &accepted.message_hash)
+            .unwrap(),
+        vec![accepted.turn_id.clone()]
+    );
+
+    let repeat = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
+    assert_eq!(repeat.code(), "NOT_PAUSED");
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+
+    let result = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Accepted);
+    assert_eq!(result.round, blocked.round);
+    assert_eq!(
+        result.integration_sha.as_deref(),
+        Some(CORRECTED_INTEGRATION_SHA)
+    );
+    assert_eq!(
+        app.request_order()
+            .iter()
+            .filter(|action| action.ends_with("REQUEST_PRIMARY_INTEGRATION"))
+            .count(),
+        3
+    );
+    let retried_prompt = app
+        .prompts()
+        .into_iter()
+        .filter(|prompt| prompt_action(prompt) == "REQUEST_PRIMARY_INTEGRATION")
+        .nth(2)
+        .unwrap();
+    assert!(retried_prompt.contains("a machine-derived compiler diagnostic"));
+    assert!(retried_prompt.contains(INTEGRATION_SHA));
+}
+
+#[tokio::test]
+async fn corrective_patch_tool_retry_allows_exactly_one_request_bound_patch() {
+    let safety = Arc::new(CorrectiveRecoverySafety::default());
+    let (_temp, coordinator, _app, store, blocked) =
+        seed_corrective_patch_tool_blocker(Arc::clone(&safety)).await;
+    coordinator.prepare_resume(RUN_ID).await.unwrap();
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    store
+        .record_turn_started(
+            RUN_ID,
+            &pending.message_hash,
+            &blocked.facts.primary_thread_id,
+            "retried-correction-turn",
+        )
+        .unwrap();
+
+    let wrong = coordinator
+        .apply_patch(RUN_ID, "wrong-request", "diff --git a/a b/a")
+        .await
+        .unwrap_err();
+    assert_eq!(wrong.code(), "PATCH_NOT_AUTHORIZED");
+    let applied = coordinator
+        .apply_patch(
+            RUN_ID,
+            &pending.message_hash,
+            "diff --git a/combined.txt b/combined.txt",
+        )
+        .await
+        .unwrap();
+    assert_eq!(applied.integration_branch, "consensus/test-run");
+    assert_eq!(applied.base_sha, INTEGRATION_SHA);
+    assert_eq!(applied.changed_files, vec![PathBuf::from("combined.txt")]);
+    assert_eq!(safety.patch_calls.load(Ordering::SeqCst), 1);
+
+    let duplicate = coordinator
+        .apply_patch(
+            RUN_ID,
+            &pending.message_hash,
+            "diff --git a/src/lib.rs b/src/lib.rs",
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(duplicate.code(), "PATCH_ALREADY_APPLIED");
+    assert_eq!(safety.patch_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn corrective_patch_tool_retry_rejects_every_side_effect_capable_item() {
+    for (label, item) in [
+        (
+            "command",
+            json!({"id": "extra-command", "type": "commandExecution"}),
+        ),
+        (
+            "file-change",
+            json!({"id": "extra-file-change", "type": "fileChange"}),
+        ),
+        ("mcp", json!({"id": "extra-mcp", "type": "mcpToolCall"})),
+        (
+            "dynamic-tool",
+            json!({"id": "extra-dynamic-tool", "type": "dynamicToolCall"}),
+        ),
+        (
+            "unknown",
+            json!({"id": "extra-unknown", "type": "futureSideEffect"}),
+        ),
+    ] {
+        let safety = Arc::new(CorrectiveRecoverySafety::default());
+        let (_temp, coordinator, app, store, blocked) =
+            seed_corrective_patch_tool_blocker(safety).await;
+        let accepted = store.latest_accepted_turn(RUN_ID).unwrap().unwrap();
+        app.insert_turn_item_before_agent("primary", &accepted.turn_id, item);
+
+        let error = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
+
+        assert_eq!(
+            error.code(),
+            "MODEL_RESPONSE_RETRY_UNSAFE",
+            "fixture={label}"
+        );
+        assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), blocked);
+        assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+        assert!(store.pending_send(RUN_ID).unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn corrective_patch_tool_retry_validates_request_marker_and_response_hash() {
+    for (label, mutate_history, expected_code) in [
+        ("request-marker", true, "HISTORY_UNAVAILABLE"),
+        ("response-hash", false, "HISTORY_UNAVAILABLE"),
+    ] {
+        let safety = Arc::new(CorrectiveRecoverySafety::default());
+        let (_temp, coordinator, app, store, blocked) =
+            seed_corrective_patch_tool_blocker(safety).await;
+        let accepted = store.latest_accepted_turn(RUN_ID).unwrap().unwrap();
+        if mutate_history {
+            app.set_user_prompt(
+                "primary",
+                &accepted.turn_id,
+                "correction request without its deterministic marker",
+            );
+        } else {
+            app.set_agent_text(
+                "primary",
+                &accepted.turn_id,
+                "<consensus-result>BLOCKED:CONTROLLED_PATCH_TOOL_UNAVAILABLE</consensus-result>\n\nDifferent blocker evidence.",
+            );
+        }
+
+        let error = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
+
+        assert_eq!(error.code(), expected_code, "fixture={label}");
+        assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), blocked);
+        assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+    }
+}
+
+#[tokio::test]
+async fn corrective_patch_tool_retry_rejects_patch_residue_and_missing_failed_verification() {
+    for missing_failed_verification in [false, true] {
+        let safety = Arc::new(CorrectiveRecoverySafety::default());
+        let (_temp, coordinator, _app, store, mut blocked) =
+            seed_corrective_patch_tool_blocker(safety).await;
+        let accepted = store.latest_accepted_turn(RUN_ID).unwrap().unwrap();
+        if missing_failed_verification {
+            blocked.test_evidence.clear();
+            store.save_state(&blocked).unwrap();
+        } else {
+            store
+                .record_successful_patch(RUN_ID, &accepted.message_hash, "patch-hash")
+                .unwrap();
+        }
+
+        let error = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
+
+        assert_eq!(error.code(), "MODEL_RESPONSE_RETRY_UNSAFE");
+        assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), blocked);
+        assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+    }
+}
+
+#[tokio::test]
+async fn corrective_patch_tool_retry_revalidates_target_sources_and_ancestry() {
+    for code in [
+        "DIRTY_WORKTREE",
+        "STALE_INTEGRATION_SHA",
+        "SOURCE_DRIFT",
+        "MISSING_SOURCE_ANCESTRY",
+    ] {
+        let safety = Arc::new(CorrectiveRecoverySafety::default());
+        let (_temp, coordinator, app, store, blocked) =
+            seed_corrective_patch_tool_blocker(Arc::clone(&safety)).await;
+        let approval_checks_before = app.approval_mode_request_count();
+        safety.fail_result_verification(code);
+
+        let error = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
+
+        assert_eq!(error.code(), code);
+        assert_eq!(
+            app.approval_mode_request_count(),
+            approval_checks_before + 1
+        );
+        assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), blocked);
+        assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+        assert!(store.pending_send(RUN_ID).unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn corrective_patch_tool_retry_rejects_a_conflicting_repository_lock_atomically() {
+    let safety = Arc::new(CorrectiveRecoverySafety::default());
+    let (_temp, coordinator, _app, store, blocked) =
+        seed_corrective_patch_tool_blocker(safety).await;
+    let mut competing = fixture_run();
+    competing.facts.run_id = Uuid::parse_str("9f8a5c17-0f06-4df9-873f-589f3b54dbcc").unwrap();
+    store.insert_run(&competing).unwrap();
+
+    let error = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
+
+    assert_eq!(error.code(), "ACTIVE_RUN_EXISTS");
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), blocked);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+    assert!(store.pending_send(RUN_ID).unwrap().is_none());
+}
+
+#[tokio::test]
 async fn live_item_events_keep_marker_turns_free_of_participant_commands() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -1205,7 +1471,7 @@ async fn live_item_events_keep_marker_turns_free_of_participant_commands() {
             2,
             Some(1),
             Some("consensus/test-run"),
-            Some(INTEGRATION_SHA),
+            Some(CORRECTED_INTEGRATION_SHA),
             json!({
                 "changed_files": ["combined.txt"],
                 "integration_evidence": {"summary": "event-only verification corrected"}
@@ -1213,6 +1479,8 @@ async fn live_item_events_keep_marker_turns_free_of_participant_commands() {
         ),
     );
     replies[6]["round"] = json!(2);
+    replies[6]["integration_sha"] = json!(CORRECTED_INTEGRATION_SHA);
+    replies[6]["payload"]["approved_integration_sha"] = json!(CORRECTED_INTEGRATION_SHA);
     let app = Arc::new(
         FakeAppServer::new(replies)
             .with_verification_behavior(VerificationBehavior::FailedExecutionThenPass)
@@ -3469,6 +3737,147 @@ impl RepositorySafety for RecordingSafety {
     }
 }
 
+#[derive(Default)]
+struct AdvancingIntegrationSafety {
+    authoritative_calls: AtomicUsize,
+}
+
+impl RepositorySafety for AdvancingIntegrationSafety {
+    fn verify_frozen(&self, _facts: &RunFacts) -> Result<(), SafetyError> {
+        Ok(())
+    }
+
+    fn verify_branch_absent(&self, _facts: &RunFacts, _branch: &str) -> Result<(), SafetyError> {
+        Ok(())
+    }
+
+    fn verify_integration(
+        &self,
+        _facts: &RunFacts,
+        _branch: &str,
+        _sha: &str,
+        _changed_files: &[PathBuf],
+    ) -> Result<(), SafetyError> {
+        Ok(())
+    }
+
+    fn authoritative_integration_result(
+        &self,
+        _facts: &RunFacts,
+        _target_branch: &str,
+    ) -> Result<(String, Vec<PathBuf>), SafetyError> {
+        let sha = if self.authoritative_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            INTEGRATION_SHA
+        } else {
+            CORRECTED_INTEGRATION_SHA
+        };
+        Ok((sha.to_owned(), vec![PathBuf::from("combined.txt")]))
+    }
+
+    fn prepare_verification_workspace(
+        &self,
+        _facts: &RunFacts,
+        _integration_sha: &str,
+        destination: &Path,
+    ) -> Result<PathBuf, SafetyError> {
+        Ok(destination.to_path_buf())
+    }
+}
+
+#[derive(Default)]
+struct CorrectiveRecoverySafety {
+    branch_absent_calls: AtomicUsize,
+    patch_calls: AtomicUsize,
+    verified_results: Mutex<Vec<String>>,
+    result_verification_error: Mutex<Option<&'static str>>,
+}
+
+impl CorrectiveRecoverySafety {
+    fn branch_absent_calls(&self) -> usize {
+        self.branch_absent_calls.load(Ordering::SeqCst)
+    }
+
+    fn verified_results(&self) -> Vec<String> {
+        self.verified_results.lock().unwrap().clone()
+    }
+
+    fn fail_result_verification(&self, code: &'static str) {
+        *self.result_verification_error.lock().unwrap() = Some(code);
+    }
+}
+
+impl RepositorySafety for CorrectiveRecoverySafety {
+    fn verify_frozen(&self, _facts: &RunFacts) -> Result<(), SafetyError> {
+        Ok(())
+    }
+
+    fn verify_branch_absent(&self, _facts: &RunFacts, _branch: &str) -> Result<(), SafetyError> {
+        self.branch_absent_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn verify_integration_in_progress(
+        &self,
+        _facts: &RunFacts,
+        _target_branch: &str,
+    ) -> Result<(), SafetyError> {
+        Ok(())
+    }
+
+    fn apply_integration_patch(
+        &self,
+        _facts: &RunFacts,
+        _target_branch: &str,
+        _patch: &str,
+    ) -> Result<(String, Vec<PathBuf>), SafetyError> {
+        self.patch_calls.fetch_add(1, Ordering::SeqCst);
+        Ok((
+            INTEGRATION_SHA.to_owned(),
+            vec![PathBuf::from("combined.txt")],
+        ))
+    }
+
+    fn verify_integration(
+        &self,
+        _facts: &RunFacts,
+        branch: &str,
+        sha: &str,
+        _changed_files: &[PathBuf],
+    ) -> Result<(), SafetyError> {
+        if let Some(code) = *self.result_verification_error.lock().unwrap() {
+            return Err(SafetyError::new(
+                code,
+                "scripted corrective recovery repository failure",
+            ));
+        }
+        self.verified_results
+            .lock()
+            .unwrap()
+            .push(format!("{branch}:{sha}"));
+        Ok(())
+    }
+
+    fn authoritative_integration_result(
+        &self,
+        _facts: &RunFacts,
+        _target_branch: &str,
+    ) -> Result<(String, Vec<PathBuf>), SafetyError> {
+        Ok((
+            CORRECTED_INTEGRATION_SHA.to_owned(),
+            vec![PathBuf::from("combined.txt")],
+        ))
+    }
+
+    fn prepare_verification_workspace(
+        &self,
+        _facts: &RunFacts,
+        _integration_sha: &str,
+        destination: &Path,
+    ) -> Result<PathBuf, SafetyError> {
+        Ok(destination.to_path_buf())
+    }
+}
+
 struct RejectingIntegrationSafety {
     reason: &'static str,
 }
@@ -3711,6 +4120,7 @@ struct FakeAppServer {
     responses: Mutex<Vec<Value>>,
     interrupts: Mutex<Vec<(String, String)>>,
     approval_mode: Mutex<Option<String>>,
+    approval_mode_requests: AtomicUsize,
     deferred: Option<(usize, DeferMode)>,
     deferred_replies: Mutex<HashMap<String, Value>>,
     events: Mutex<VecDeque<AppEvent>>,
@@ -3791,6 +4201,7 @@ impl FakeAppServer {
             responses: Mutex::new(Vec::new()),
             interrupts: Mutex::new(Vec::new()),
             approval_mode: Mutex::new(Some("approve".into())),
+            approval_mode_requests: AtomicUsize::new(0),
             deferred: None,
             deferred_replies: Mutex::new(HashMap::new()),
             events: Mutex::new(VecDeque::new()),
@@ -3898,6 +4309,10 @@ impl FakeAppServer {
             .iter()
             .map(|request| request.command.clone())
             .collect()
+    }
+
+    fn approval_mode_request_count(&self) -> usize {
+        self.approval_mode_requests.load(Ordering::SeqCst)
     }
 
     fn executed_command_requests(&self) -> Vec<CommandExecRequest> {
@@ -4578,6 +4993,7 @@ impl AppServer for FakeAppServer {
     }
 
     async fn controlled_patch_approval_mode(&self) -> Result<Option<String>, AppServerError> {
+        self.approval_mode_requests.fetch_add(1, Ordering::SeqCst);
         Ok(self.approval_mode.lock().unwrap().clone())
     }
 
@@ -4986,6 +5402,45 @@ fn start_request() -> StartRequest {
     }
 }
 
+async fn seed_corrective_patch_tool_blocker(
+    safety: Arc<CorrectiveRecoverySafety>,
+) -> (
+    tempfile::TempDir,
+    Coordinator<FakeAppServer, CorrectiveRecoverySafety>,
+    Arc<FakeAppServer>,
+    SqliteRunStore,
+    RunState,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::new(corrective_recovery_replies())
+            .with_verification_behavior(VerificationBehavior::FailedExecutionThenPass),
+    );
+    let coordinator = Coordinator::new(Arc::clone(&app), store.clone(), safety, fast_options());
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let blocked = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(blocked.status, RunStatus::Blocked);
+    assert_eq!(
+        blocked.reason_code.as_deref(),
+        Some("CONTROLLED_PATCH_TOOL_UNAVAILABLE")
+    );
+    assert_eq!(blocked.phase, Phase::Blocked);
+    assert_eq!(blocked.next_action, NextAction::Stop);
+    assert_eq!(blocked.round, 2);
+    assert_eq!(
+        blocked.integration_branch.as_deref(),
+        Some("consensus/test-run")
+    );
+    assert_eq!(blocked.integration_sha.as_deref(), Some(INTEGRATION_SHA));
+    assert!(blocked.test_evidence.iter().any(|item| item.exit_code != 0));
+    assert!(blocked.accepted_result.is_none());
+    (temp, coordinator, app, store, blocked)
+}
+
 fn first_request_hash(state: &RunState) -> String {
     canonical_json_hash(&json!({
         "run_id": state.facts.run_id,
@@ -5093,6 +5548,24 @@ fn conflict_free_replies() -> Vec<Value> {
             }),
         ),
     ]
+}
+
+fn corrective_recovery_replies() -> Vec<Value> {
+    let mut replies = conflict_free_replies();
+    let mut result_approval = replies.pop().unwrap();
+    result_approval["round"] = json!(2);
+    result_approval["integration_sha"] = json!(CORRECTED_INTEGRATION_SHA);
+    result_approval["payload"]["approved_integration_sha"] = json!(CORRECTED_INTEGRATION_SHA);
+    replies.extend([
+        json!(
+            "<consensus-result>BLOCKED:CONTROLLED_PATCH_TOOL_UNAVAILABLE</consensus-result>\n\nThe participant controlled patch tool was unavailable before any action."
+        ),
+        json!(
+            "<consensus-result>INTEGRATION_READY</consensus-result>\n\nThe failed verification diagnostic was corrected in one new commit."
+        ),
+        result_approval,
+    ]);
+    replies
 }
 
 fn marker_replies() -> Vec<Value> {

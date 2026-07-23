@@ -1431,6 +1431,169 @@ impl SqliteRunStore {
         Ok(())
     }
 
+    pub fn reactivate_blocked_run_with_corrective_patch_tool_retry(
+        &self,
+        blocked_state: &RunState,
+        resumed_state: &RunState,
+        accepted: &AcceptedTurn,
+        observed_status: &str,
+    ) -> Result<(), StoreError> {
+        let mut expected_resumed = blocked_state.clone();
+        expected_resumed
+            .retry_blocked_corrective_patch_tool_unavailable()
+            .map_err(|error| {
+                StoreError::TerminalTurnNotRetryable(format!(
+                    "corrective patch-tool state is not retryable: {error}"
+                ))
+            })?;
+        if *resumed_state != expected_resumed || observed_status != "completed" {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "corrective patch-tool retry state or terminal status is invalid".into(),
+            ));
+        }
+
+        let run_id = blocked_state.facts.run_id.to_string();
+        if accepted.run_id != run_id
+            || accepted.role != "PRIMARY"
+            || accepted.phase != "INTEGRATE"
+            || accepted.round != blocked_state.round
+            || accepted.thread_id != blocked_state.facts.primary_thread_id
+            || accepted.message_hash.is_empty()
+            || accepted.response_hash.is_empty()
+            || accepted.turn_id.is_empty()
+        {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "accepted corrective patch-tool blocker does not match the frozen correction request"
+                    .into(),
+            ));
+        }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let current_json = transaction
+            .query_row(
+                "SELECT state_json FROM runs WHERE run_id = ?1",
+                [&run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::RunNotFound(run_id.clone()))?;
+        let current_state = deserialize_state(&current_json)?;
+        if current_state != *blocked_state {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "run {run_id} changed while preparing corrective patch-tool recovery"
+            )));
+        }
+        let accepted_record_exists = transaction
+            .query_row(
+                "SELECT 1 FROM turns
+                 WHERE run_id = ?1 AND role = ?2 AND phase = ?3 AND round = ?4
+                   AND message_hash = ?5 AND response_hash = ?6
+                   AND thread_id = ?7 AND turn_id = ?8
+                   AND delivery_state = 'ACCEPTED'
+                 LIMIT 1",
+                params![
+                    run_id,
+                    accepted.role,
+                    accepted.phase,
+                    accepted.round,
+                    accepted.message_hash,
+                    accepted.response_hash,
+                    accepted.thread_id,
+                    accepted.turn_id,
+                ],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !accepted_record_exists {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "corrective patch-tool blocker is not the exact persisted accepted turn".into(),
+            ));
+        }
+        let prior_attempt_exists = transaction
+            .query_row(
+                "SELECT 1 FROM turn_attempts
+                 WHERE run_id = ?1 AND message_hash = ?2
+                 LIMIT 1",
+                params![run_id, accepted.message_hash],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if prior_attempt_exists {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "corrective patch-tool recovery is limited to one empty blocker attempt".into(),
+            ));
+        }
+        let successful_patch_exists = transaction
+            .query_row(
+                "SELECT 1 FROM patch_applications
+                 WHERE run_id = ?1 AND message_hash = ?2
+                 LIMIT 1",
+                params![run_id, accepted.message_hash],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if successful_patch_exists {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "corrective patch-tool blocker request already has a successful patch record"
+                    .into(),
+            ));
+        }
+
+        let common_dir = resumed_state.facts.git_common_dir.to_string_lossy();
+        match transaction.execute(
+            "INSERT INTO locks (repository_id, run_id, primary_worktree, acquired_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                common_dir.as_ref(),
+                run_id,
+                resumed_state
+                    .facts
+                    .primary_worktree
+                    .to_string_lossy()
+                    .as_ref(),
+                now_unix(),
+            ],
+        ) {
+            Ok(_) => {}
+            Err(error) if is_constraint(&error) => {
+                return Err(StoreError::ActiveRunExists(format!(
+                    "repository {} already has an active run",
+                    resumed_state.facts.git_common_dir.display()
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        archive_and_reset_turn(
+            &transaction,
+            &run_id,
+            &accepted.message_hash,
+            &accepted.thread_id,
+            &accepted.turn_id,
+            "ACCEPTED",
+            observed_status,
+        )?;
+        update_run_row(&transaction, &run_id, resumed_state)?;
+        transaction.execute(
+            "INSERT INTO transitions (
+                run_id, from_phase, to_phase, status, reason_code,
+                response_hash, created_at
+             ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)",
+            params![
+                run_id,
+                enum_name(&blocked_state.phase)?,
+                enum_name(&resumed_state.phase)?,
+                enum_name(&resumed_state.status)?,
+                now_unix(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn reactivate_blocked_run_with_accepted_verification_environment_retry(
         &self,
         blocked_state: &RunState,

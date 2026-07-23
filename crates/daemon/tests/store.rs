@@ -6,7 +6,7 @@ use consensus_core::{
     state::{NextAction, Phase, Role, RunDiagnostic, RunFacts, RunState, RunStatus},
 };
 use consensus_daemon::store::{
-    PARTICIPANT_CAPABILITY_GENERATION, SqliteRunStore, VerificationCommandClaim,
+    AcceptedTurn, PARTICIPANT_CAPABILITY_GENERATION, SqliteRunStore, VerificationCommandClaim,
 };
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
@@ -499,6 +499,117 @@ fn completed_read_only_retry_reactivates_a_legacy_blocked_run_atomically() {
         store.insert_run(&competing).unwrap_err().code(),
         "ACTIVE_RUN_EXISTS"
     );
+}
+
+#[test]
+fn corrective_patch_tool_retry_reactivates_and_resets_exactly_once_atomically() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    let (blocked, resumed, accepted) = seed_corrective_patch_tool_retry(&store);
+
+    store
+        .reactivate_blocked_run_with_corrective_patch_tool_retry(
+            &blocked,
+            &resumed,
+            &accepted,
+            "completed",
+        )
+        .unwrap();
+
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), resumed);
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    assert_eq!(pending.message_hash, "corrective-request");
+    assert!(pending.thread_id.is_none());
+    assert!(pending.turn_id.is_none());
+    assert_eq!(
+        pending.capability_generation.as_deref(),
+        Some(PARTICIPANT_CAPABILITY_GENERATION)
+    );
+    assert_eq!(
+        store
+            .archived_turn_ids(RUN_ID, "corrective-request")
+            .unwrap(),
+        vec!["corrective-blocker-turn"]
+    );
+    let stale_event_rows = Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM turn_event_items
+                 WHERE run_id = ?1 AND turn_id = 'corrective-blocker-turn'),
+                (SELECT COUNT(*) FROM turn_event_completions
+                 WHERE run_id = ?1 AND turn_id = 'corrective-blocker-turn')",
+            [RUN_ID],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stale_event_rows, (0, 0));
+    let competing = fixture_run("9f8a5c17-0f06-4df9-873f-589f3b54dbcc", "/repo/.git");
+    assert_eq!(
+        store.insert_run(&competing).unwrap_err().code(),
+        "ACTIVE_RUN_EXISTS"
+    );
+
+    let repeat = store
+        .reactivate_blocked_run_with_corrective_patch_tool_retry(
+            &blocked,
+            &resumed,
+            &accepted,
+            "completed",
+        )
+        .unwrap_err();
+
+    assert_eq!(repeat.code(), "TERMINAL_TURN_NOT_RETRYABLE");
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), resumed);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+}
+
+#[test]
+fn corrective_patch_tool_retry_rejects_successful_patch_residue_without_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let (blocked, resumed, accepted) = seed_corrective_patch_tool_retry(&store);
+    store
+        .record_successful_patch(RUN_ID, &accepted.message_hash, "patch-hash")
+        .unwrap();
+
+    let error = store
+        .reactivate_blocked_run_with_corrective_patch_tool_retry(
+            &blocked,
+            &resumed,
+            &accepted,
+            "completed",
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "TERMINAL_TURN_NOT_RETRYABLE");
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), blocked);
+    assert!(store.pending_send(RUN_ID).unwrap().is_none());
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+}
+
+#[test]
+fn corrective_patch_tool_retry_rejects_conflicting_repository_lock_without_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let (blocked, resumed, accepted) = seed_corrective_patch_tool_retry(&store);
+    let competing = fixture_run("9f8a5c17-0f06-4df9-873f-589f3b54dbcc", "/repo/.git");
+    store.insert_run(&competing).unwrap();
+
+    let error = store
+        .reactivate_blocked_run_with_corrective_patch_tool_retry(
+            &blocked,
+            &resumed,
+            &accepted,
+            "completed",
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "ACTIVE_RUN_EXISTS");
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), blocked);
+    assert!(store.pending_send(RUN_ID).unwrap().is_none());
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
 }
 
 #[test]
@@ -1309,6 +1420,100 @@ fn fixture_run(run_id: &str, common_dir: &str) -> RunState {
         primary_ref: Some("refs/heads/primary".into()),
         reviewer_ref: Some("refs/heads/reviewer".into()),
     })
+}
+
+fn seed_corrective_patch_tool_retry(store: &SqliteRunStore) -> (RunState, RunState, AcceptedTurn) {
+    let blocked = fixture_blocked_corrective_patch_run();
+    store.insert_run(&blocked).unwrap();
+    store
+        .record_pending_send(
+            RUN_ID,
+            "PRIMARY",
+            "INTEGRATE",
+            blocked.round,
+            "corrective-request",
+        )
+        .unwrap();
+    store
+        .record_turn_started(
+            RUN_ID,
+            "corrective-request",
+            "primary-thread",
+            "corrective-blocker-turn",
+        )
+        .unwrap();
+    let old_item = json!({
+        "id": "old-agent-message",
+        "type": "agentMessage",
+        "text": "{}",
+        "phase": "final_answer"
+    });
+    store
+        .record_turn_item_event(
+            RUN_ID,
+            "primary-thread",
+            "corrective-blocker-turn",
+            "item/completed",
+            &old_item,
+        )
+        .unwrap();
+    store
+        .record_turn_completed_event(
+            RUN_ID,
+            "primary-thread",
+            "corrective-blocker-turn",
+            &json!({
+                "id": "corrective-blocker-turn",
+                "status": "completed",
+                "items": [old_item]
+            }),
+        )
+        .unwrap();
+    store
+        .accept_response_and_advance(RUN_ID, "blocker-response-hash", &blocked)
+        .unwrap();
+    let accepted = store.latest_accepted_turn(RUN_ID).unwrap().unwrap();
+    let mut resumed = blocked.clone();
+    resumed.status = RunStatus::Running;
+    resumed.phase = Phase::Integrate;
+    resumed.next_action = NextAction::RequestPrimaryIntegration;
+    resumed.reason_code = None;
+    resumed.last_error = None;
+    (blocked, resumed, accepted)
+}
+
+fn fixture_blocked_corrective_patch_run() -> RunState {
+    let mut state = fixture_integrated_run();
+    state
+        .apply_message(store_message(json!({
+            "message_type": "INTEGRATION_READY",
+            "phase": "VERIFY",
+            "round": 1,
+            "plan_revision": 1,
+            "integration_branch": "consensus/test-run",
+            "integration_sha": "cccccccccccccccccccccccccccccccccccccccc",
+            "reason_code": null,
+            "payload": {
+                "changed_files": ["combined.txt"],
+                "integration_evidence": {"summary": "created"},
+                "test_evidence": [{
+                    "command": "cargo test",
+                    "exit_code": 1,
+                    "turn_id": "verification-turn",
+                    "item_id": "test-command-1",
+                    "cwd": "/state/verification/run"
+                }],
+                "verification_failures": [{
+                    "command": "cargo test",
+                    "exit_code": 1,
+                    "item_id": "test-command-1",
+                    "output": "a compiler diagnostic"
+                }]
+            }
+        })))
+        .unwrap();
+    state.block("CONTROLLED_PATCH_TOOL_UNAVAILABLE");
+    state
 }
 
 fn seed_legacy_verification_compatibility_retry(

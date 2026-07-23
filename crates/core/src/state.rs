@@ -715,6 +715,82 @@ impl RunState {
         Ok(self.next_action)
     }
 
+    pub fn retry_blocked_corrective_patch_tool_unavailable(
+        &mut self,
+    ) -> Result<NextAction, StateError> {
+        if self.status != RunStatus::Blocked
+            || self.phase != Phase::Blocked
+            || self.next_action != NextAction::Stop
+            || self.reason_code.as_deref() != Some("CONTROLLED_PATCH_TOOL_UNAVAILABLE")
+            || self.last_error.is_some()
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "only the exact terminal corrective controlled-patch blocker can be retried",
+            ));
+        }
+        if !self.plan_approved
+            || self.current_plan_payload.is_none()
+            || self.plan_approval_payload.is_none()
+            || self.target_integration_branch.is_none()
+            || self.integration_branch.is_none()
+            || self.integration_sha.is_none()
+            || self.current_integration_payload.is_none()
+            || self.required_test_commands.is_empty()
+            || self.test_evidence.is_empty()
+            || self.accepted_result.is_some()
+            || self.result_approved_sha.is_some()
+            || self.round <= 1
+            || self.integration_branch.as_deref() != self.target_integration_branch.as_deref()
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "corrective controlled-patch recovery requires an unaccepted post-verification integration",
+            ));
+        }
+        self.validate_complete_test_evidence(&self.test_evidence)
+            .map_err(|_| {
+                state_error(
+                    "NOT_RETRYABLE",
+                    "corrective controlled-patch recovery requires complete frozen test evidence",
+                )
+            })?;
+        if !self
+            .test_evidence
+            .iter()
+            .any(|evidence| evidence.exit_code != 0)
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "corrective controlled-patch recovery requires at least one failed frozen test",
+            ));
+        }
+        let feedback = self.last_result_feedback.as_ref().ok_or_else(|| {
+            state_error(
+                "NOT_RETRYABLE",
+                "corrective controlled-patch recovery requires machine verification feedback",
+            )
+        })?;
+        if feedback.get("format").and_then(Value::as_str) != Some("machine_verification")
+            || !feedback
+                .get("failed_tests")
+                .and_then(Value::as_array)
+                .is_some_and(|failures| !failures.is_empty())
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "corrective controlled-patch recovery requires retained machine failure diagnostics",
+            ));
+        }
+
+        self.status = RunStatus::Running;
+        self.phase = Phase::Integrate;
+        self.next_action = NextAction::RequestPrimaryIntegration;
+        self.reason_code = None;
+        self.validate_persisted()?;
+        Ok(self.next_action)
+    }
+
     pub fn retry_blocked_preintegration_forbidden_operation(
         &mut self,
     ) -> Result<NextAction, StateError> {
@@ -1081,6 +1157,12 @@ impl RunState {
                 return Err(state_error(
                     "INVALID_RESPONSE",
                     "integration creation cannot self-report test evidence",
+                ));
+            }
+            if self.integration_sha.as_deref() == Some(sha.as_str()) {
+                return Err(state_error(
+                    "STALE_INTEGRATION_SHA",
+                    "a corrective integration result must advance the integration SHA",
                 ));
             }
             let is_initial_result_review = self.integration_sha.is_none();
