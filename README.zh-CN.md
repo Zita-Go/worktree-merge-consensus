@@ -122,11 +122,23 @@ App Server `command/exec` 完成的协调器自有验证。结构化命令结果
 迁移后完成事件唯一键碰撞执行一次故障关闭式启动修复。修复保留当前 turn、Run、集成分支与 SHA、
 源引用、补丁记录、merge 和 commit；修复本身不会发送第二次 resume，也不会执行测试。
 
-0.2.7 将参与任务补丁工具的可见性明确交给协调器：每次恢复主修集成任务时，协调器都会通过
-`participant-mcp-server` 注入任务作用域的 `worktreeMergeConsensusParticipant` 服务，并在
-`turn/start` 前以 `detail: "toolsAndAuthOnly"` 调用 `mcpServerStatus/list`。该服务必须只暴露
-`consensus_apply_patch`；操作者插件仍有 8 个工具，但其可见并不能证明主修参与任务可见。普通和
-非集成恢复仍只传 task ID；只有主修集成恢复变体携带 `config`，默认恢复仍只传 `threadId`。
+0.2.7 将参与任务补丁工具的可见性明确交给协调器，并在第一个主修动作之前建立持久绑定。
+用户选定且被冻结的任务是 **Source Primary**。若 App Server 报告其为 `notLoaded`，协调器会用
+任务作用域的 `worktreeMergeConsensusParticipant` 配置加载它，并把 **Effective Primary**
+直接绑定到同一任务；已加载且已经精确暴露 `consensus_apply_patch` 的 Source Primary 也直接
+绑定。若已加载的 Source Primary 缺少该精确工具，协调器不会试图原地改变它，而会调用
+`thread/fork`，传入 `ephemeral: true`、`excludeTurns: false` 和参与配置。只有 turn ID
+完整历史完全一致、状态为空闲、`thread/goal/get` 返回 null、分页 MCP 清单精确时，才接受这个
+ephemeral 完整历史镜像。作为 Effective Primary 的镜像只代表 Source Primary，不是第三个源
+任务或复核任务，也不会继承活动 goal。
+
+在每个主修动作（契约、方案、集成和验证）之前，协调器都会恢复 Effective Primary，并在
+`turn/start` 前读取 `mcpServerStatus/list` 的全部页面；参与服务必须只暴露
+`consensus_apply_patch`。操作者插件的 8 个工具不能作为参与任务可见性的证据。Reviewer
+路由不变，两个源任务 ID、源引用与源 worktree 始终冻结。ephemeral 镜像丢失后，只能在前一动作
+已完成且没有 pending 或 uncertain 发送时重建；pending 或 uncertain turn 不会重新 fork
+（refork），也不会重发（resent）。由于 `thread/fork` 非幂等，响应不确定时绝不会自动重试。
+该契约要求 Codex CLI `>=0.144.1`。
 
 部署匹配的 0.2.7 后，必须显式调用 `consensus_resume`，才可能恢复精确的 post-0.2.6
 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` 修正阻塞。恢复保留同一 Run、轮次、分支、旧 SHA 与失败的
@@ -193,8 +205,9 @@ codex-consensus doctor
 `consensus_apply_patch` 是下文说明的、仅供内部参与 turn 使用且绑定精确请求的写入能力。
 它不会引入第三个 agent 代为转发复核对话。
 
-操作者插件的 8 个工具不是主修参与任务的工具清单。协调器会在每个主修集成 turn 前注入并预检
-任务作用域的参与服务；仅安装插件不会改变已经阻塞的 Run。
+操作者插件的 8 个工具不是主修参与任务的工具清单。协调器会通过直接或 ephemeral
+Effective Primary 绑定，在每个主修动作前注入并预检任务作用域的参与服务；仅安装插件不会改变
+已经阻塞的 Run。
 
 `consensus_doctor` 等名称是 MCP 工具名，不是 shell 可执行文件。Codex 会通过
 `codex-consensus mcp-server` 启动插件服务；对应的终端诊断命令是

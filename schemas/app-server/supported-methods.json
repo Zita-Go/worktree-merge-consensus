@@ -8,6 +8,8 @@
     "thread/list",
     "thread/read",
     "thread/resume",
+    "thread/fork",
+    "thread/goal/get",
     "turn/start",
     "turn/interrupt",
     "command/exec",
@@ -28,8 +30,10 @@
     "thread/read": ["threadId", "includeTurns"],
     "thread/resume": {
       "default": ["threadId"],
-      "primaryIntegration": ["threadId", "config"]
+      "participant": ["threadId", "config"]
     },
+    "thread/fork": ["threadId", "config", "ephemeral", "excludeTurns"],
+    "thread/goal/get": ["threadId"],
     "turn/start": [
       "threadId",
       "input",
@@ -50,7 +54,7 @@
     ],
     "config/read": ["includeLayers"],
     "config/batchWrite": ["edits", "reloadUserConfig"],
-    "mcpServerStatus/list": ["threadId", "detail"]
+    "mcpServerStatus/list": ["threadId", "detail", "limit", "cursor"]
   },
   "initializeCapabilities": {
     "experimentalApi": true

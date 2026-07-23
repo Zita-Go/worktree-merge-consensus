@@ -67,11 +67,31 @@ for marker in dangerFullAccess command/exec VERIFICATION_EXECUTION_UNCERTAIN 'tr
   grep -Fq "$marker" SECURITY.md || fail "SECURITY.md is missing the $marker boundary"
 done
 
-for method in turn/interrupt command/exec config/read config/batchWrite mcpServerStatus/list; do
+for method in thread/fork thread/goal/get turn/interrupt command/exec config/read config/batchWrite mcpServerStatus/list; do
   grep -Fq "\"$method\"" schemas/app-server/supported-methods.json ||
     fail "App Server fixture is missing $method"
   grep -Fq "\`$method\`" docs/compatibility.md ||
     fail "compatibility policy is missing $method"
+done
+
+binding_documents=(
+  README.md
+  README.zh-CN.md
+  docs/compatibility.md
+  docs/protocol-v2.md
+  plugin/skills/worktree-merge-consensus/references/protocol.md
+)
+for document in "${binding_documents[@]}"; do
+  for marker in 'thread/fork' ephemeral 'Source Primary' 'Effective Primary' '>=0.144.1'; do
+    grep -Fq "$marker" "$document" ||
+      fail "$document is missing the Primary participant binding marker: $marker"
+  done
+  if grep -Fq 'only when resuming a Primary integration task' "$document"; then
+    fail "$document still contains the obsolete integration-only injection contract"
+  fi
+  if grep -Fq 'default, ordinary, and non-integration variant remains' "$document"; then
+    fail "$document still contains the obsolete resume-variant contract"
+  fi
 done
 
 python3 - <<'PY'
@@ -86,11 +106,11 @@ errors = []
 
 if fixture["requestShape"].get("thread/resume") != {
     "default": ["threadId"],
-    "primaryIntegration": ["threadId", "config"],
+    "participant": ["threadId", "config"],
 }:
     errors.append(
         "thread/resume must distinguish default [threadId] from "
-        "primaryIntegration [threadId, config]"
+        "participant [threadId, config]"
     )
 
 def text_for(path):
@@ -119,23 +139,52 @@ def recovery_window(path):
     marker = re.search(r"CONTROLLED_PATCH_TOOL_UNAVAILABLE", text)
     return text[max(0, marker.start() - 500):marker.start() + 1400] if marker else ""
 
-variant_documents = [
+binding_documents = [
+    "README.md",
     "docs/compatibility.md",
-    "docs/protocol-v1.md",
     "docs/protocol-v2.md",
+    "plugin/skills/worktree-merge-consensus/references/protocol.md",
 ]
-for path in variant_documents:
-    require(path, "default resume stays threadId-only", [
-        r"(?:default|ordinary|non-integration).{0,100}thread.?id.{0,100}(?:only|alone)",
+for path in binding_documents:
+    require(path, "binding happens before the first Primary action", [
+        r"before.{0,80}(?:the )?first.{0,40}Primary.{0,40}(?:action|turn)",
     ])
-    require(path, "Primary integration resume carries config", [
-        r"primary.{0,80}integration.{0,120}(?:resume|resuming).{0,160}config",
+    require(path, "not-loaded Source Primary binds directly", [
+        r"(?:not.?loaded|notLoaded).{0,120}Source Primary.{0,160}(?:direct|in.?place)|Source Primary.{0,160}(?:not.?loaded|notLoaded).{0,160}(?:direct|in.?place)",
     ])
-    forbid(
-        path,
-        "config is universal for thread/resume",
-        r"(?:all|every|ordinary|default).{0,80}(?:thread.?resume|resumes?).{0,80}config",
-    )
+    require(path, "preloaded Source without the tool uses an ephemeral full-history mirror", [
+        r"(?:preloaded|already loaded).{0,160}Source Primary.{0,180}(?:without|missing|lacks).{0,100}(?:tool|capability).{0,180}ephemeral.{0,120}(?:full.?history|complete history)|ephemeral.{0,160}(?:full.?history|complete history).{0,180}(?:preloaded|already loaded)",
+    ])
+    require(path, "mirror carries no active goal", [
+        r"(?:no|without|does not).{0,100}(?:active )?goal|goal.{0,100}(?:null|not carried|not inherited)",
+    ])
+    require(path, "Reviewer routing is unchanged", [
+        r"Reviewer.{0,100}(?:unchanged|selected Reviewer|frozen Reviewer)",
+    ])
+    require(path, "uncertain turns are not reforked or resent", [
+        r"(?:pending|uncertain).{0,160}(?:not|never).{0,80}(?:refork|re-fork|forked again).{0,100}(?:resent|re-sent)|(?:not|never).{0,80}(?:refork|re-fork).{0,160}(?:pending|uncertain)",
+    ])
+    forbid(path, "integration-only participant injection", r"only when resuming a Primary integration task")
+    forbid(path, "obsolete resume variants", r"default, ordinary, and non-integration variant remains")
+
+require("README.zh-CN.md", "binding happens before the first Primary action", [
+    r"第一个.{0,20}主修.{0,20}动作之前",
+])
+require("README.zh-CN.md", "not-loaded Source Primary binds directly", [
+    r"notLoaded.{0,180}Source Primary.{0,180}直接|Source Primary.{0,180}notLoaded.{0,180}直接",
+])
+require("README.zh-CN.md", "preloaded Source without the tool uses an ephemeral full-history mirror", [
+    r"已加载.{0,140}Source Primary.{0,160}(?:缺少|没有).{0,80}(?:工具|能力).{0,180}ephemeral.{0,100}(?:完整历史|全历史)",
+])
+require("README.zh-CN.md", "mirror carries no active goal", [
+    r"(?:不会|不).{0,80}(?:继承|携带).{0,40}(?:活动 )?goal",
+])
+require("README.zh-CN.md", "Reviewer routing is unchanged", [
+    r"Reviewer.{0,80}路由.{0,40}不变",
+])
+require("README.zh-CN.md", "uncertain turns are not reforked or resent", [
+    r"(?:pending|uncertain).{0,120}(?:不会|不得).{0,80}(?:重新 fork|refork).{0,100}(?:重发|resent)",
+])
 
 semantic_documents = [
     "README.md",
@@ -149,8 +198,8 @@ for path in semantic_documents:
     require(path, "one-tool participant inventory", [
         r"(?:inventory|server|participant).{0,160}(?:exactly|only).{0,100}consensus_apply_patch|(?:exactly|only).{0,100}consensus_apply_patch.{0,160}(?:tool|inventory)",
     ])
-    require(path, "preflight before every Primary integration turn", [
-        r"(?:before every|every).{0,120}(?:primary.{0,40})?integration",
+    require(path, "preflight before every Primary turn", [
+        r"(?:before every|every).{0,120}Primary.{0,80}(?:action|turn)",
         r"mcpServerStatus/list",
         r"(?:before every.{0,80}(?:turn/start|such turn)|before.{0,80}turn/start)",
     ])

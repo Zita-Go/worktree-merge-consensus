@@ -35,17 +35,30 @@ response to its pending task turn, computes plan identity, and derives branch,
 SHA, changed files, ancestry, source-ref stability, and test evidence itself.
 Valid v1 JSON envelopes remain accepted only as a migration fallback.
 
-## Participant patch-tool preflight
+## Primary participant binding and patch-tool preflight
 
-For every Primary integration turn, the coordinator resumes the existing task
-with task-scoped `worktreeMergeConsensusParticipant` MCP configuration that
-launches `participant-mcp-server`. It then calls `mcpServerStatus/list` with
-that task ID and `detail: "toolsAndAuthOnly"` before `turn/start`. The only
-accepted participant tool inventory is `consensus_apply_patch`. The operator
-plugin exposes eight tools for launch and control; that separate inventory does
-not prove participant visibility. Only the Primary integration resume variant
-carries `config`; default, ordinary, and non-integration resumes remain
-`threadId`-only.
+Before the first Primary action, the coordinator establishes a durable
+participant binding. The frozen selected task is the **Source Primary**. A
+`notLoaded` Source Primary is loaded with task-scoped
+`worktreeMergeConsensusParticipant` MCP configuration and binds directly as
+the **Effective Primary**. A preloaded Source Primary with the exact tool also
+binds directly. A preloaded Source Primary without that capability is not
+mutated in place: `thread/fork` creates an `ephemeral: true`,
+`excludeTurns: false` full-history mirror with the participant configuration.
+The coordinator requires matching canonical turn IDs, idle status,
+`thread/goal/get: null`, and an exact inventory before using that mirror. The
+mirror represents the Source Primary; it is not a third source or reviewer and
+does not carry an active Source goal.
+
+Before every Primary turn, the coordinator resumes the Effective Primary and
+fully paginates `mcpServerStatus/list` before `turn/start`. The only accepted
+participant tool inventory is exactly `consensus_apply_patch`; the operator
+plugin's separate tools do not prove participant visibility. Reviewer routing
+is unchanged, and both selected source task IDs, refs, worktrees, and SHAs stay
+frozen. A mirror may be recreated only between completed actions. A pending or
+uncertain turn is never reforked or resent, and an uncertain `thread/fork`
+response is never retried automatically. The required experimental App Server
+surface begins at Codex CLI `>=0.144.1`.
 
 ## Statuses
 

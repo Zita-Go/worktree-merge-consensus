@@ -54,22 +54,25 @@ repository, or a pre-existing target branch fails closed. A source worktree may
 start detached because it is frozen by SHA; an accepted integration result must
 be attached to its authorized new local branch.
 
-Before each protocol turn, the daemon waits for the target task to become idle,
-resumes it by its frozen task ID, and only then sends `turn/start`. A Primary
-integration resume additionally carries coordinator-owned task-scoped MCP
-configuration for `worktreeMergeConsensusParticipant`; it launches the hidden
-`participant-mcp-server` command and must expose exactly
-`consensus_apply_patch`. The coordinator calls `mcpServerStatus/list` with the
-task ID and `detail: "toolsAndAuthOnly"` before every such turn. The operator
-plugin's eight-tool inventory is separate and never proves participant tool
-visibility. The `primaryIntegration` resume variant carries task ID plus
-`config`; the default, ordinary, and non-integration variant remains
-`threadId`-only. Reading task
-history is not a substitute for resuming a task that App Server reports as
-`notLoaded`. Version 0.1.26 treats this as a bounded inactivity wait: the
-default idle window is 30 minutes and renews only when canonical task status or
-turn history changes. A task with no canonical progress pauses with
-`COMMUNICATION_FAILURE`; cancellation remains available while waiting.
+Before the first Primary action, the daemon establishes a participant binding.
+The frozen selected task remains the Source Primary. A `notLoaded` Source is
+loaded with coordinator-owned task-scoped MCP configuration and used directly;
+a preloaded Source without the exact `consensus_apply_patch` inventory is
+represented by an ephemeral full-history `thread/fork` whose goal must be null.
+That Effective Primary is not a new source identity. Before every Primary turn,
+the daemon resumes the Effective Primary, fully paginates
+`mcpServerStatus/list`, requires exactly `consensus_apply_patch`, and only then
+sends `turn/start`. Reviewer routing and both frozen source task IDs, worktrees,
+refs, and SHAs remain unchanged. A pending or uncertain turn is never reforked
+or resent. This preflight occurs before every `turn/start` for a Primary
+action.
+
+Reading task history is not a substitute for resuming a task that App Server
+reports as `notLoaded`. Version 0.1.26 treats active-task waiting as a bounded
+inactivity wait: the default idle window is 30 minutes and renews only when
+canonical task status or turn history changes. A task with no canonical
+progress pauses with `COMMUNICATION_FAILURE`; cancellation remains available
+while waiting.
 
 For legacy v1 Runs, version 0.2.7 permits only the exact post-0.2.6
 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` correction recovery. Explicit resume after

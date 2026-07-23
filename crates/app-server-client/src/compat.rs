@@ -7,6 +7,8 @@ pub const REQUIRED_METHODS: &[&str] = &[
     "thread/list",
     "thread/read",
     "thread/resume",
+    "thread/fork",
+    "thread/goal/get",
     "turn/start",
     "turn/interrupt",
     "command/exec",

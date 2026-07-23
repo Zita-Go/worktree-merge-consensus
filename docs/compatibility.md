@@ -34,8 +34,10 @@ and requires these JSON-RPC methods:
 - `thread/list`
 - `thread/read`
 - `thread/resume`
-- `turn/interrupt`
+- `thread/fork`
+- `thread/goal/get`
 - `turn/start`
+- `turn/interrupt`
 - `command/exec`
 - `config/read`
 - `config/batchWrite`
@@ -159,18 +161,32 @@ repair removes only stale archived event rows, reacquires the existing Run's
 lock, and restores its already-started verification action; it does not archive
 another turn, dispatch another resume, or execute a verification command.
 
-Version 0.2.7 adds task-scoped participant patch-tool injection for Primary
-integration turns. The coordinator, not the operator plugin, resumes the
-existing Primary task with the `worktreeMergeConsensusParticipant` MCP server,
-whose hidden command is `participant-mcp-server` and whose inventory must be
-exactly `consensus_apply_patch`. The Primary integration
-`thread/resume.primaryIntegration` variant uses `threadId` plus `config`; the
-default `thread/resume.default` variant remains `threadId`-only. Before every
-Primary integration `turn/start`, it calls
-`mcpServerStatus/list` for that task with `detail: "toolsAndAuthOnly"`; missing,
-malformed, or additional tools fail closed before the turn starts.
-The operator plugin's eight tools are not evidence that the participant server
-is visible: coordinator-owned injection and per-turn preflight are required.
+Version 0.2.7 establishes a participant binding before the first Primary
+action. The selected frozen task is the **Source Primary**. A `notLoaded`
+Source Primary is resumed with the task-scoped
+`worktreeMergeConsensusParticipant` configuration and becomes the **Effective
+Primary** directly. A preloaded Source Primary with the exact participant
+inventory also binds directly. A preloaded Source Primary without that tool is
+not reconfigured in place: the coordinator calls `thread/fork` with
+`threadId`, `config`, `ephemeral: true`, and `excludeTurns: false`. It accepts
+the ephemeral full-history mirror only when every canonical turn ID matches
+the Source, the mirror is idle, `thread/goal/get` returns null, and the
+participant inventory is exact. The mirror represents the Source Primary; it
+is not an additional source or reviewer and no active Source goal is carried.
+
+Before every Primary action, the coordinator resumes the Effective Primary and
+fully paginates `mcpServerStatus/list` using `threadId`, `detail:
+"toolsAndAuthOnly"`, `limit: 100`, and an opaque nullable `cursor` before
+`turn/start`. The participant server must expose exactly
+`consensus_apply_patch`; missing, malformed, duplicate, or additional
+participant tools fail closed. The operator plugin's eight tools are not
+participant visibility evidence. Reviewer routing is unchanged, and the
+selected task IDs, source refs, and source worktrees remain frozen. A missing
+ephemeral mirror can be recreated only between completed actions with no
+pending or uncertain send; pending or uncertain turns are never reforked or
+resent. `thread/fork` is non-idempotent and is never automatically repeated
+after an uncertain response. The App Server contract remains Codex CLI
+`>=0.144.1`.
 
 Version 0.2.7 also permits explicit recovery of only the exact production
 blocker left after the 0.2.6 recovery: the same blocked Run, correction round,

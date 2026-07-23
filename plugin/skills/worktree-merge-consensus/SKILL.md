@@ -62,14 +62,22 @@ hash; its daemon-side policy is described under recovery below. Never call it
 manually from this launcher skill.
 
 Release 0.2.7 makes that participant capability coordinator-owned rather than
-an inference from the operator plugin. For every Primary integration turn, the
-coordinator injects the task-scoped `worktreeMergeConsensusParticipant` server
-through `participant-mcp-server` and preflights `mcpServerStatus/list` with
-`detail: "toolsAndAuthOnly"` before `turn/start`. The participant server must
-expose exactly `consensus_apply_patch`; the operator plugin's eight tools do
-not prove that the participant task can see it. Only the Primary integration
-resume variant carries `config`; default, ordinary, and non-integration task
-resumes remain `threadId`-only.
+an inference from the operator plugin. Before the first Primary action, the
+coordinator binds the frozen Source Primary either directly (including a
+`notLoaded` task that it loads with participant configuration) or through an
+ephemeral full-history `thread/fork` when a preloaded task lacks the exact
+tool. The fork becomes the Effective Primary only after history, idle state,
+null goal, and MCP inventory checks. Before every Primary turn, the coordinator
+resumes that Effective Primary and fully paginates `mcpServerStatus/list`
+before `turn/start`; the participant server must expose exactly
+`consensus_apply_patch`. Reviewer routing and both frozen source identities are
+unchanged. A pending or uncertain turn is never reforked or resent.
+
+The launcher may call only the operator-facing `consensus_*` tools listed
+above. It must never ask the invoking task to find, install, expose, or call
+participant-side `consensus_apply_patch`; injection, preflight, and any
+authorized use of that tool belong exclusively to the persistent coordinator
+and its self-contained Primary prompt.
 
 Use those CLI commands only for diagnostics or when the user explicitly requests the CLI surface. If no `consensus_*` MCP tools are exposed, run `codex mcp list --json`, `command -v codex-consensus`, and `codex-consensus doctor` when shell access is available. Report whether `worktreeMergeConsensus` is absent, disabled, or unable to start, then stop. A successful CLI doctor does not prove that the plugin MCP tools were loaded. Do not search for a `consensus_doctor` binary or substitute ordinary task/thread tools.
 

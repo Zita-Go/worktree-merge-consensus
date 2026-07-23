@@ -153,16 +153,29 @@ the stale archived event rows and continuing the same action. This is not a
 second resume or migration and cannot create another patch, merge, commit, or
 verification execution during repair. Any near-match remains blocked.
 
-Release 0.2.7 injects the task-scoped
-`worktreeMergeConsensusParticipant` server only when resuming a Primary
-integration task. It launches `participant-mcp-server`, and the coordinator
-requires `mcpServerStatus/list` with the task ID and `detail:
-"toolsAndAuthOnly"` before every integration `turn/start`; the discovered tool
-inventory must be exactly `consensus_apply_patch`. The operator plugin's eight
-tools do not prove this participant visibility. A missing or expanded
-participant inventory fails closed before the turn starts. This
-`primaryIntegration` resume variant carries task ID plus `config`; the default,
-ordinary, and non-integration variant remains `threadId`-only.
+Before the first Primary action, release 0.2.7 establishes a durable
+participant binding. The selected frozen task is the **Source Primary**. When
+it is `notLoaded`, the coordinator loads it with the task-scoped
+`worktreeMergeConsensusParticipant` configuration and uses it directly as the
+**Effective Primary**. A preloaded Source Primary with exactly
+`consensus_apply_patch` also binds directly. A preloaded Source Primary without
+that tool is represented by a `thread/fork` created with `ephemeral: true` and
+`excludeTurns: false`. The fork is accepted only if it is an idle, ephemeral
+full-history mirror with the same canonical turn-ID sequence,
+`thread/goal/get` returns null, and its complete MCP inventory is exact. It
+represents the Source Primary rather than becoming a third source or reviewer,
+and it carries no active Source goal.
+
+Before every Primary turn, the coordinator resumes the Effective Primary and
+fully paginates `mcpServerStatus/list` before `turn/start`. The only accepted
+participant tool inventory is exactly `consensus_apply_patch`; the operator
+plugin's eight tools do not prove participant visibility. Reviewer routing is
+unchanged, while the selected source task IDs, refs, worktrees, and SHAs remain
+frozen. A lost mirror may be recreated only between completed actions with no
+pending or uncertain send. Pending or uncertain turns are never reforked or
+resent, and an uncertain non-idempotent `thread/fork` is never automatically
+repeated. This protocol depends on the experimental Codex CLI `>=0.144.1` App
+Server surface.
 
 After a matching 0.2.7 deployment, explicit resume may recover only the exact
 post-0.2.6 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` correction blocker: the same

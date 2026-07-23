@@ -52,6 +52,8 @@ fn required_method_contract_is_explicit_and_pinned() {
             "thread/list",
             "thread/read",
             "thread/resume",
+            "thread/fork",
+            "thread/goal/get",
             "turn/start",
             "turn/interrupt",
             "command/exec",
@@ -110,6 +112,8 @@ fn pinned_fixture_keeps_open_ended_version_gate_and_unattended_execution_contrac
             "thread/list",
             "thread/read",
             "thread/resume",
+            "thread/fork",
+            "thread/goal/get",
             "turn/start",
             "turn/interrupt",
             "command/exec",
@@ -122,13 +126,22 @@ fn pinned_fixture_keeps_open_ended_version_gate_and_unattended_execution_contrac
         fixture["requestShape"]["thread/resume"],
         serde_json::json!({
             "default": ["threadId"],
-            "primaryIntegration": ["threadId", "config"]
+            "participant": ["threadId", "config"]
         })
     );
     assert_eq!(
-        fixture["requestShape"]["mcpServerStatus/list"],
-        serde_json::json!(["threadId", "detail"])
+        fixture["requestShape"]["thread/fork"],
+        serde_json::json!(["threadId", "config", "ephemeral", "excludeTurns"])
     );
+    assert_eq!(
+        fixture["requestShape"]["thread/goal/get"],
+        serde_json::json!(["threadId"])
+    );
+    assert_eq!(
+        fixture["requestShape"]["mcpServerStatus/list"],
+        serde_json::json!(["threadId", "detail", "limit", "cursor"])
+    );
+    assert!(fixture.get("deferGoalContinuation").is_none());
     assert_eq!(
         fixture["requestShape"]["command/exec"],
         serde_json::json!([

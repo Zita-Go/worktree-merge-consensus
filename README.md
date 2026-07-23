@@ -183,14 +183,32 @@ v0.2.5 post-migration completion collision. That repair preserves the active
 turn, Run, integration branch and SHA, source refs, patch record, merge, and
 commit; it neither sends a second resume nor executes a test during repair.
 
-Version 0.2.7 makes participant patch-tool availability coordinator-owned. On
-every Primary integration resume, the coordinator injects the task-scoped
-`worktreeMergeConsensusParticipant` server through `participant-mcp-server`,
-then calls `mcpServerStatus/list` with `detail: "toolsAndAuthOnly"` before
-`turn/start`. That server must expose exactly `consensus_apply_patch`; the
-operator plugin still exposes eight tools, but its visibility does not prove
-participant visibility. Only the Primary integration resume variant carries
-`config`; default, ordinary, and non-integration resumes remain thread-ID-only.
+Version 0.2.7 makes participant patch-tool availability coordinator-owned and
+establishes a durable binding before the first Primary action. The frozen
+selected task is the **Source Primary**. If App Server reports it as
+`notLoaded`, the coordinator loads it with the task-scoped
+`worktreeMergeConsensusParticipant` configuration and binds the **Effective
+Primary** directly to that same task. A preloaded Source Primary that already
+has exactly `consensus_apply_patch` also binds directly. A preloaded Source
+Primary without that exact tool is not mutated in place: the coordinator calls
+`thread/fork` with `ephemeral: true`, `excludeTurns: false`, and the participant
+configuration, then accepts the ephemeral full-history mirror only after its
+complete turn-ID sequence matches, it is idle, `thread/goal/get` returns null,
+and its paginated MCP inventory is exact. The Effective Primary mirror
+represents the Source Primary; it is not a third source or reviewer and carries
+no active Source goal.
+
+Before every Primary action, including contract, plan, integration, and
+verification, the coordinator resumes the Effective Primary and consumes every
+page of `mcpServerStatus/list` with `detail: "toolsAndAuthOnly"` before
+`turn/start`. The participant server must expose exactly
+`consensus_apply_patch`; the operator plugin's eight-tool visibility is not
+participant evidence. Reviewer routing is unchanged. Both selected source task
+IDs, source refs, and source worktrees remain frozen. If an ephemeral mirror is
+lost, it may be recreated only between completed actions when no send is
+pending or uncertain; a pending or uncertain turn is never reforked or resent.
+Because `thread/fork` is non-idempotent, an uncertain fork response is never
+automatically repeated. This contract requires Codex CLI `>=0.144.1`.
 
 After a matching 0.2.7 deployment, explicit `consensus_resume` may recover
 only the exact post-0.2.6 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` correction
@@ -272,8 +290,8 @@ through a third agent.
 
 The operator plugin's eight tools are not the Primary participant's tool
 inventory. The coordinator injects and preflights the task-scoped participant
-server before each Primary integration turn; plugin installation alone does not
-change a blocked Run.
+server through the direct or ephemeral Effective Primary binding before every
+Primary action; plugin installation alone does not change a blocked Run.
 
 Names such as `consensus_doctor` are MCP tool names, not shell executables.
 Codex starts the plugin server as `codex-consensus mcp-server`; the equivalent

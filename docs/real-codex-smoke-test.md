@@ -77,6 +77,20 @@ the evidence below.
    review feedback, integration summary, verification summary, and final review
    use one result marker plus ordinary Markdown. No participant should have to
    repeat run IDs, plan hashes, branches, SHAs, changed files, or test evidence.
+   Exercise both Primary binding paths supported by Codex CLI `>=0.144.1`.
+   First use a Source Primary that App Server reports as `notLoaded`; confirm it
+   is loaded with participant configuration, the Effective Primary equals the
+   Source Primary, and no `thread/fork` occurs. Then use a preloaded Source
+   Primary without the participant tool; confirm one non-retried
+   `thread/fork` creates an `ephemeral: true`, `excludeTurns: false`,
+   full-history Effective Primary mirror, the complete Source turn-ID sequence
+   matches, and `thread/goal/get` returns null. Confirm the mirror carries no
+   active Source goal, receives every Primary action, and is not treated as a
+   third source or reviewer. Reviewer routing must remain unchanged, and both
+   selected source task IDs, refs, SHAs, and worktrees must stay frozen.
+   Before every Primary `turn/start`, confirm the coordinator resumes the
+   Effective Primary and consumes all `mcpServerStatus/list` pages until it
+   finds exactly `consensus_apply_patch`.
 7. While the coordinator daemon remains alive, restart the managed App Server
    and confirm `doctor` repairs the daemon-owned proxy, reaps the old proxy
    process, and permits an idempotent task read without manual coordinator
@@ -119,6 +133,11 @@ the evidence below.
    Keep one disposable participant turn active for longer than five
    minutes while canonical turn items continue to change, and confirm the Run
    does not pause; unchanged state must still hit the bounded idle timeout.
+   Separately remove an idle ephemeral mirror between completed actions and
+   confirm it is recreated from the Source Primary's complete history. Repeat
+   during a pending or uncertain Primary turn and confirm the coordinator does
+   not refork or resend it. Interrupt one `thread/fork` response after dispatch
+   and confirm the non-idempotent request is not automatically repeated.
 8. Verify `accepted_result` records the authoritative tests,
    `source_refs_unchanged: true`, and local-only/no-push/no-PR fields. Verify the
    test cwd is a cleanly materialized clone of the exact integration SHA with a
