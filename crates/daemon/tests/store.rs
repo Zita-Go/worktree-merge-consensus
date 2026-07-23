@@ -5,14 +5,208 @@ use consensus_core::{
     protocol::validate_message,
     state::{NextAction, Phase, Role, RunDiagnostic, RunFacts, RunState, RunStatus},
 };
+use consensus_daemon::PrimaryBindingMode;
 use consensus_daemon::store::{
-    AcceptedTurn, PARTICIPANT_CAPABILITY_GENERATION, SqliteRunStore, VerificationCommandClaim,
+    AcceptedTurn, LEGACY_PARTICIPANT_CAPABILITY_GENERATION, PARTICIPANT_CAPABILITY_GENERATION,
+    SqliteRunStore, SuccessfulPatchRecord, VerificationCommandClaim,
 };
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 const RUN_ID: &str = "4b230bd8-d870-4ef4-bf20-05a4c61020af";
+
+#[test]
+fn primary_binding_generations_are_atomic_and_auditable() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+
+    let direct = store
+        .activate_primary_binding(
+            RUN_ID,
+            "primary-thread",
+            "primary-thread",
+            PrimaryBindingMode::Direct,
+            "worktreeMergeConsensusParticipant",
+        )
+        .unwrap();
+    assert_eq!(direct.generation, 1);
+    assert_eq!(direct.mode, PrimaryBindingMode::Direct);
+    assert_eq!(direct.source_primary_thread_id, "primary-thread");
+    assert_eq!(direct.effective_primary_thread_id, "primary-thread");
+
+    let repeated = store
+        .activate_primary_binding(
+            RUN_ID,
+            "primary-thread",
+            "primary-thread",
+            PrimaryBindingMode::Direct,
+            "worktreeMergeConsensusParticipant",
+        )
+        .unwrap();
+    assert_eq!(repeated, direct);
+
+    let mirror = store
+        .activate_primary_binding(
+            RUN_ID,
+            "primary-thread",
+            "primary-mirror-1",
+            PrimaryBindingMode::EphemeralFork,
+            "worktreeMergeConsensusParticipant",
+        )
+        .unwrap();
+    assert_eq!(mirror.generation, 2);
+    assert_eq!(
+        store.active_primary_binding(RUN_ID).unwrap(),
+        Some(mirror.clone())
+    );
+    assert_eq!(
+        store.primary_binding(RUN_ID, 1).unwrap(),
+        Some(direct.clone())
+    );
+    assert_eq!(
+        store.primary_binding(RUN_ID, 2).unwrap(),
+        Some(mirror.clone())
+    );
+
+    store
+        .record_pending_send_with_binding(
+            RUN_ID,
+            "PRIMARY",
+            "INTEGRATE",
+            1,
+            "request-hash",
+            Some(mirror.generation),
+        )
+        .unwrap();
+    let error = store
+        .activate_primary_binding(
+            RUN_ID,
+            "primary-thread",
+            "primary-mirror-2",
+            PrimaryBindingMode::EphemeralFork,
+            "worktreeMergeConsensusParticipant",
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "INCOMPATIBLE_STATE");
+    assert_eq!(store.active_primary_binding(RUN_ID).unwrap(), Some(mirror));
+}
+
+#[test]
+fn turn_and_patch_records_preserve_binding_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let mut run = fixture_run(RUN_ID, "/repo/.git");
+    let store = SqliteRunStore::open(&path).unwrap();
+    store.insert_run(&run).unwrap();
+    let binding = store
+        .activate_primary_binding(
+            RUN_ID,
+            "primary-thread",
+            "primary-mirror-1",
+            PrimaryBindingMode::EphemeralFork,
+            "worktreeMergeConsensusParticipant",
+        )
+        .unwrap();
+
+    store
+        .record_pending_send_with_binding(
+            RUN_ID,
+            "PRIMARY",
+            "CONTRACT",
+            1,
+            "request-hash",
+            Some(binding.generation),
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .pending_send(RUN_ID)
+            .unwrap()
+            .unwrap()
+            .participant_binding_generation,
+        Some(binding.generation)
+    );
+    store
+        .record_turn_start_intent(RUN_ID, "request-hash")
+        .unwrap();
+    store
+        .record_turn_started(RUN_ID, "request-hash", "primary-mirror-1", "turn-1")
+        .unwrap();
+    run.pause("PERMISSION_REQUIRED").unwrap();
+    store
+        .accept_response_and_advance(RUN_ID, "response-hash", &run)
+        .unwrap();
+    assert_eq!(
+        store
+            .latest_accepted_turn(RUN_ID)
+            .unwrap()
+            .unwrap()
+            .participant_binding_generation,
+        Some(binding.generation)
+    );
+
+    store
+        .record_pending_send_with_binding(
+            RUN_ID,
+            "PRIMARY",
+            "PLAN",
+            2,
+            "retry-request",
+            Some(binding.generation),
+        )
+        .unwrap();
+    store
+        .record_turn_started(RUN_ID, "retry-request", "primary-mirror-1", "turn-retry")
+        .unwrap();
+    store
+        .reset_terminal_turn_for_retry(
+            RUN_ID,
+            "retry-request",
+            "primary-mirror-1",
+            "turn-retry",
+            "interrupted",
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .pending_send(RUN_ID)
+            .unwrap()
+            .unwrap()
+            .participant_binding_generation,
+        Some(binding.generation)
+    );
+
+    let expected = SuccessfulPatchRecord {
+        patch_hash: "patch-hash".to_owned(),
+        source_primary_thread_id: Some("primary-thread".to_owned()),
+        effective_primary_thread_id: Some("primary-mirror-1".to_owned()),
+        participant_binding_generation: Some(binding.generation),
+    };
+    let recorded = store
+        .record_successful_patch_with_provenance(
+            RUN_ID,
+            "patch-request",
+            "patch-hash",
+            Some("primary-thread"),
+            Some("primary-mirror-1"),
+            Some(binding.generation),
+        )
+        .unwrap();
+    assert_eq!(recorded, expected);
+    drop(store);
+
+    let reopened = SqliteRunStore::open(path).unwrap();
+    assert_eq!(
+        reopened
+            .successful_patch_record(RUN_ID, "patch-request")
+            .unwrap(),
+        Some(expected)
+    );
+}
 
 #[test]
 fn new_turn_rows_persist_participant_capability_generation() {
@@ -138,7 +332,7 @@ fn new_turn_start_intent_survives_crash_and_recovered_binding_as_current_generat
 }
 
 #[test]
-fn legacy_turn_schema_migrates_with_null_capability_generation() {
+fn legacy_store_schema_migrates_with_null_binding_provenance() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");
     let connection = Connection::open(&path).unwrap();
@@ -165,6 +359,19 @@ fn legacy_turn_schema_migrates_with_null_capability_generation() {
              ) VALUES (
                 'legacy-run', 'PRIMARY', 'INTEGRATE', 1, 'legacy-request',
                 'SENT', 'primary-thread', 'legacy-turn', 1
+             );
+             CREATE TABLE patch_applications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                message_hash TEXT NOT NULL,
+                patch_hash TEXT NOT NULL,
+                applied_at INTEGER NOT NULL,
+                UNIQUE(run_id, message_hash)
+             );
+             INSERT INTO patch_applications (
+                run_id, message_hash, patch_hash, applied_at
+             ) VALUES (
+                'legacy-run', 'legacy-request', 'legacy-patch', 1
              );",
         )
         .unwrap();
@@ -173,17 +380,40 @@ fn legacy_turn_schema_migrates_with_null_capability_generation() {
     let store = SqliteRunStore::open(&path).unwrap();
     let pending = store.pending_send("legacy-run").unwrap().unwrap();
     drop(store);
-    let generation = Connection::open(path)
-        .unwrap()
+    let connection = Connection::open(path).unwrap();
+    let (capability_generation, binding_generation) = connection
         .query_row(
-            "SELECT capability_generation FROM turns WHERE run_id = 'legacy-run'",
+            "SELECT capability_generation, participant_binding_generation
+             FROM turns WHERE run_id = 'legacy-run'",
             [],
-            |row| row.get::<_, Option<String>>(0),
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<u32>>(1)?,
+                ))
+            },
+        )
+        .unwrap();
+    let patch_provenance = connection
+        .query_row(
+            "SELECT source_primary_thread_id, effective_primary_thread_id,
+                    participant_binding_generation
+             FROM patch_applications WHERE run_id = 'legacy-run'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<u32>>(2)?,
+                ))
+            },
         )
         .unwrap();
 
     assert_eq!(pending.turn_id.as_deref(), Some("legacy-turn"));
-    assert_eq!(generation, None);
+    assert_eq!(capability_generation, None);
+    assert_eq!(binding_generation, None);
+    assert_eq!(patch_provenance, (None, None, None));
 }
 
 #[test]
@@ -506,7 +736,7 @@ fn corrective_patch_tool_retry_reactivates_and_resets_exactly_once_atomically() 
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");
     let store = SqliteRunStore::open(&path).unwrap();
-    let (blocked, resumed, accepted) = seed_corrective_patch_tool_retry(&store);
+    let (blocked, resumed, accepted) = seed_corrective_patch_tool_retry(&store, &path);
 
     store
         .reactivate_blocked_run_with_corrective_patch_tool_retry(
@@ -568,8 +798,9 @@ fn corrective_patch_tool_retry_reactivates_and_resets_exactly_once_atomically() 
 #[test]
 fn corrective_patch_tool_retry_rejects_successful_patch_residue_without_mutation() {
     let temp = tempfile::tempdir().unwrap();
-    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
-    let (blocked, resumed, accepted) = seed_corrective_patch_tool_retry(&store);
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    let (blocked, resumed, accepted) = seed_corrective_patch_tool_retry(&store, &path);
     store
         .record_successful_patch(RUN_ID, &accepted.message_hash, "patch-hash")
         .unwrap();
@@ -592,8 +823,9 @@ fn corrective_patch_tool_retry_rejects_successful_patch_residue_without_mutation
 #[test]
 fn corrective_patch_tool_retry_rejects_conflicting_repository_lock_without_mutation() {
     let temp = tempfile::tempdir().unwrap();
-    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
-    let (blocked, resumed, accepted) = seed_corrective_patch_tool_retry(&store);
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    let (blocked, resumed, accepted) = seed_corrective_patch_tool_retry(&store, &path);
     let competing = fixture_run("9f8a5c17-0f06-4df9-873f-589f3b54dbcc", "/repo/.git");
     store.insert_run(&competing).unwrap();
 
@@ -617,7 +849,7 @@ fn corrective_patch_tool_retry_rejects_changed_capability_generation_transaction
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");
     let store = SqliteRunStore::open(&path).unwrap();
-    let (blocked, resumed, accepted) = seed_corrective_patch_tool_retry(&store);
+    let (blocked, resumed, accepted) = seed_corrective_patch_tool_retry(&store, &path);
     Connection::open(&path)
         .unwrap()
         .execute(
@@ -662,7 +894,7 @@ fn corrective_patch_tool_retry_rejects_each_changed_accepted_turn_identity_field
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("state.db");
         let store = SqliteRunStore::open(&path).unwrap();
-        let (blocked, resumed, accepted) = seed_corrective_patch_tool_retry(&store);
+        let (blocked, resumed, accepted) = seed_corrective_patch_tool_retry(&store, &path);
         Connection::open(&path)
             .unwrap()
             .execute(mutation, [RUN_ID])
@@ -693,7 +925,7 @@ fn corrective_patch_tool_retry_rejects_a_newer_accepted_turn_transactionally() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");
     let store = SqliteRunStore::open(&path).unwrap();
-    let (blocked, resumed, accepted) = seed_corrective_patch_tool_retry(&store);
+    let (blocked, resumed, accepted) = seed_corrective_patch_tool_retry(&store, &path);
     Connection::open(&path)
         .unwrap()
         .execute(
@@ -1533,7 +1765,10 @@ fn fixture_run(run_id: &str, common_dir: &str) -> RunState {
     })
 }
 
-fn seed_corrective_patch_tool_retry(store: &SqliteRunStore) -> (RunState, RunState, AcceptedTurn) {
+fn seed_corrective_patch_tool_retry(
+    store: &SqliteRunStore,
+    path: &std::path::Path,
+) -> (RunState, RunState, AcceptedTurn) {
     let blocked = fixture_blocked_corrective_patch_run();
     store.insert_run(&blocked).unwrap();
     store
@@ -1551,6 +1786,14 @@ fn seed_corrective_patch_tool_retry(store: &SqliteRunStore) -> (RunState, RunSta
             "corrective-request",
             "primary-thread",
             "corrective-blocker-turn",
+        )
+        .unwrap();
+    Connection::open(path)
+        .unwrap()
+        .execute(
+            "UPDATE turns SET capability_generation = ?1
+             WHERE run_id = ?2 AND message_hash = 'corrective-request'",
+            params![LEGACY_PARTICIPANT_CAPABILITY_GENERATION, RUN_ID],
         )
         .unwrap();
     let old_item = json!({

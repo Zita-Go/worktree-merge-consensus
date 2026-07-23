@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-pub const PARTICIPANT_CAPABILITY_GENERATION: &str = "participant-mcp-v1";
+use crate::{PrimaryBindingMode, PrimaryParticipantBinding};
+
+pub const LEGACY_PARTICIPANT_CAPABILITY_GENERATION: &str = "participant-mcp-v1";
+pub const PARTICIPANT_CAPABILITY_GENERATION: &str = "participant-mcp-v2";
 
 #[derive(Clone)]
 pub struct SqliteRunStore {
@@ -30,6 +33,7 @@ pub struct PendingSend {
     pub turn_id: Option<String>,
     pub full_prompt: Option<String>,
     pub capability_generation: Option<String>,
+    pub participant_binding_generation: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +47,15 @@ pub struct AcceptedTurn {
     pub thread_id: String,
     pub turn_id: String,
     pub capability_generation: Option<String>,
+    pub participant_binding_generation: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuccessfulPatchRecord {
+    pub patch_hash: String,
+    pub source_primary_thread_id: Option<String>,
+    pub effective_primary_thread_id: Option<String>,
+    pub participant_binding_generation: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -435,6 +448,137 @@ impl SqliteRunStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn activate_primary_binding(
+        &self,
+        run_id: &str,
+        source_primary_thread_id: &str,
+        effective_primary_thread_id: &str,
+        mode: PrimaryBindingMode,
+        participant_server: &str,
+    ) -> Result<PrimaryParticipantBinding, StoreError> {
+        if source_primary_thread_id.trim().is_empty()
+            || effective_primary_thread_id.trim().is_empty()
+            || participant_server.trim().is_empty()
+        {
+            return Err(StoreError::IncompatibleState(
+                "primary participant binding identities must be nonempty".to_owned(),
+            ));
+        }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        ensure_run_exists(&transaction, run_id)?;
+        let (frozen_primary, frozen_reviewer) = transaction.query_row(
+            "SELECT primary_thread_id, reviewer_thread_id
+             FROM source_facts WHERE run_id = ?1",
+            [run_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        if source_primary_thread_id != frozen_primary {
+            return Err(StoreError::IncompatibleState(format!(
+                "run {run_id} primary binding source does not match frozen Primary task"
+            )));
+        }
+        match mode {
+            PrimaryBindingMode::Direct
+                if effective_primary_thread_id != source_primary_thread_id =>
+            {
+                return Err(StoreError::IncompatibleState(format!(
+                    "run {run_id} direct Primary binding must use the Source Primary task"
+                )));
+            }
+            PrimaryBindingMode::EphemeralFork
+                if effective_primary_thread_id == source_primary_thread_id
+                    || effective_primary_thread_id == frozen_reviewer =>
+            {
+                return Err(StoreError::IncompatibleState(format!(
+                    "run {run_id} ephemeral Primary binding must differ from both frozen source tasks"
+                )));
+            }
+            _ => {}
+        }
+
+        let pending_count = transaction.query_row(
+            "SELECT COUNT(*) FROM turns
+             WHERE run_id = ?1 AND delivery_state IN ('PENDING', 'SENT')",
+            [run_id],
+            |row| row.get::<_, u64>(0),
+        )?;
+        if pending_count != 0 {
+            return Err(StoreError::IncompatibleState(format!(
+                "run {run_id} cannot change Primary binding while a turn is pending or sent"
+            )));
+        }
+
+        if let Some(active) = query_active_primary_binding(&transaction, run_id)? {
+            if active.source_primary_thread_id == source_primary_thread_id
+                && active.effective_primary_thread_id == effective_primary_thread_id
+                && active.mode == mode
+                && active.participant_server == participant_server
+            {
+                transaction.commit()?;
+                return Ok(active);
+            }
+        }
+
+        let generation = transaction.query_row(
+            "SELECT COALESCE(MAX(generation), 0) + 1
+             FROM primary_participant_bindings WHERE run_id = ?1",
+            [run_id],
+            |row| row.get::<_, u32>(0),
+        )?;
+        transaction.execute(
+            "UPDATE primary_participant_bindings
+             SET active = 0 WHERE run_id = ?1 AND active = 1",
+            [run_id],
+        )?;
+        let timestamp = now_unix();
+        transaction.execute(
+            "INSERT INTO primary_participant_bindings (
+                run_id, generation, source_primary_thread_id,
+                effective_primary_thread_id, mode, participant_server,
+                active, created_at, verified_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?7)",
+            params![
+                run_id,
+                generation,
+                source_primary_thread_id,
+                effective_primary_thread_id,
+                mode.as_database_value(),
+                participant_server,
+                timestamp,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(PrimaryParticipantBinding {
+            run_id: run_id.to_owned(),
+            source_primary_thread_id: source_primary_thread_id.to_owned(),
+            effective_primary_thread_id: effective_primary_thread_id.to_owned(),
+            mode,
+            generation,
+            participant_server: participant_server.to_owned(),
+            created_at: timestamp,
+            verified_at: timestamp,
+        })
+    }
+
+    pub fn active_primary_binding(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<PrimaryParticipantBinding>, StoreError> {
+        let connection = self.lock()?;
+        query_active_primary_binding(&connection, run_id)
+    }
+
+    pub fn primary_binding(
+        &self,
+        run_id: &str,
+        generation: u32,
+    ) -> Result<Option<PrimaryParticipantBinding>, StoreError> {
+        let connection = self.lock()?;
+        query_primary_binding(&connection, run_id, generation)
+    }
+
     pub fn record_pending_send(
         &self,
         run_id: &str,
@@ -443,14 +587,26 @@ impl SqliteRunStore {
         round: u32,
         message_hash: &str,
     ) -> Result<(), StoreError> {
+        self.record_pending_send_with_binding(run_id, role, phase, round, message_hash, None)
+    }
+
+    pub fn record_pending_send_with_binding(
+        &self,
+        run_id: &str,
+        role: &str,
+        phase: &str,
+        round: u32,
+        message_hash: &str,
+        participant_binding_generation: Option<u32>,
+    ) -> Result<(), StoreError> {
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
         ensure_run_exists(&transaction, run_id)?;
         transaction.execute(
             "INSERT INTO turns (
                 run_id, role, phase, round, message_hash, delivery_state,
-                capability_generation, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'PENDING', ?6, ?7)
+                capability_generation, participant_binding_generation, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'PENDING', ?6, ?7, ?8)
              ON CONFLICT(run_id, role, phase, round, message_hash)
              DO NOTHING",
             params![
@@ -460,6 +616,7 @@ impl SqliteRunStore {
                 round,
                 message_hash,
                 PARTICIPANT_CAPABILITY_GENERATION,
+                participant_binding_generation,
                 now_unix()
             ],
         )?;
@@ -472,7 +629,7 @@ impl SqliteRunStore {
         connection
             .query_row(
                 "SELECT run_id, role, phase, round, message_hash, thread_id, turn_id,
-                        capability_generation
+                        capability_generation, participant_binding_generation
                  FROM turns
                  WHERE run_id = ?1 AND delivery_state IN ('PENDING', 'SENT')
                  ORDER BY id DESC LIMIT 1",
@@ -488,6 +645,7 @@ impl SqliteRunStore {
                         turn_id: row.get(6)?,
                         full_prompt: None,
                         capability_generation: row.get(7)?,
+                        participant_binding_generation: row.get(8)?,
                     })
                 },
             )
@@ -500,7 +658,8 @@ impl SqliteRunStore {
         connection
             .query_row(
                 "SELECT run_id, role, phase, round, message_hash, response_hash,
-                        thread_id, turn_id, capability_generation
+                        thread_id, turn_id, capability_generation,
+                        participant_binding_generation
                  FROM turns
                  WHERE run_id = ?1 AND delivery_state = 'ACCEPTED'
                  ORDER BY id DESC LIMIT 1",
@@ -516,6 +675,7 @@ impl SqliteRunStore {
                         thread_id: row.get(6)?,
                         turn_id: row.get(7)?,
                         capability_generation: row.get(8)?,
+                        participant_binding_generation: row.get(9)?,
                     })
                 },
             )
@@ -1461,7 +1621,8 @@ impl SqliteRunStore {
             || accepted.message_hash.is_empty()
             || accepted.response_hash.is_empty()
             || accepted.turn_id.is_empty()
-            || accepted.capability_generation.as_deref() != Some(PARTICIPANT_CAPABILITY_GENERATION)
+            || accepted.capability_generation.as_deref()
+                != Some(LEGACY_PARTICIPANT_CAPABILITY_GENERATION)
         {
             return Err(StoreError::TerminalTurnNotRetryable(
                 "accepted corrective patch-tool blocker does not match the frozen correction request"
@@ -1488,7 +1649,8 @@ impl SqliteRunStore {
         let latest_accepted = transaction
             .query_row(
                 "SELECT run_id, role, phase, round, message_hash, response_hash,
-                        thread_id, turn_id, capability_generation
+                        thread_id, turn_id, capability_generation,
+                        participant_binding_generation
                  FROM turns
                  WHERE run_id = ?1 AND delivery_state = 'ACCEPTED'
                  ORDER BY id DESC LIMIT 1",
@@ -1504,6 +1666,7 @@ impl SqliteRunStore {
                         thread_id: row.get(6)?,
                         turn_id: row.get(7)?,
                         capability_generation: row.get(8)?,
+                        participant_binding_generation: row.get(9)?,
                     })
                 },
             )
@@ -1872,13 +2035,33 @@ impl SqliteRunStore {
         run_id: &str,
         message_hash: &str,
     ) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .successful_patch_record(run_id, message_hash)?
+            .map(|record| record.patch_hash))
+    }
+
+    pub fn successful_patch_record(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+    ) -> Result<Option<SuccessfulPatchRecord>, StoreError> {
         self.lock()?
             .query_row(
-                "SELECT patch_hash FROM patch_applications
+                "SELECT patch_hash, source_primary_thread_id,
+                        effective_primary_thread_id,
+                        participant_binding_generation
+                 FROM patch_applications
                  WHERE run_id = ?1 AND message_hash = ?2
                  LIMIT 1",
                 params![run_id, message_hash],
-                |row| row.get(0),
+                |row| {
+                    Ok(SuccessfulPatchRecord {
+                        patch_hash: row.get(0)?,
+                        source_primary_thread_id: row.get(1)?,
+                        effective_primary_thread_id: row.get(2)?,
+                        participant_binding_generation: row.get(3)?,
+                    })
+                },
             )
             .optional()
             .map_err(Into::into)
@@ -1890,19 +2073,88 @@ impl SqliteRunStore {
         message_hash: &str,
         patch_hash: &str,
     ) -> Result<(), StoreError> {
+        self.record_successful_patch_with_provenance(
+            run_id,
+            message_hash,
+            patch_hash,
+            None,
+            None,
+            None,
+        )
+        .map(|_| ())
+    }
+
+    pub fn record_successful_patch_with_provenance(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+        patch_hash: &str,
+        source_primary_thread_id: Option<&str>,
+        effective_primary_thread_id: Option<&str>,
+        participant_binding_generation: Option<u32>,
+    ) -> Result<SuccessfulPatchRecord, StoreError> {
+        let provenance_count = [
+            source_primary_thread_id.is_some(),
+            effective_primary_thread_id.is_some(),
+            participant_binding_generation.is_some(),
+        ]
+        .into_iter()
+        .filter(|present| *present)
+        .count();
+        if provenance_count != 0 && provenance_count != 3 {
+            return Err(StoreError::IncompatibleState(
+                "successful patch binding provenance must be entirely present or absent".to_owned(),
+            ));
+        }
+
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
         ensure_run_exists(&transaction, run_id)?;
+        if let (Some(source), Some(effective), Some(generation)) = (
+            source_primary_thread_id,
+            effective_primary_thread_id,
+            participant_binding_generation,
+        ) {
+            let binding =
+                query_primary_binding(&transaction, run_id, generation)?.ok_or_else(|| {
+                    StoreError::IncompatibleState(format!(
+                        "run {run_id} has no Primary binding generation {generation}"
+                    ))
+                })?;
+            if binding.source_primary_thread_id != source
+                || binding.effective_primary_thread_id != effective
+            {
+                return Err(StoreError::IncompatibleState(format!(
+                    "successful patch provenance does not match run {run_id} Primary binding generation {generation}"
+                )));
+            }
+        }
+        let record = SuccessfulPatchRecord {
+            patch_hash: patch_hash.to_owned(),
+            source_primary_thread_id: source_primary_thread_id.map(str::to_owned),
+            effective_primary_thread_id: effective_primary_thread_id.map(str::to_owned),
+            participant_binding_generation,
+        };
         let changed = transaction.execute(
             "INSERT INTO patch_applications (
-                run_id, message_hash, patch_hash, applied_at
-             ) VALUES (?1, ?2, ?3, ?4)
+                run_id, message_hash, patch_hash, source_primary_thread_id,
+                effective_primary_thread_id, participant_binding_generation,
+                applied_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(run_id, message_hash) DO NOTHING",
-            params![run_id, message_hash, patch_hash, now_unix()],
+            params![
+                run_id,
+                message_hash,
+                patch_hash,
+                source_primary_thread_id,
+                effective_primary_thread_id,
+                participant_binding_generation,
+                now_unix(),
+            ],
         )?;
         if changed == 1 {
             transaction.commit()?;
-            Ok(())
+            Ok(record)
         } else {
             Err(StoreError::IncompatibleState(format!(
                 "run {run_id} already recorded a successful controlled patch for request {message_hash}"
@@ -1919,6 +2171,86 @@ impl SqliteRunStore {
     fn lock(&self) -> Result<MutexGuard<'_, Connection>, StoreError> {
         self.connection.lock().map_err(|_| StoreError::Poisoned)
     }
+}
+
+type PrimaryBindingRow = (String, u32, String, String, String, String, i64, i64);
+
+fn query_active_primary_binding(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<Option<PrimaryParticipantBinding>, StoreError> {
+    let row = connection
+        .query_row(
+            "SELECT run_id, generation, source_primary_thread_id,
+                    effective_primary_thread_id, mode, participant_server,
+                    created_at, verified_at
+             FROM primary_participant_bindings
+             WHERE run_id = ?1 AND active = 1",
+            [run_id],
+            primary_binding_row,
+        )
+        .optional()?;
+    row.map(decode_primary_binding).transpose()
+}
+
+fn query_primary_binding(
+    connection: &Connection,
+    run_id: &str,
+    generation: u32,
+) -> Result<Option<PrimaryParticipantBinding>, StoreError> {
+    let row = connection
+        .query_row(
+            "SELECT run_id, generation, source_primary_thread_id,
+                    effective_primary_thread_id, mode, participant_server,
+                    created_at, verified_at
+             FROM primary_participant_bindings
+             WHERE run_id = ?1 AND generation = ?2",
+            params![run_id, generation],
+            primary_binding_row,
+        )
+        .optional()?;
+    row.map(decode_primary_binding).transpose()
+}
+
+fn primary_binding_row(row: &rusqlite::Row<'_>) -> Result<PrimaryBindingRow, rusqlite::Error> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+    ))
+}
+
+fn decode_primary_binding(row: PrimaryBindingRow) -> Result<PrimaryParticipantBinding, StoreError> {
+    let (
+        run_id,
+        generation,
+        source_primary_thread_id,
+        effective_primary_thread_id,
+        mode,
+        participant_server,
+        created_at,
+        verified_at,
+    ) = row;
+    let mode = PrimaryBindingMode::from_database_value(&mode).ok_or_else(|| {
+        StoreError::IncompatibleState(format!(
+            "run {run_id} has unsupported Primary binding mode {mode}"
+        ))
+    })?;
+    Ok(PrimaryParticipantBinding {
+        run_id,
+        source_primary_thread_id,
+        effective_primary_thread_id,
+        mode,
+        generation,
+        participant_server,
+        created_at,
+        verified_at,
+    })
 }
 
 fn active_turn_record_id(
@@ -1968,7 +2300,7 @@ fn v025_verification_completion_collision_candidate(
 
     let mut statement = connection.prepare(
         "SELECT id, role, phase, round, message_hash, thread_id, turn_id,
-                capability_generation
+                capability_generation, participant_binding_generation
          FROM turns
          WHERE run_id = ?1 AND delivery_state = 'SENT'
          ORDER BY id ASC",
@@ -1984,6 +2316,7 @@ fn v025_verification_completion_collision_candidate(
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, Option<String>>(6)?,
                 row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<u32>>(8)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1997,6 +2330,7 @@ fn v025_verification_completion_collision_candidate(
             Some(thread_id),
             Some(turn_id),
             capability_generation,
+            participant_binding_generation,
         ),
     ] = sent_turns.as_slice()
     else {
@@ -2130,6 +2464,7 @@ fn v025_verification_completion_collision_candidate(
             turn_id: Some(turn_id.clone()),
             full_prompt: None,
             capability_generation: capability_generation.clone(),
+            participant_binding_generation: *participant_binding_generation,
         },
         stale_turn_id,
         turn_record_id: *turn_record_id,
@@ -2241,6 +2576,20 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             primary_ref TEXT,
             reviewer_ref TEXT
          );
+         CREATE TABLE IF NOT EXISTS primary_participant_bindings (
+            run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+            generation INTEGER NOT NULL,
+            source_primary_thread_id TEXT NOT NULL,
+            effective_primary_thread_id TEXT NOT NULL,
+            mode TEXT NOT NULL CHECK(mode IN ('DIRECT', 'EPHEMERAL_FORK')),
+            participant_server TEXT NOT NULL,
+            active INTEGER NOT NULL CHECK(active IN (0, 1)),
+            created_at INTEGER NOT NULL,
+            verified_at INTEGER NOT NULL,
+            PRIMARY KEY(run_id, generation)
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS one_active_primary_binding
+            ON primary_participant_bindings(run_id) WHERE active = 1;
          CREATE TABLE IF NOT EXISTS turns (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
@@ -2253,6 +2602,7 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             thread_id TEXT,
             turn_id TEXT,
             capability_generation TEXT,
+            participant_binding_generation INTEGER,
             created_at INTEGER NOT NULL,
             accepted_at INTEGER,
             UNIQUE(run_id, role, phase, round, message_hash)
@@ -2300,6 +2650,9 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
                 run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
                 message_hash TEXT NOT NULL,
                 patch_hash TEXT NOT NULL,
+                source_primary_thread_id TEXT,
+                effective_primary_thread_id TEXT,
+                participant_binding_generation INTEGER,
                 applied_at INTEGER NOT NULL,
                 UNIQUE(run_id, message_hash)
              );
@@ -2340,20 +2693,43 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             acquired_at INTEGER NOT NULL
          );",
     )?;
-    let mut columns = connection.prepare("PRAGMA table_info(turns)")?;
-    let has_capability_generation = columns
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?
-        .iter()
-        .any(|column| column == "capability_generation");
-    drop(columns);
-    if !has_capability_generation {
+    if !table_has_column(connection, "turns", "capability_generation")? {
         connection.execute(
             "ALTER TABLE turns ADD COLUMN capability_generation TEXT",
             [],
         )?;
     }
+    if !table_has_column(connection, "turns", "participant_binding_generation")? {
+        connection.execute(
+            "ALTER TABLE turns ADD COLUMN participant_binding_generation INTEGER",
+            [],
+        )?;
+    }
+    for (column, column_type) in [
+        ("source_primary_thread_id", "TEXT"),
+        ("effective_primary_thread_id", "TEXT"),
+        ("participant_binding_generation", "INTEGER"),
+    ] {
+        if !table_has_column(connection, "patch_applications", column)? {
+            connection.execute(
+                &format!("ALTER TABLE patch_applications ADD COLUMN {column} {column_type}"),
+                [],
+            )?;
+        }
+    }
     Ok(())
+}
+
+fn table_has_column(
+    connection: &Connection,
+    table: &str,
+    expected_column: &str,
+) -> Result<bool, rusqlite::Error> {
+    let mut columns = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = columns
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(names.iter().any(|column| column == expected_column))
 }
 
 fn update_run_row(
