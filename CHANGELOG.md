@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.13
+
+- Load a persisted Source Primary reported as `notLoaded` with the
+  task-scoped participant configuration before recreating its ephemeral
+  Effective Primary mirror.
+- Verify the resumed Source identity and idle state, then preserve the
+  existing frozen Source-history fingerprint while rotating the mirror.
+- Add an explicit same-Run migration for the exact 0.2.12
+  `HISTORY_UNAVAILABLE` blocker produced before the proven-unsent replacement
+  request was dispatched.
+- Reacquire the repository lock only when the pending request has no task ID,
+  turn ID, or turn-start intent and its active binding, archived completed
+  patch attempt, request hash, and frozen lineage all match.
+- Keep every sent, uncertain, divergent, mixed-provenance, or near-match state
+  terminal, with end-to-end regressions for accepted and rejected boundaries.
+
 ## 0.2.12
 
 - Recover a same-Run completed-integration confirmation when its ephemeral

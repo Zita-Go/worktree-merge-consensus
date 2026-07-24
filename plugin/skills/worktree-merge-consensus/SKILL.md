@@ -122,6 +122,19 @@ to the archived completed old generation and is accepted across generations
 only for the exact same frozen ephemeral lineage. Any sent, uncertain,
 divergent, or mixed-provenance state still fails closed.
 
+Release 0.2.13 resumes the persisted Source Primary with task-scoped
+participant configuration when App Server reports it as `notLoaded` before
+that replacement fork. The coordinator verifies the frozen Source identity and
+idle state, then creates the ephemeral mirror without ever resuming an
+ephemeral task. The same release may explicitly migrate only the exact 0.2.12
+`BLOCKED / HISTORY_UNAVAILABLE` diagnostic whose detail is
+`Source Primary before safe mirror recreation is not idle`. Atomic lock
+reacquisition requires the unchanged approved plan and target, one pending
+Primary integration request with no task ID, turn ID, or start intent, its
+exact active ephemeral generation and frozen history hash, and the archived
+completed patch attempt for the same request. The migration does not rewrite
+the pending row or binding. Every near-match remains terminal.
+
 The launcher may call only the operator-facing `consensus_*` tools listed
 above. It must never ask the invoking task to find, install, expose, or call
 participant-side `consensus_apply_patch`; injection, preflight, and any
@@ -359,6 +372,18 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   request hash, integration branch and SHA, archived patch provenance, commit,
   and source refs. Any evidence of dispatch, uncertainty, changed history, or
   mixed identity remains terminal.
+- If a matching v0.2.12 binary left that same Run `BLOCKED` with
+  `HISTORY_UNAVAILABLE` and exact detail
+  `Source Primary before safe mirror recreation is not idle`, install matching
+  v0.2.13 binary and plugin artifacts, then explicitly call
+  `consensus_resume` once. This recovery is limited to the unchanged approved
+  plan and target, one pending Primary integration request with no task ID,
+  turn ID, or start intent, the exact active ephemeral binding and frozen
+  Source-history hash, and the archived completed patch attempt for the same
+  request. It reacquires the repository lock on the same Run, loads the
+  persisted Source with participant configuration, and performs the normal
+  proven-unsent replacement. It never repeats the patch, merge, staging, or
+  commit. Every near-match remains terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
 Read [references/protocol.md](references/protocol.md) when explaining lifecycle states, acceptance evidence, or recovery behavior.

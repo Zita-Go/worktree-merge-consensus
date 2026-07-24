@@ -243,6 +243,19 @@ share the exact frozen Source, participant server, and nonempty Source-history
 hash, and the replacement is active. Sent, intent-recorded, uncertain,
 divergent, and mixed-provenance states fail closed.
 
+Release 0.2.13 loads the frozen persisted Source Primary when App Server
+reports it as `notLoaded` before the replacement fork. Loading uses the
+task-scoped participant configuration, verifies the returned Source identity,
+and waits for idle before forking; the ephemeral mirror is still never resumed.
+Explicit resume may migrate only the exact 0.2.12
+`BLOCKED / HISTORY_UNAVAILABLE` diagnostic produced at this boundary. The
+store atomically reacquires the repository lock without changing the pending
+row or binding and requires the unchanged approved plan, target repository
+state, one pending Primary integration request with no task ID, turn ID, or
+start intent, the exact active ephemeral generation and frozen history hash,
+and the archived completed patch attempt for the same request. Every
+near-match fails closed.
+
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the
 [legacy v1 protocol](protocol-v1.md).

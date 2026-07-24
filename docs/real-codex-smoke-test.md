@@ -139,10 +139,14 @@ the evidence below.
    confirm it is recreated from the Source Primary's complete history. Repeat
    with a pending Primary request that has no effective task ID, turn ID, or
    turn-start intent and confirm the binding and request rotate atomically to
-   the replacement mirror. Then add start intent or a sent identity and confirm
-   the coordinator does not refork or resend it. Interrupt one `thread/fork`
-   response after dispatch and confirm the non-idempotent request is not
-   automatically repeated.
+   the replacement mirror. Repeat while the persisted Source Primary reports
+   `notLoaded`; confirm it is resumed with participant configuration before the
+   replacement fork and no ephemeral task receives `thread/resume`. Recreate
+   the exact 0.2.12 `BLOCKED / HISTORY_UNAVAILABLE` boundary and confirm one
+   explicit resume keeps the same Run and request before completing. Then add
+   start intent or a sent identity and confirm recovery is rejected without a
+   refork or resend. Interrupt one `thread/fork` response after dispatch and
+   confirm the non-idempotent request is not automatically repeated.
 8. Verify `accepted_result` records the authoritative tests,
    `source_refs_unchanged: true`, and local-only/no-push/no-PR fields. Verify the
    test cwd is a cleanly materialized clone of the exact integration SHA with a

@@ -240,6 +240,18 @@ the archived completed old generation and crosses generations only for the
 exact same ephemeral lineage. Sent, intent-recorded, uncertain, divergent, or
 mixed-provenance states fail closed.
 
+Release 0.2.13 handles the persisted Source Primary itself being `notLoaded`
+before that replacement. It resumes the frozen Source with task-scoped
+participant configuration, verifies identity and idle state, then forks the
+new ephemeral mirror without resuming an ephemeral task. The release also
+migrates only the exact 0.2.12 `BLOCKED / HISTORY_UNAVAILABLE` diagnostic with
+detail `Source Primary before safe mirror recreation is not idle`. Explicit
+resume atomically reacquires the lock only for the unchanged approved plan and
+target, one pending Primary integration request with no task ID, turn ID, or
+start intent, the exact active ephemeral generation and frozen history hash,
+and the archived completed patch attempt for the same request. It preserves
+the same Run and pending row; every near-match remains terminal.
+
 The same release contains one migration only for the exact legacy 0.2.4
 blocked-verification history: the same Run, Primary task, request, round,
 verification clone, integration branch and SHA, frozen refs, and three archived

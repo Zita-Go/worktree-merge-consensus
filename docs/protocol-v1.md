@@ -112,6 +112,16 @@ The patch record remains attached to the archived completed old generation and
 is accepted only across the exact same frozen Source-history lineage. Any
 uncertain delivery or identity mismatch remains rejected.
 
+Version 0.2.13 resumes a persisted Source Primary reported as `notLoaded` with
+the task-scoped participant configuration before creating that replacement.
+It verifies the frozen Source identity and idle state and still never resumes
+an ephemeral Effective Primary. The same release can explicitly resume only
+the exact 0.2.12 `BLOCKED / HISTORY_UNAVAILABLE` state created at this
+proven-unsent boundary. Lock reacquisition requires the unchanged approved
+plan, target, one unsent pending request, active binding generation, frozen
+history hash, request hash, and archived completed patch attempt. Any sent,
+uncertain, or near-match state remains terminal.
+
 Preflight reason codes include `UNREGISTERED_WORKTREE`,
 `DUPLICATE_WORKTREE`, `REPOSITORY_MISMATCH`, `DIRTY_WORKTREE`, and
 `WORKTREE_UNAVAILABLE`. Once frozen, a task may reject an incorrect

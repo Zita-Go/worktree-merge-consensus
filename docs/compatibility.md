@@ -252,6 +252,24 @@ participant server, nonempty history hash, an exact archived completed attempt,
 and the replacement as the active binding. Any sent, intent-recorded,
 uncertain, divergent, or mixed-provenance state remains terminal.
 
+Version 0.2.13 loads the persisted Source Primary before that replacement when
+App Server reports the Source as `notLoaded`. It resumes the exact frozen
+Source with task-scoped participant configuration, verifies the returned task
+identity, waits for idle when necessary, and only then forks a replacement
+ephemeral mirror. It never resumes the ephemeral mirror itself.
+
+The same release adds one explicit migration for the exact 0.2.12 terminal
+state: `BLOCKED / HISTORY_UNAVAILABLE`, no operation, Primary integration
+action, the matching ephemeral binding identity, and detail
+`Source Primary before safe mirror recreation is not idle`. Explicit resume
+atomically reacquires the repository lock only when the approved plan and
+integration-in-progress repository state are unchanged, there is one pending
+Primary integration request with no task ID, turn ID, or start intent, its
+generation is still active, and an exact archived completed patch attempt
+exists for the same request and Effective Primary. The pending row and binding
+are not rewritten by the migration; normal proven-unsent rotation follows.
+Every near-match remains terminal without Git mutation.
+
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
 fixed task ID for persisted direct and Reviewer tasks. Ephemeral Effective
 Primary tasks are already loaded and must not be resumed. `thread/read` can

@@ -276,6 +276,18 @@ is accepted across the replacement generation only for the exact same frozen
 ephemeral lineage. Any sent, intent-recorded, uncertain, divergent, or
 mixed-provenance state still fails closed.
 
+Version 0.2.13 also handles the Source Primary itself being `notLoaded` while
+that proven-unsent replacement is prepared. The coordinator resumes the
+persisted Source with the task-scoped participant configuration, verifies its
+identity and idle state, and only then creates the new ephemeral full-history
+mirror. An explicit resume may migrate only the exact 0.2.12
+`BLOCKED / HISTORY_UNAVAILABLE` state whose diagnostic says
+`Source Primary before safe mirror recreation is not idle`. The migration
+atomically reacquires the repository lock without changing the pending request
+or binding; subsequent rotation still requires the exact active generation,
+frozen history hash, request hash, and archived completed patch attempt, with
+no task ID, turn ID, or turn-start intent. Every near-match remains terminal.
+
 Read [the v2 participant protocol](docs/protocol-v2.md), the
 [legacy v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
@@ -304,8 +316,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.12-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.12-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.13-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.13-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
