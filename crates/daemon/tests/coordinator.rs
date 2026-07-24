@@ -1492,8 +1492,125 @@ async fn completed_integration_forbidden_read_only_nonzero_resumes_the_same_run(
     let (coordinator, app, store, safety) =
         seed_invalid_integration_recovery(&path, PARTICIPANT_MCP_SERVER).await;
     let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    let thread_id = pending.thread_id.clone().unwrap();
     let turn_id = pending.turn_id.clone().unwrap();
-    app.set_patch_plugin_id("primary", &turn_id, Value::Null);
+    app.set_patch_plugin_id(&thread_id, &turn_id, Value::Null);
+    insert_completed_integration_command_evidence(&app, &thread_id, &turn_id);
+
+    let mut blocked = store.load_run(RUN_ID).unwrap().unwrap();
+    blocked.reason_code = Some("FORBIDDEN_OPERATION".into());
+    blocked.last_error = Some(RunDiagnostic {
+        code: "FORBIDDEN_OPERATION".into(),
+        detail: "integration command is not canonically completed with exit code zero".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some(thread_id),
+        source_thread_id: None,
+        effective_thread_id: None,
+        participant_binding_generation: None,
+        participant_binding_mode: None,
+        participant_server: None,
+    });
+    store.save_state(&blocked).unwrap();
+    safety
+        .integration_branch_active
+        .store(true, Ordering::SeqCst);
+
+    let accepted = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(accepted.status, RunStatus::Accepted);
+    assert_eq!(accepted.integration_sha.as_deref(), Some(INTEGRATION_SHA));
+    assert!(safety.in_progress_calls.load(Ordering::SeqCst) > 0);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    assert!(
+        store
+            .successful_patch_recorded(RUN_ID, &pending.message_hash)
+            .unwrap()
+    );
+    let retry_prompt = app
+        .prompts()
+        .into_iter()
+        .rfind(|prompt| prompt.contains("REQUEST_PRIMARY_INTEGRATION"))
+        .unwrap();
+    assert!(retry_prompt.contains("Coordinator recovery override"));
+    assert!(retry_prompt.contains("Do not call consensus_apply_patch"));
+    assert!(
+        retry_prompt
+            .contains("Confirm repository instructions with a successful `git ls-files` query")
+    );
+}
+
+#[tokio::test]
+async fn completed_integration_recovery_reforks_an_unloaded_ephemeral_primary() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let (coordinator, app, store, safety) =
+        seed_invalid_integration_recovery_with_preloaded_primary(
+            &path,
+            PARTICIPANT_MCP_SERVER,
+            true,
+        )
+        .await;
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    let thread_id = pending.thread_id.clone().unwrap();
+    let turn_id = pending.turn_id.clone().unwrap();
+    let original_binding = store.active_primary_binding(RUN_ID).unwrap().unwrap();
+    assert_eq!(original_binding.mode, PrimaryBindingMode::EphemeralFork);
+    app.set_patch_plugin_id(&thread_id, &turn_id, Value::Null);
+    insert_completed_integration_command_evidence(&app, &thread_id, &turn_id);
+    replace_persisted_ephemeral_turn_evidence(&path, &store, &app, &thread_id, &turn_id);
+
+    let mut blocked = store.load_run(RUN_ID).unwrap().unwrap();
+    blocked.reason_code = Some("FORBIDDEN_OPERATION".into());
+    blocked.last_error = Some(RunDiagnostic {
+        code: "FORBIDDEN_OPERATION".into(),
+        detail: "integration command is not canonically completed with exit code zero".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some(thread_id.clone()),
+        source_thread_id: Some("primary".into()),
+        effective_thread_id: Some(thread_id.clone()),
+        participant_binding_generation: Some(original_binding.generation),
+        participant_binding_mode: Some("EPHEMERAL_FORK".into()),
+        participant_server: Some(PARTICIPANT_MCP_SERVER.into()),
+    });
+    store.save_state(&blocked).unwrap();
+    safety
+        .integration_branch_active
+        .store(true, Ordering::SeqCst);
+    app.remove_thread(&thread_id);
+
+    let accepted = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(
+        accepted.status,
+        RunStatus::Accepted,
+        "{:?}",
+        accepted.last_error
+    );
+    assert_eq!(accepted.integration_sha.as_deref(), Some(INTEGRATION_SHA));
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    let binding = store.active_primary_binding(RUN_ID).unwrap().unwrap();
+    assert_eq!(binding.mode, PrimaryBindingMode::EphemeralFork);
+    assert_eq!(binding.generation, original_binding.generation + 1);
+    assert_ne!(binding.effective_primary_thread_id, thread_id);
+    assert_eq!(app.forks().len(), 2);
+    assert!(app.request_order().iter().any(|request| {
+        request
+            == &format!(
+                "{}:REQUEST_PRIMARY_INTEGRATION",
+                binding.effective_primary_thread_id
+            )
+    }));
+}
+
+fn insert_completed_integration_command_evidence(
+    app: &FakeAppServer,
+    thread_id: &str,
+    turn_id: &str,
+) {
     let command = |id: &str, value: &str, status: &str, exit_code: i64| {
         json!({
             "id": id,
@@ -1544,51 +1661,53 @@ async fn completed_integration_forbidden_read_only_nonzero_resumes_the_same_run(
             0,
         ),
     ] {
-        app.insert_turn_item_before_agent("primary", &turn_id, item);
+        app.insert_turn_item_before_agent(thread_id, turn_id, item);
     }
+}
 
-    let mut blocked = store.load_run(RUN_ID).unwrap().unwrap();
-    blocked.reason_code = Some("FORBIDDEN_OPERATION".into());
-    blocked.last_error = Some(RunDiagnostic {
-        code: "FORBIDDEN_OPERATION".into(),
-        detail: "integration command is not canonically completed with exit code zero".into(),
-        operation: None,
-        action: NextAction::RequestPrimaryIntegration,
-        role: Some(Role::Primary),
-        thread_id: Some("primary".into()),
-        source_thread_id: None,
-        effective_thread_id: None,
-        participant_binding_generation: None,
-        participant_binding_mode: None,
-        participant_server: None,
-    });
-    store.save_state(&blocked).unwrap();
-    safety
-        .integration_branch_active
-        .store(true, Ordering::SeqCst);
-
-    let accepted = coordinator.resume(RUN_ID).await.unwrap();
-
-    assert_eq!(accepted.status, RunStatus::Accepted);
-    assert_eq!(accepted.integration_sha.as_deref(), Some(INTEGRATION_SHA));
-    assert!(safety.in_progress_calls.load(Ordering::SeqCst) > 0);
-    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
-    assert!(
-        store
-            .successful_patch_recorded(RUN_ID, &pending.message_hash)
-            .unwrap()
-    );
-    let retry_prompt = app
-        .prompts()
+fn replace_persisted_ephemeral_turn_evidence(
+    path: &Path,
+    store: &SqliteRunStore,
+    app: &FakeAppServer,
+    thread_id: &str,
+    turn_id: &str,
+) {
+    let turn = app
+        .detail(thread_id)
+        .turns
         .into_iter()
-        .rfind(|prompt| prompt.contains("REQUEST_PRIMARY_INTEGRATION"))
+        .find(|turn| turn.get("id").and_then(Value::as_str) == Some(turn_id))
         .unwrap();
-    assert!(retry_prompt.contains("Coordinator recovery override"));
-    assert!(retry_prompt.contains("Do not call consensus_apply_patch"));
-    assert!(
-        retry_prompt
-            .contains("Confirm repository instructions with a successful `git ls-files` query")
-    );
+    let connection = Connection::open(path).unwrap();
+    let turn_record_id = connection
+        .query_row(
+            "SELECT id FROM turns
+             WHERE run_id = ?1 AND thread_id = ?2 AND turn_id = ?3",
+            params![RUN_ID, thread_id, turn_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "DELETE FROM turn_event_items WHERE turn_record_id = ?1",
+            [turn_record_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "DELETE FROM turn_event_completions WHERE turn_record_id = ?1",
+            [turn_record_id],
+        )
+        .unwrap();
+    drop(connection);
+    for item in turn["items"].as_array().unwrap() {
+        store
+            .record_turn_item_event(RUN_ID, thread_id, turn_id, "item/completed", item)
+            .unwrap();
+    }
+    store
+        .record_turn_completed_event(RUN_ID, thread_id, turn_id, &turn)
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1631,6 +1750,19 @@ async fn seed_invalid_integration_recovery(
     SqliteRunStore,
     Arc<RecordingSafety>,
 ) {
+    seed_invalid_integration_recovery_with_preloaded_primary(path, patch_server, false).await
+}
+
+async fn seed_invalid_integration_recovery_with_preloaded_primary(
+    path: &Path,
+    patch_server: &str,
+    preloaded_primary: bool,
+) -> (
+    Coordinator<FakeAppServer, RecordingSafety>,
+    Arc<FakeAppServer>,
+    SqliteRunStore,
+    Arc<RecordingSafety>,
+) {
     let store = SqliteRunStore::open(path).unwrap();
     let mut replies = conflict_free_replies();
     replies[4] = message(
@@ -1658,7 +1790,13 @@ async fn seed_invalid_integration_recovery(
         ),
     );
     replies[6] = json!("<consensus-result>APPROVED</consensus-result>");
-    let app = Arc::new(FakeAppServer::new(replies).with_marker_protocol());
+    let app = FakeAppServer::new(replies).with_marker_protocol();
+    let app = if preloaded_primary {
+        app.without_primary_participant()
+    } else {
+        app
+    };
+    let app = Arc::new(app);
     let safety = Arc::new(RecordingSafety::default());
     let coordinator = Coordinator::new(
         Arc::clone(&app),
@@ -1676,6 +1814,7 @@ async fn seed_invalid_integration_recovery(
     assert_eq!(blocked.status, RunStatus::Blocked);
     assert_eq!(blocked.reason_code.as_deref(), Some("INVALID_RESPONSE"));
     let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    let thread_id = pending.thread_id.clone().unwrap();
     let turn_id = pending.turn_id.clone().unwrap();
     let failed_patch = "*** Begin Patch\n*** End Patch";
     let successful_patch = "diff --git a/combined.txt b/combined.txt\n--- a/combined.txt\n+++ b/combined.txt\n@@ -1 +1 @@\n-old\n+new\n";
@@ -1684,7 +1823,7 @@ async fn seed_invalid_integration_recovery(
         ("completed", "completed", successful_patch),
     ] {
         app.insert_turn_item_before_agent(
-            "primary",
+            &thread_id,
             &turn_id,
             json!({
                 "id": format!("patch-{suffix}"),
@@ -1703,9 +1842,23 @@ async fn seed_invalid_integration_recovery(
         );
     }
     let successful_patch_hash = canonical_json_hash(&json!({"patch": successful_patch}));
-    store
-        .record_successful_patch(RUN_ID, &pending.message_hash, &successful_patch_hash)
-        .unwrap();
+    if preloaded_primary {
+        let binding = store.active_primary_binding(RUN_ID).unwrap().unwrap();
+        store
+            .record_successful_patch_with_provenance(
+                RUN_ID,
+                &pending.message_hash,
+                &successful_patch_hash,
+                Some(&binding.source_primary_thread_id),
+                Some(&binding.effective_primary_thread_id),
+                Some(binding.generation),
+            )
+            .unwrap();
+    } else {
+        store
+            .record_successful_patch(RUN_ID, &pending.message_hash, &successful_patch_hash)
+            .unwrap();
+    }
 
     (coordinator, app, store, safety)
 }
@@ -5322,6 +5475,12 @@ impl FakeAppServer {
     fn with_approval_mode(self, mode: Option<&str>) -> Self {
         *self.approval_mode.lock().unwrap() = mode.map(str::to_owned);
         self
+    }
+
+    fn remove_thread(&self, thread_id: &str) {
+        assert!(self.threads.lock().unwrap().remove(thread_id).is_some());
+        self.resume_tickets.lock().unwrap().remove(thread_id);
+        self.participant_threads.lock().unwrap().remove(thread_id);
     }
 
     fn deferred(replies: Vec<Value>, request_number: usize, mode: DeferMode) -> Self {

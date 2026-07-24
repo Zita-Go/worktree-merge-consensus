@@ -105,6 +105,123 @@ fn primary_binding_generations_are_atomic_and_auditable() {
 }
 
 #[test]
+fn unsent_primary_request_rotates_with_its_ephemeral_binding_atomically() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+    let original = store
+        .activate_primary_binding(
+            RUN_ID,
+            "primary-thread",
+            "primary-mirror-1",
+            PrimaryBindingMode::EphemeralFork,
+            "worktreeMergeConsensusParticipant",
+            Some("source-history-a"),
+        )
+        .unwrap();
+    store
+        .record_pending_send_with_binding(
+            RUN_ID,
+            "PRIMARY",
+            "INTEGRATE",
+            1,
+            "request-hash",
+            Some(original.generation),
+        )
+        .unwrap();
+
+    let rotated = store
+        .rotate_ephemeral_primary_binding_for_unsent_pending(
+            RUN_ID,
+            original.generation,
+            "primary-thread",
+            "primary-mirror-2",
+            "worktreeMergeConsensusParticipant",
+            "source-history-a",
+        )
+        .unwrap();
+
+    assert_eq!(rotated.generation, original.generation + 1);
+    assert_eq!(rotated.effective_primary_thread_id, "primary-mirror-2");
+    assert_eq!(
+        store.active_primary_binding(RUN_ID).unwrap(),
+        Some(rotated.clone())
+    );
+    assert_eq!(
+        store.primary_binding(RUN_ID, original.generation).unwrap(),
+        Some(original)
+    );
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    assert_eq!(
+        pending.participant_binding_generation,
+        Some(rotated.generation)
+    );
+    assert_eq!(pending.thread_id, None);
+    assert_eq!(pending.turn_id, None);
+    assert_eq!(pending.turn_start_intent_at, None);
+}
+
+#[test]
+fn uncertain_primary_request_cannot_rotate_its_ephemeral_binding() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+    let original = store
+        .activate_primary_binding(
+            RUN_ID,
+            "primary-thread",
+            "primary-mirror-1",
+            PrimaryBindingMode::EphemeralFork,
+            "worktreeMergeConsensusParticipant",
+            Some("source-history-a"),
+        )
+        .unwrap();
+    store
+        .record_pending_send_with_binding(
+            RUN_ID,
+            "PRIMARY",
+            "INTEGRATE",
+            1,
+            "request-hash",
+            Some(original.generation),
+        )
+        .unwrap();
+    store
+        .record_turn_start_intent(RUN_ID, "request-hash")
+        .unwrap();
+
+    let error = store
+        .rotate_ephemeral_primary_binding_for_unsent_pending(
+            RUN_ID,
+            original.generation,
+            "primary-thread",
+            "primary-mirror-2",
+            "worktreeMergeConsensusParticipant",
+            "source-history-a",
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "INCOMPATIBLE_STATE");
+    assert!(error.to_string().contains("safe unsent binding boundary"));
+    assert_eq!(
+        store.active_primary_binding(RUN_ID).unwrap(),
+        Some(original.clone())
+    );
+    assert_eq!(
+        store
+            .pending_send(RUN_ID)
+            .unwrap()
+            .unwrap()
+            .participant_binding_generation,
+        Some(original.generation)
+    );
+}
+
+#[test]
 fn ephemeral_primary_binding_rejects_changed_source_history() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();

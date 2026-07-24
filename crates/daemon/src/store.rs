@@ -605,6 +605,177 @@ impl SqliteRunStore {
         query_active_primary_binding(&connection, run_id)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn rotate_ephemeral_primary_binding_for_unsent_pending(
+        &self,
+        run_id: &str,
+        expected_active_generation: u32,
+        source_primary_thread_id: &str,
+        effective_primary_thread_id: &str,
+        participant_server: &str,
+        source_history_hash: &str,
+    ) -> Result<PrimaryParticipantBinding, StoreError> {
+        if source_primary_thread_id.trim().is_empty()
+            || effective_primary_thread_id.trim().is_empty()
+            || participant_server.trim().is_empty()
+            || source_history_hash.trim().is_empty()
+        {
+            return Err(StoreError::IncompatibleState(
+                "ephemeral binding rotation identities must be nonempty".to_owned(),
+            ));
+        }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        ensure_run_exists(&transaction, run_id)?;
+        let (frozen_primary, frozen_reviewer) = transaction.query_row(
+            "SELECT primary_thread_id, reviewer_thread_id
+             FROM source_facts WHERE run_id = ?1",
+            [run_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        if source_primary_thread_id != frozen_primary
+            || effective_primary_thread_id == frozen_primary
+            || effective_primary_thread_id == frozen_reviewer
+        {
+            return Err(StoreError::IncompatibleState(format!(
+                "run {run_id} ephemeral binding rotation does not match its frozen task identities"
+            )));
+        }
+
+        let active = query_active_primary_binding(&transaction, run_id)?.ok_or_else(|| {
+            StoreError::IncompatibleState(format!(
+                "run {run_id} has no active Primary binding to rotate"
+            ))
+        })?;
+        if active.generation != expected_active_generation
+            || active.mode != PrimaryBindingMode::EphemeralFork
+            || active.source_primary_thread_id != source_primary_thread_id
+            || active.effective_primary_thread_id == effective_primary_thread_id
+            || active.participant_server != participant_server
+            || active.source_history_hash.as_deref() != Some(source_history_hash)
+        {
+            return Err(StoreError::IncompatibleState(format!(
+                "run {run_id} active ephemeral binding changed before rotation"
+            )));
+        }
+
+        let pending_count = transaction.query_row(
+            "SELECT COUNT(*) FROM turns
+             WHERE run_id = ?1 AND delivery_state IN ('PENDING', 'SENT')",
+            [run_id],
+            |row| row.get::<_, u64>(0),
+        )?;
+        let pending = transaction
+            .query_row(
+                "SELECT id, role, delivery_state, thread_id, turn_id,
+                        participant_binding_generation, turn_start_intent_at
+                 FROM turns
+                 WHERE run_id = ?1 AND delivery_state IN ('PENDING', 'SENT')
+                 ORDER BY id DESC LIMIT 1",
+                [run_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<u32>>(5)?,
+                        row.get::<_, Option<i64>>(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            pending_id,
+            role,
+            delivery_state,
+            thread_id,
+            turn_id,
+            pending_generation,
+            turn_start_intent_at,
+        )) = pending
+        else {
+            return Err(StoreError::IncompatibleState(format!(
+                "run {run_id} has no unsent Primary request to rebind"
+            )));
+        };
+        if pending_count != 1
+            || role != "PRIMARY"
+            || delivery_state != "PENDING"
+            || thread_id.is_some()
+            || turn_id.is_some()
+            || turn_start_intent_at.is_some()
+            || pending_generation != Some(expected_active_generation)
+        {
+            return Err(StoreError::IncompatibleState(format!(
+                "run {run_id} pending Primary request is not at a safe unsent binding boundary"
+            )));
+        }
+
+        let generation = transaction.query_row(
+            "SELECT COALESCE(MAX(generation), 0) + 1
+             FROM primary_participant_bindings WHERE run_id = ?1",
+            [run_id],
+            |row| row.get::<_, u32>(0),
+        )?;
+        let deactivated = transaction.execute(
+            "UPDATE primary_participant_bindings
+             SET active = 0
+             WHERE run_id = ?1 AND generation = ?2 AND active = 1",
+            params![run_id, expected_active_generation],
+        )?;
+        if deactivated != 1 {
+            return Err(StoreError::IncompatibleState(format!(
+                "run {run_id} active ephemeral binding changed during rotation"
+            )));
+        }
+        let timestamp = now_unix();
+        transaction.execute(
+            "INSERT INTO primary_participant_bindings (
+                run_id, generation, source_primary_thread_id,
+                effective_primary_thread_id, mode, participant_server,
+                source_history_hash, active, created_at, verified_at
+             ) VALUES (?1, ?2, ?3, ?4, 'EPHEMERAL_FORK', ?5, ?6, 1, ?7, ?7)",
+            params![
+                run_id,
+                generation,
+                source_primary_thread_id,
+                effective_primary_thread_id,
+                participant_server,
+                source_history_hash,
+                timestamp,
+            ],
+        )?;
+        let rebound = transaction.execute(
+            "UPDATE turns
+             SET participant_binding_generation = ?1
+             WHERE id = ?2 AND run_id = ?3 AND delivery_state = 'PENDING'
+               AND thread_id IS NULL AND turn_id IS NULL
+               AND turn_start_intent_at IS NULL
+               AND participant_binding_generation = ?4",
+            params![generation, pending_id, run_id, expected_active_generation],
+        )?;
+        if rebound != 1 {
+            return Err(StoreError::IncompatibleState(format!(
+                "run {run_id} unsent Primary request changed during binding rotation"
+            )));
+        }
+        transaction.commit()?;
+        Ok(PrimaryParticipantBinding {
+            run_id: run_id.to_owned(),
+            source_primary_thread_id: source_primary_thread_id.to_owned(),
+            effective_primary_thread_id: effective_primary_thread_id.to_owned(),
+            mode: PrimaryBindingMode::EphemeralFork,
+            generation,
+            participant_server: participant_server.to_owned(),
+            source_history_hash: Some(source_history_hash.to_owned()),
+            created_at: timestamp,
+            verified_at: timestamp,
+        })
+    }
+
     pub fn activate_initial_direct_binding_for_pending_send(
         &self,
         run_id: &str,
@@ -2241,6 +2412,26 @@ impl SqliteRunStore {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn has_completed_archived_attempt_on_thread(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+        thread_id: &str,
+    ) -> Result<bool, StoreError> {
+        let connection = self.lock()?;
+        Ok(connection
+            .query_row(
+                "SELECT 1 FROM turn_attempts
+                 WHERE run_id = ?1 AND message_hash = ?2
+                   AND thread_id = ?3 AND terminal_status = 'completed'
+                 LIMIT 1",
+                params![run_id, message_hash, thread_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     pub fn verification_evidence_retry_recorded(

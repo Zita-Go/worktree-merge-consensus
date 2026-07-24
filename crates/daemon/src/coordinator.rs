@@ -3487,6 +3487,7 @@ where
                 verify_requested_thread_identity(&binding.effective_primary_thread_id, &detail)?;
                 return Ok(binding);
             }
+            let mut rotate_unsent_binding_generation = None;
             if binding.source_history_hash.is_some() {
                 match self
                     .read_thread_summary_with_retry(&binding.effective_primary_thread_id)
@@ -3500,10 +3501,20 @@ where
                         return Ok(binding);
                     }
                     Err(error) if error.code() != "COMMUNICATION_FAILURE" => return Err(error),
-                    Err(error) if self.store.pending_send(&run_id)?.is_some() => {
-                        return Err(error);
+                    Err(error) => {
+                        if let Some(pending) = self.store.pending_send(&run_id)? {
+                            let safely_unsent = pending.role == "PRIMARY"
+                                && pending.thread_id.is_none()
+                                && pending.turn_id.is_none()
+                                && pending.turn_start_intent_at.is_none()
+                                && pending.participant_binding_generation
+                                    == Some(binding.generation);
+                            if !safely_unsent {
+                                return Err(error);
+                            }
+                            rotate_unsent_binding_generation = Some(binding.generation);
+                        }
                     }
-                    Err(_) => {}
                 }
             } else if self.store.pending_send(&run_id)?.is_some() {
                 return Err(CoordinatorError::operational(
@@ -3511,7 +3522,12 @@ where
                     "legacy ephemeral Primary binding has no frozen source-history fingerprint while a turn is pending",
                 ));
             }
-            return self.recreate_ephemeral_primary_binding(state).await;
+            return self
+                .recreate_ephemeral_primary_binding_with_pending_rotation(
+                    state,
+                    rotate_unsent_binding_generation,
+                )
+                .await;
         }
 
         let source_thread_id = state.facts.primary_thread_id.clone();
@@ -3599,6 +3615,16 @@ where
         state: &RunState,
         source: &ThreadDetail,
     ) -> Result<PrimaryParticipantBinding, CoordinatorError> {
+        self.create_ephemeral_primary_binding_with_pending_rotation(state, source, None)
+            .await
+    }
+
+    async fn create_ephemeral_primary_binding_with_pending_rotation(
+        &self,
+        state: &RunState,
+        source: &ThreadDetail,
+        rotate_unsent_binding_generation: Option<u32>,
+    ) -> Result<PrimaryParticipantBinding, CoordinatorError> {
         let source_thread_id = state.facts.primary_thread_id.as_str();
         self.verify_thread_identity(state, Role::Primary, source)?;
         require_idle_thread(source, "Source Primary before participant fork")?;
@@ -3633,21 +3659,35 @@ where
             .list_mcp_server_status_for_preflight(effective_thread_id)
             .await?;
         verify_participant_patch_capability(effective_thread_id, &statuses)?;
-        self.store
-            .activate_primary_binding(
-                &state.facts.run_id.to_string(),
-                source_thread_id,
-                effective_thread_id,
-                PrimaryBindingMode::EphemeralFork,
-                PARTICIPANT_MCP_SERVER,
-                Some(&source_history_hash),
-            )
-            .map_err(Into::into)
+        if let Some(expected_generation) = rotate_unsent_binding_generation {
+            self.store
+                .rotate_ephemeral_primary_binding_for_unsent_pending(
+                    &state.facts.run_id.to_string(),
+                    expected_generation,
+                    source_thread_id,
+                    effective_thread_id,
+                    PARTICIPANT_MCP_SERVER,
+                    &source_history_hash,
+                )
+                .map_err(Into::into)
+        } else {
+            self.store
+                .activate_primary_binding(
+                    &state.facts.run_id.to_string(),
+                    source_thread_id,
+                    effective_thread_id,
+                    PrimaryBindingMode::EphemeralFork,
+                    PARTICIPANT_MCP_SERVER,
+                    Some(&source_history_hash),
+                )
+                .map_err(Into::into)
+        }
     }
 
-    async fn recreate_ephemeral_primary_binding(
+    async fn recreate_ephemeral_primary_binding_with_pending_rotation(
         &self,
         state: &mut RunState,
+        rotate_unsent_binding_generation: Option<u32>,
     ) -> Result<PrimaryParticipantBinding, CoordinatorError> {
         let source_thread_id = state.facts.primary_thread_id.clone();
         let source = self.read_thread_with_retry(&source_thread_id).await?;
@@ -3658,7 +3698,12 @@ where
             source
         };
         require_idle_thread(&source, "Source Primary before safe mirror recreation")?;
-        self.create_ephemeral_primary_binding(state, &source).await
+        self.create_ephemeral_primary_binding_with_pending_rotation(
+            state,
+            &source,
+            rotate_unsent_binding_generation,
+        )
+        .await
     }
 
     async fn prepare_action_thread(
@@ -4465,11 +4510,12 @@ where
         &self,
         state: &RunState,
         pending: &crate::store::PendingSend,
-        allow_legacy_null_provenance: bool,
+        allow_archived_or_legacy_provenance: bool,
     ) -> Result<Option<String>, CoordinatorError> {
+        let run_id = state.facts.run_id.to_string();
         let Some(record) = self
             .store
-            .successful_patch_record(&state.facts.run_id.to_string(), &pending.message_hash)?
+            .successful_patch_record(&run_id, &pending.message_hash)?
         else {
             return Ok(None);
         };
@@ -4485,18 +4531,87 @@ where
                     effective,
                     Some(generation),
                 )?;
-                if source != state.facts.primary_thread_id
-                    || pending.thread_id.as_deref() != Some(effective)
-                    || pending.participant_binding_generation != Some(generation)
-                {
+                if source != state.facts.primary_thread_id {
                     return Err(CoordinatorError::operational(
                         "HISTORY_UNAVAILABLE",
-                        "successful controlled patch provenance does not match the pending Primary turn",
+                        "successful controlled patch provenance does not match the frozen Source Primary",
                     ));
+                }
+                let pending_matches_patch_binding = pending.thread_id.as_deref() == Some(effective)
+                    && pending.participant_binding_generation == Some(generation);
+                if !pending_matches_patch_binding {
+                    let pending_effective = pending.thread_id.as_deref().ok_or_else(|| {
+                        CoordinatorError::operational(
+                            "HISTORY_UNAVAILABLE",
+                            "retried Primary turn has no effective task identity",
+                        )
+                    })?;
+                    let pending_generation =
+                        pending.participant_binding_generation.ok_or_else(|| {
+                            CoordinatorError::operational(
+                                "HISTORY_UNAVAILABLE",
+                                "retried Primary turn has no participant binding generation",
+                            )
+                        })?;
+                    self.validate_recorded_role_thread(
+                        state,
+                        Role::Primary,
+                        pending_effective,
+                        Some(pending_generation),
+                    )?;
+                    let patch_binding = self
+                        .store
+                        .primary_binding(&run_id, generation)?
+                        .ok_or_else(|| {
+                            CoordinatorError::operational(
+                                "HISTORY_UNAVAILABLE",
+                                "successful controlled patch references an unknown historical binding",
+                            )
+                        })?;
+                    let pending_binding = self
+                        .store
+                        .primary_binding(&run_id, pending_generation)?
+                        .ok_or_else(|| {
+                            CoordinatorError::operational(
+                                "HISTORY_UNAVAILABLE",
+                                "retried Primary turn references an unknown binding",
+                            )
+                        })?;
+                    let active_binding =
+                        self.store.active_primary_binding(&run_id)?.ok_or_else(|| {
+                            CoordinatorError::operational(
+                                "HISTORY_UNAVAILABLE",
+                                "retried Primary turn has no active binding",
+                            )
+                        })?;
+                    let archived_patch_attempt =
+                        self.store.has_completed_archived_attempt_on_thread(
+                            &run_id,
+                            &pending.message_hash,
+                            effective,
+                        )?;
+                    let same_frozen_ephemeral_lineage = patch_binding.mode
+                        == PrimaryBindingMode::EphemeralFork
+                        && pending_binding.mode == PrimaryBindingMode::EphemeralFork
+                        && patch_binding.source_primary_thread_id
+                            == pending_binding.source_primary_thread_id
+                        && patch_binding.participant_server == pending_binding.participant_server
+                        && patch_binding.source_history_hash.is_some()
+                        && patch_binding.source_history_hash == pending_binding.source_history_hash
+                        && active_binding == pending_binding;
+                    if !allow_archived_or_legacy_provenance
+                        || !archived_patch_attempt
+                        || !same_frozen_ephemeral_lineage
+                    {
+                        return Err(CoordinatorError::operational(
+                            "HISTORY_UNAVAILABLE",
+                            "successful controlled patch provenance does not match the pending or archived Primary turn",
+                        ));
+                    }
                 }
             }
             (None, None, None)
-                if allow_legacy_null_provenance
+                if allow_archived_or_legacy_provenance
                     && pending.thread_id.as_deref()
                         == Some(state.facts.primary_thread_id.as_str()) => {}
             _ => {
