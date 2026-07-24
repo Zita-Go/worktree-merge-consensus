@@ -127,6 +127,7 @@ pub(crate) fn is_retry_safe_read_only_integration_command(
         && !contains_shell_control(command)
         && (is_allowed_read_only_git_command(state, command)
             || is_allowed_instruction_discovery(command)
+            || is_retry_safe_no_index_diff(command)
             || is_retry_safe_stale_launcher_skill_read(command))
 }
 
@@ -254,6 +255,23 @@ fn is_allowed_instruction_discovery(command: &str) -> bool {
             .as_slice(),
         ["rg", "--files", "-g", "AGENTS.md"]
     )
+}
+
+fn is_retry_safe_no_index_diff(command: &str) -> bool {
+    let Ok(tokens) = shell_words::split(command) else {
+        return false;
+    };
+    let ["git", "diff", "--no-index", "--", "/dev/null", path] =
+        tokens.iter().map(String::as_str).collect::<Vec<_>>()[..]
+    else {
+        return false;
+    };
+    let path = Path::new(path);
+    if path.as_os_str().is_empty() || path.is_absolute() || path.starts_with(".git") {
+        return false;
+    }
+    path.components()
+        .all(|component| matches!(component, Component::Normal(_)))
 }
 
 fn is_retry_safe_stale_launcher_skill_read(command: &str) -> bool {
@@ -646,6 +664,40 @@ mod tests {
                 "/repo/primary",
                 command
             ));
+        }
+    }
+
+    #[test]
+    fn retry_safe_no_index_diff_is_exactly_scoped_and_never_live_approved() {
+        let state = integration_state();
+        let command = "/bin/bash -lc 'git diff --no-index -- /dev/null tests/cli.rs'";
+
+        assert!(is_retry_safe_read_only_integration_command(
+            &state,
+            "/repo/primary",
+            command
+        ));
+        assert_eq!(
+            decide_command_approval(&state, &json!({"cwd": "/repo/primary", "command": command})),
+            ApprovalDecision::Cancel
+        );
+
+        for unsafe_command in [
+            "git diff --no-index -- /dev/null /tmp/cli.rs",
+            "git diff --no-index -- /dev/null ../cli.rs",
+            "git diff --no-index -- /etc/passwd tests/cli.rs",
+            "git diff --no-index /dev/null tests/cli.rs",
+            "git diff --no-index -- /dev/null tests/cli.rs --output=copy",
+            "git diff --no-index -- /dev/null tests/cli.rs && git status",
+        ] {
+            assert!(
+                !is_retry_safe_read_only_integration_command(
+                    &state,
+                    "/repo/primary",
+                    unsafe_command
+                ),
+                "{unsafe_command} must fail closed"
+            );
         }
     }
 

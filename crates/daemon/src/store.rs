@@ -503,7 +503,7 @@ impl SqliteRunStore {
                 )));
             }
             PrimaryBindingMode::EphemeralFork
-                if !source_history_hash.is_some_and(|hash| !hash.trim().is_empty()) =>
+                if source_history_hash.is_none_or(|hash| hash.trim().is_empty()) =>
             {
                 return Err(StoreError::IncompatibleState(format!(
                     "run {run_id} ephemeral Primary binding requires a nonempty source-history hash"

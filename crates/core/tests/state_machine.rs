@@ -813,6 +813,67 @@ fn side_effect_free_primary_integration_forbidden_operation_is_retryable() {
 }
 
 #[test]
+fn ephemeral_primary_diagnostic_can_retry_integration_invalid_response() {
+    let mut state = fixture_plan_state();
+    let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
+    state.apply_message(approved_plan(&plan_hash)).unwrap();
+    let source_thread_id = state.facts.primary_thread_id.clone();
+    state.record_error(RunDiagnostic {
+        code: "INVALID_RESPONSE".into(),
+        detail: "message requires an integration_branch".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some("primary-consensus-mirror-2".into()),
+        source_thread_id: Some(source_thread_id),
+        effective_thread_id: Some("primary-consensus-mirror-2".into()),
+        participant_binding_generation: Some(2),
+        participant_binding_mode: Some("EPHEMERAL_FORK".into()),
+        participant_server: Some("worktreeMergeConsensusParticipant".into()),
+    });
+    state.block("INVALID_RESPONSE");
+
+    let action = state.retry_blocked_integration_invalid_response().unwrap();
+
+    assert_eq!(action, NextAction::RequestPrimaryIntegration);
+    assert_eq!(state.status, RunStatus::Running);
+    assert_eq!(state.phase, Phase::Integrate);
+    assert!(state.reason_code.is_none());
+}
+
+#[test]
+fn completed_integration_forbidden_audit_is_retryable_for_ephemeral_primary() {
+    let mut state = fixture_plan_state();
+    let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
+    state.apply_message(approved_plan(&plan_hash)).unwrap();
+    let source_thread_id = state.facts.primary_thread_id.clone();
+    state.record_error(RunDiagnostic {
+        code: "FORBIDDEN_OPERATION".into(),
+        detail: "integration command is not canonically completed with exit code zero".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some("primary-consensus-mirror-2".into()),
+        source_thread_id: Some(source_thread_id),
+        effective_thread_id: Some("primary-consensus-mirror-2".into()),
+        participant_binding_generation: Some(2),
+        participant_binding_mode: Some("EPHEMERAL_FORK".into()),
+        participant_server: Some("worktreeMergeConsensusParticipant".into()),
+    });
+    state.block("FORBIDDEN_OPERATION");
+
+    let action = state
+        .retry_blocked_completed_integration_forbidden_operation()
+        .unwrap();
+
+    assert_eq!(action, NextAction::RequestPrimaryIntegration);
+    assert_eq!(state.status, RunStatus::Running);
+    assert_eq!(state.phase, Phase::Integrate);
+    assert!(state.reason_code.is_none());
+    assert!(state.last_error.is_none());
+}
+
+#[test]
 fn forbidden_operation_after_integration_identity_is_not_retryable() {
     let mut state = fixture_result_state("cccccccccccccccccccccccccccccccccccccccc");
     state.record_error(RunDiagnostic {

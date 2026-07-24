@@ -290,7 +290,7 @@ impl CodexAppServer {
         let status = response.get("status").and_then(Value::as_str);
         let file_path = response.get("filePath").and_then(Value::as_str);
         if !matches!(status, Some("ok" | "okOverridden"))
-            || !file_path.is_some_and(|path| !path.trim().is_empty())
+            || file_path.is_none_or(|path| path.trim().is_empty())
         {
             return Err(invalid(
                 "config/batchWrite result is missing a valid status or filePath",

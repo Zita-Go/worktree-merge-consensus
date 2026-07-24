@@ -122,6 +122,9 @@ fn integration_prompt_declares_the_frozen_repository_read_surface() {
         "do not use the built-in file-change tool",
         "do not recreate or re-merge",
         "after one successful patch, no second patch is authorized",
+        "Never use `git diff --no-index`",
+        "stage new files with `git add -A` before inspecting them with `git diff --cached`",
+        "If `rg` is unavailable, use `git ls-files` to discover tracked `AGENTS.md` files",
     ] {
         assert!(prompt.contains(required), "missing {required:?}");
     }

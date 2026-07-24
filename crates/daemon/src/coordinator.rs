@@ -903,11 +903,19 @@ where
         let retry_corrective_patch_tool_action =
             corrective_patch_tool_unavailable_retry_action(&state)?;
         let retry_execution_tool_action = execution_tool_unavailable_retry_action(&state)?;
-        let retry_forbidden_operation_action = forbidden_operation_retry_action(&state)?;
+        let retry_completed_integration_forbidden_action =
+            completed_integration_forbidden_operation_retry_action(&state)?;
+        let retry_forbidden_operation_action =
+            if retry_completed_integration_forbidden_action.is_none() {
+                forbidden_operation_retry_action(&state)?
+            } else {
+                None
+            };
         let retry_completed_response_action =
             retry_invalid_test_action.or(retry_invalid_response_action);
         let effective_action = retry_corrective_patch_tool_action
             .or(retry_execution_tool_action)
+            .or(retry_completed_integration_forbidden_action)
             .or(retry_forbidden_operation_action)
             .or(retry_integration_invalid_response_action)
             .or(retry_verification_without_execution_action)
@@ -936,6 +944,8 @@ where
                 sha,
                 &changed_files(current_integration_payload(&state)?)?,
             )?;
+        } else if retry_completed_integration_forbidden_action.is_some() {
+            self.safety.verify_frozen(&state.facts)?;
         } else if retry_execution_tool_action.is_some()
             || retry_forbidden_operation_action.is_some()
         {
@@ -996,6 +1006,30 @@ where
             }
             self.store
                 .reactivate_blocked_run_with_interrupted_forbidden_operation_retry(
+                    &blocked_state,
+                    &state,
+                    &retry.message_hash,
+                    &retry.thread_id,
+                    &retry.turn_id,
+                    &retry.observed_status,
+                )?;
+            return Ok(state);
+        }
+        if let Some(action) = retry_completed_integration_forbidden_action {
+            let retry = self
+                .inspect_completed_integration_invalid_response_retry(&state, action)
+                .await?;
+            let blocked_state = state.clone();
+            let restored_action =
+                state.retry_blocked_completed_integration_forbidden_operation()?;
+            if restored_action != action {
+                return Err(CoordinatorError::operational(
+                    "INCOMPATIBLE_STATE",
+                    "restored completed-integration command-audit action does not match its diagnostic",
+                ));
+            }
+            self.store
+                .reactivate_blocked_run_with_completed_turn_retry(
                     &blocked_state,
                     &state,
                     &retry.message_hash,
@@ -2703,7 +2737,7 @@ where
                 .successful_patch_recorded(&run_id, &request_hash)?
         {
             prompt.push_str(
-                "\nCoordinator recovery override:\n- The exact request-bound controlled patch and final commit already succeeded in an archived attempt.\n- Do not call consensus_apply_patch and do not edit, stage, commit, create, or merge anything.\n- Use only read-only Git queries in the authorized primary worktree to inspect the existing clean target branch.\n- Return `<consensus-result>INTEGRATION_READY</consensus-result>` plus optional free-form Markdown. The coordinator derives branch, SHA, and changed files directly from Git.\n",
+                "\nCoordinator recovery override:\n- The exact request-bound controlled patch and final commit already succeeded in an archived attempt.\n- Do not call consensus_apply_patch and do not edit, stage, commit, create, or merge anything.\n- Use only read-only Git queries in the authorized primary worktree to inspect the existing clean target branch.\n- Confirm repository instructions with a successful `git ls-files` query and use `git show REV:path` to read every tracked `AGENTS.md` that applies.\n- Return `<consensus-result>INTEGRATION_READY</consensus-result>` plus optional free-form Markdown. The coordinator derives branch, SHA, and changed files directly from Git.\n",
             );
         }
         prompt.push('\n');
@@ -3001,19 +3035,17 @@ where
                 sha,
                 &changed_files(current_integration_payload(state)?)?,
             )?;
+        } else if action == NextAction::RequestPrimaryIntegration {
+            let branch = state.target_integration_branch.as_deref().ok_or_else(|| {
+                CoordinatorError::operational(
+                    "INVALID_STATE",
+                    "target integration branch is missing",
+                )
+            })?;
+            self.safety.verify_frozen(&state.facts)?;
+            self.safety.verify_branch_absent(&state.facts, branch)?;
         } else {
-            if action == NextAction::RequestPrimaryIntegration {
-                let branch = state.target_integration_branch.as_deref().ok_or_else(|| {
-                    CoordinatorError::operational(
-                        "INVALID_STATE",
-                        "target integration branch is missing",
-                    )
-                })?;
-                self.safety.verify_frozen(&state.facts)?;
-                self.safety.verify_branch_absent(&state.facts, branch)?;
-            } else {
-                self.safety.verify_frozen(&state.facts)?;
-            }
+            self.safety.verify_frozen(&state.facts)?;
         }
         Ok(())
     }
@@ -5113,8 +5145,11 @@ fn controlled_patch_mcp_identity_blocker_for_recovery(
     let server = item.get("server").and_then(Value::as_str);
     let server_matches = server == Some(PARTICIPANT_MCP_SERVER)
         || (allow_legacy_server && server == Some("worktreeMergeConsensus"));
-    if item.get("pluginId").and_then(Value::as_str)
-        != Some("worktree-merge-consensus@worktree-merge-consensus")
+    let plugin_id = item.get("pluginId");
+    let plugin_matches = plugin_id.and_then(Value::as_str)
+        == Some("worktree-merge-consensus@worktree-merge-consensus")
+        || (server == Some(PARTICIPANT_MCP_SERVER) && plugin_id.is_some_and(Value::is_null));
+    if !plugin_matches
         || !server_matches
         || item.get("tool").and_then(Value::as_str) != Some(PARTICIPANT_PATCH_TOOL)
     {
@@ -5136,12 +5171,68 @@ fn controlled_patch_mcp_identity_blocker_for_recovery(
             .and_then(|arguments| arguments.get("request_hash"))
             .and_then(Value::as_str)
             != Some(request_hash)
-        || !arguments
+        || arguments
             .and_then(|arguments| arguments.get("patch"))
             .and_then(Value::as_str)
-            .is_some_and(|patch| !patch.trim().is_empty())
+            .is_none_or(|patch| patch.trim().is_empty())
     {
         return Some("controlled patch MCP arguments do not match the active run request".into());
+    }
+    None
+}
+
+fn integration_command_blocker(state: &RunState, item: &Value) -> Option<String> {
+    let Some(command) = item.get("command").and_then(Value::as_str) else {
+        return Some("integration command omits its canonical command".into());
+    };
+    let Some(cwd) = item.get("cwd").and_then(Value::as_str) else {
+        return Some("integration command omits its canonical cwd".into());
+    };
+    if item
+        .get("source")
+        .is_some_and(|source| source.as_str() != Some("agent"))
+    {
+        return Some("integration command has a non-agent source".into());
+    }
+
+    let mut policy_state = state.clone();
+    policy_state.next_action = NextAction::RequestPrimaryIntegration;
+    let retry_safe_read_only =
+        is_retry_safe_read_only_integration_command(&policy_state, cwd, command);
+    let live_policy_accepts = decide_command_approval(
+        &policy_state,
+        &json!({
+            "cwd": cwd,
+            "command": command,
+            "availableDecisions": ["accept"]
+        }),
+    ) == ApprovalDecision::Accept;
+    if !live_policy_accepts && !retry_safe_read_only {
+        return Some("integration command is outside the frozen execution policy".into());
+    }
+
+    if retry_safe_read_only {
+        let status = item.get("status").and_then(Value::as_str);
+        let exit_code = item.get("exitCode");
+        let terminal_shape_is_valid = match status {
+            Some("completed") => exit_code.and_then(Value::as_i64).is_some(),
+            Some("failed" | "declined") => {
+                exit_code.is_none_or(|value| value.is_null() || value.as_i64().is_some())
+            }
+            _ => false,
+        };
+        if !terminal_shape_is_valid {
+            return Some(
+                "read-only integration command is not in a canonical terminal state".into(),
+            );
+        }
+        return None;
+    }
+
+    if item.get("status").and_then(Value::as_str) != Some("completed")
+        || item.get("exitCode").and_then(Value::as_i64) != Some(0)
+    {
+        return Some("integration command is not canonically completed with exit code zero".into());
     }
     None
 }
@@ -5185,35 +5276,8 @@ fn pending_controlled_patch_approval_blocker(
                 }
             }
             "commandExecution" => {
-                if item.get("status").and_then(Value::as_str) != Some("completed")
-                    || item.get("exitCode").and_then(Value::as_i64) != Some(0)
-                {
-                    return Some(
-                        "integration command is not canonically completed with exit code zero"
-                            .into(),
-                    );
-                }
-                let Some(command) = item.get("command").and_then(Value::as_str) else {
-                    return Some("integration command omits its canonical command".into());
-                };
-                let Some(cwd) = item.get("cwd").and_then(Value::as_str) else {
-                    return Some("integration command omits its canonical cwd".into());
-                };
-                if item
-                    .get("source")
-                    .is_some_and(|source| source.as_str() != Some("agent"))
-                    || decide_command_approval(
-                        state,
-                        &json!({
-                            "cwd": cwd,
-                            "command": command,
-                            "availableDecisions": ["accept"]
-                        }),
-                    ) != ApprovalDecision::Accept
-                {
-                    return Some(
-                        "integration command is outside the frozen execution policy".into(),
-                    );
+                if let Some(blocker) = integration_command_blocker(state, item) {
+                    return Some(blocker);
                 }
             }
             "mcpToolCall" => {
@@ -5279,35 +5343,8 @@ fn recoverable_integration_turn_blocker(
                         "integration command appears after the final agent response".into(),
                     );
                 }
-                if item.get("status").and_then(Value::as_str) != Some("completed")
-                    || item.get("exitCode").and_then(Value::as_i64) != Some(0)
-                {
-                    return Some(
-                        "integration command is not canonically completed with exit code zero"
-                            .into(),
-                    );
-                }
-                let Some(command) = item.get("command").and_then(Value::as_str) else {
-                    return Some("integration command omits its canonical command".into());
-                };
-                let Some(cwd) = item.get("cwd").and_then(Value::as_str) else {
-                    return Some("integration command omits its canonical cwd".into());
-                };
-                if item
-                    .get("source")
-                    .is_some_and(|source| source.as_str() != Some("agent"))
-                    || decide_command_approval(
-                        state,
-                        &json!({
-                            "cwd": cwd,
-                            "command": command,
-                            "availableDecisions": ["accept"]
-                        }),
-                    ) != ApprovalDecision::Accept
-                {
-                    return Some(
-                        "integration command is outside the frozen execution policy".into(),
-                    );
+                if let Some(blocker) = integration_command_blocker(state, item) {
+                    return Some(blocker);
                 }
             }
             "mcpToolCall" => {
@@ -5793,10 +5830,10 @@ fn context_compaction_retry_blocker(item: &Value) -> Option<String> {
     if object.get("type").and_then(Value::as_str) != Some("contextCompaction") {
         return Some("context compaction item has an unexpected type".into());
     }
-    if !object
+    if object
         .get("id")
         .and_then(Value::as_str)
-        .is_some_and(|id| !id.is_empty())
+        .is_none_or(|id| id.is_empty())
     {
         return Some("context compaction item has no nonempty id".into());
     }
@@ -5953,6 +5990,53 @@ fn integration_invalid_response_retry_action(
         return Err(CoordinatorError::operational(
             "MODEL_RESPONSE_RETRY_UNSAFE",
             "integration invalid-response recovery cannot replace accepted result state",
+        ));
+    }
+    Ok(Some(NextAction::RequestPrimaryIntegration))
+}
+
+fn completed_integration_forbidden_operation_retry_action(
+    state: &RunState,
+) -> Result<Option<NextAction>, CoordinatorError> {
+    if state.reason_code.as_deref() != Some("FORBIDDEN_OPERATION") {
+        return Ok(None);
+    }
+    if state.status != RunStatus::Blocked
+        || state.next_action != NextAction::Stop
+        || state.phase != Phase::Blocked
+    {
+        return Err(CoordinatorError::operational(
+            "INCOMPATIBLE_STATE",
+            "forbidden-operation reason is attached to inconsistent terminal metadata",
+        ));
+    }
+    let diagnostic = state.last_error.as_ref().ok_or_else(|| {
+        CoordinatorError::operational(
+            "INCOMPATIBLE_STATE",
+            "forbidden-operation state has no originating diagnostic",
+        )
+    })?;
+    if diagnostic.code != "FORBIDDEN_OPERATION"
+        || diagnostic.action != NextAction::RequestPrimaryIntegration
+        || diagnostic.role != Some(Role::Primary)
+        || !diagnostic_matches_primary_identity(state, diagnostic)
+        || !matches!(
+            diagnostic.detail.as_str(),
+            "integration command is not canonically completed with exit code zero"
+                | "integration command is outside the frozen execution policy"
+        )
+    {
+        return Ok(None);
+    }
+    if state.integration_branch.is_some()
+        || state.integration_sha.is_some()
+        || state.current_integration_payload.is_some()
+        || state.verification_worktree.is_some()
+        || !state.test_evidence.is_empty()
+    {
+        return Err(CoordinatorError::operational(
+            "MODEL_RESPONSE_RETRY_UNSAFE",
+            "completed-integration command-audit recovery cannot replace accepted result state",
         ));
     }
     Ok(Some(NextAction::RequestPrimaryIntegration))
@@ -6753,6 +6837,12 @@ mod retry_safety_tests {
             None
         );
 
+        call["pluginId"] = Value::Null;
+        assert_eq!(
+            integration_patch_mcp_blocker(&state, &call, request_hash),
+            None
+        );
+
         call["server"] = json!("worktreeMergeConsensus");
         assert!(
             integration_patch_mcp_blocker(&state, &call, request_hash)
@@ -6760,6 +6850,7 @@ mod retry_safety_tests {
                 .contains("outside")
         );
         call["server"] = json!(PARTICIPANT_MCP_SERVER);
+        call["pluginId"] = json!("worktree-merge-consensus@worktree-merge-consensus");
         call["tool"] = json!("consensus_resume");
         assert!(
             integration_patch_mcp_blocker(&state, &call, request_hash)
@@ -6826,6 +6917,100 @@ mod retry_safety_tests {
             )
             .unwrap()
             .contains("SQLite success record")
+        );
+    }
+
+    #[test]
+    fn completed_integration_recovery_accepts_nonzero_read_only_terminal_commands_only() {
+        let mut state = integration_state();
+        state.next_action = NextAction::RequestPrimaryIntegration;
+        state.target_integration_branch = Some("consensus/test-run".into());
+        let request_hash = "request-hash";
+        let successful_patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n";
+        let successful_hash = canonical_json_hash(&json!({"patch": successful_patch}));
+        let patch_call = json!({
+            "id": "patch",
+            "type": "mcpToolCall",
+            "pluginId": "worktree-merge-consensus@worktree-merge-consensus",
+            "server": PARTICIPANT_MCP_SERVER,
+            "tool": "consensus_apply_patch",
+            "arguments": {
+                "run_id": state.facts.run_id.to_string(),
+                "request_hash": request_hash,
+                "patch": successful_patch,
+            },
+            "status": "completed",
+            "appContext": null,
+        });
+        let command = |id: &str, value: &str, status: &str, exit_code: i64| {
+            json!({
+                "id": id,
+                "type": "commandExecution",
+                "command": value,
+                "cwd": "/repo/primary",
+                "status": status,
+                "exitCode": exit_code,
+                "source": "agent",
+            })
+        };
+        let turn = json!({
+            "items": [
+                {"id": "user", "type": "userMessage"},
+                command("instructions", "rg --files -g AGENTS.md", "failed", 127),
+                command(
+                    "branch",
+                    &format!("git switch -c consensus/test-run {}", state.facts.primary_sha),
+                    "completed",
+                    0,
+                ),
+                command(
+                    "merge",
+                    &format!("git merge --no-ff --no-edit {}", state.facts.reviewer_sha),
+                    "completed",
+                    0,
+                ),
+                patch_call,
+                command(
+                    "new-file-diff",
+                    "git diff --no-index -- /dev/null tests/cli.rs",
+                    "failed",
+                    1,
+                ),
+                command("stage", "git add -A", "completed", 0),
+                command(
+                    "commit",
+                    "git commit -m compatibility_fixes",
+                    "completed",
+                    0,
+                ),
+                {"id": "agent", "type": "agentMessage", "text": "ready"}
+            ]
+        });
+
+        assert_eq!(
+            recoverable_integration_turn_blocker(
+                &state,
+                &turn,
+                request_hash,
+                &successful_hash,
+                false,
+            ),
+            None
+        );
+
+        let mut failed_write = turn;
+        failed_write["items"][2]["status"] = json!("failed");
+        failed_write["items"][2]["exitCode"] = json!(1);
+        assert!(
+            recoverable_integration_turn_blocker(
+                &state,
+                &failed_write,
+                request_hash,
+                &successful_hash,
+                false,
+            )
+            .unwrap()
+            .contains("exit code zero")
         );
     }
 

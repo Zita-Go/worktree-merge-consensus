@@ -505,7 +505,7 @@ impl RunState {
         if diagnostic.code != "INVALID_RESPONSE"
             || diagnostic.action != NextAction::RequestPrimaryIntegration
             || diagnostic.role != Some(Role::Primary)
-            || diagnostic.thread_id.as_deref() != Some(self.facts.primary_thread_id.as_str())
+            || !diagnostic_matches_primary(&self.facts, diagnostic)
         {
             return Err(state_error(
                 "NOT_RETRYABLE",
@@ -543,6 +543,72 @@ impl RunState {
         Ok(self.next_action)
     }
 
+    pub fn retry_blocked_completed_integration_forbidden_operation(
+        &mut self,
+    ) -> Result<NextAction, StateError> {
+        if self.status != RunStatus::Blocked
+            || self.phase != Phase::Blocked
+            || self.next_action != NextAction::Stop
+            || self.reason_code.as_deref() != Some("FORBIDDEN_OPERATION")
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "only a terminal completed-integration FORBIDDEN_OPERATION can be retried",
+            ));
+        }
+        let diagnostic = self.last_error.as_ref().ok_or_else(|| {
+            state_error(
+                "INCOMPATIBLE_STATE",
+                "completed-integration forbidden recovery requires its originating diagnostic",
+            )
+        })?;
+        if diagnostic.code != "FORBIDDEN_OPERATION"
+            || diagnostic.action != NextAction::RequestPrimaryIntegration
+            || diagnostic.role != Some(Role::Primary)
+            || !diagnostic_matches_primary(&self.facts, diagnostic)
+            || !matches!(
+                diagnostic.detail.as_str(),
+                "integration command is not canonically completed with exit code zero"
+                    | "integration command is outside the frozen execution policy"
+            )
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "completed-integration forbidden recovery is limited to the bound command audit",
+            ));
+        }
+        if !self.plan_approved
+            || self.current_plan_payload.is_none()
+            || self.plan_approval_payload.is_none()
+            || self.target_integration_branch.is_none()
+        {
+            return Err(state_error(
+                "INCOMPATIBLE_STATE",
+                "completed-integration forbidden recovery requires an approved frozen plan",
+            ));
+        }
+        if self.integration_branch.is_some()
+            || self.integration_sha.is_some()
+            || self.current_integration_payload.is_some()
+            || self.verification_worktree.is_some()
+            || !self.test_evidence.is_empty()
+            || self.accepted_result.is_some()
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "completed-integration forbidden recovery cannot replace an accepted result",
+            ));
+        }
+
+        self.status = RunStatus::Running;
+        self.phase = Phase::Integrate;
+        self.next_action = NextAction::RequestPrimaryIntegration;
+        self.reason_code = None;
+        self.last_error = None;
+        self.validate_persisted()?;
+        Ok(self.next_action)
+    }
+
     pub fn retry_blocked_verification_without_execution(
         &mut self,
     ) -> Result<NextAction, StateError> {
@@ -565,7 +631,7 @@ impl RunState {
         if diagnostic.code != "TEST_FAILURE"
             || diagnostic.action != NextAction::RequestPrimaryVerification
             || diagnostic.role != Some(Role::Primary)
-            || diagnostic.thread_id.as_deref() != Some(self.facts.primary_thread_id.as_str())
+            || !diagnostic_matches_primary(&self.facts, diagnostic)
             || diagnostic.detail
                 != "verification must execute each frozen command exactly once and no other command"
         {
@@ -623,7 +689,7 @@ impl RunState {
             || diagnostic.operation.is_some()
             || diagnostic.action != NextAction::RequestPrimaryVerification
             || diagnostic.role != Some(Role::Primary)
-            || diagnostic.thread_id.as_deref() != Some(self.facts.primary_thread_id.as_str())
+            || !diagnostic_matches_primary(&self.facts, diagnostic)
         {
             return Err(state_error(
                 "NOT_RETRYABLE",
@@ -888,7 +954,7 @@ impl RunState {
         if diagnostic.code != "FORBIDDEN_OPERATION"
             || diagnostic.action != NextAction::RequestPrimaryIntegration
             || diagnostic.role != Some(Role::Primary)
-            || diagnostic.thread_id.as_deref() != Some(self.facts.primary_thread_id.as_str())
+            || !diagnostic_matches_primary(&self.facts, diagnostic)
         {
             return Err(state_error(
                 "NOT_RETRYABLE",
@@ -1633,6 +1699,15 @@ fn normalized_issue_hash(payload: &Value) -> String {
     } else {
         canonical_json_hash(payload)
     }
+}
+
+fn diagnostic_matches_primary(facts: &RunFacts, diagnostic: &RunDiagnostic) -> bool {
+    diagnostic.thread_id.as_deref() == Some(facts.primary_thread_id.as_str())
+        || (diagnostic.source_thread_id.as_deref() == Some(facts.primary_thread_id.as_str())
+            && diagnostic.effective_thread_id.as_deref() == diagnostic.thread_id.as_deref()
+            && diagnostic.participant_binding_generation.is_some()
+            && diagnostic.participant_binding_mode.is_some()
+            && diagnostic.participant_server.is_some())
 }
 
 fn state_error(code: &'static str, detail: impl Into<String>) -> StateError {

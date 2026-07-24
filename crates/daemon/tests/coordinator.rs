@@ -1486,6 +1486,108 @@ async fn legacy_capability_generation_allows_exact_invalid_integration_recovery(
 }
 
 #[tokio::test]
+async fn completed_integration_forbidden_read_only_nonzero_resumes_the_same_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let (coordinator, app, store) =
+        seed_invalid_integration_recovery(&path, PARTICIPANT_MCP_SERVER).await;
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    let turn_id = pending.turn_id.clone().unwrap();
+    app.set_patch_plugin_id("primary", &turn_id, Value::Null);
+    let command = |id: &str, value: &str, status: &str, exit_code: i64| {
+        json!({
+            "id": id,
+            "type": "commandExecution",
+            "command": value,
+            "cwd": "/repo/primary",
+            "status": status,
+            "exitCode": exit_code,
+            "source": "agent",
+        })
+    };
+    for item in [
+        command(
+            "instructions",
+            "/bin/bash -lc 'rg --files -g AGENTS.md'",
+            "failed",
+            127,
+        ),
+        command(
+            "target-absent",
+            "/bin/bash -lc 'git show --no-patch --format=%H refs/heads/consensus/test-run'",
+            "failed",
+            128,
+        ),
+        command(
+            "branch",
+            &format!("/bin/bash -lc 'git switch -c consensus/test-run {PRIMARY_SHA}'"),
+            "completed",
+            0,
+        ),
+        command(
+            "merge",
+            &format!("/bin/bash -lc 'git merge --no-ff --no-edit {REVIEWER_SHA}'"),
+            "completed",
+            0,
+        ),
+        command(
+            "new-file-diff",
+            "/bin/bash -lc 'git diff --no-index -- /dev/null combined.txt'",
+            "failed",
+            1,
+        ),
+        command("stage", "/bin/bash -lc 'git add -A'", "completed", 0),
+        command(
+            "commit",
+            "/bin/bash -lc 'git commit -m compatibility_fixes'",
+            "completed",
+            0,
+        ),
+    ] {
+        app.insert_turn_item_before_agent("primary", &turn_id, item);
+    }
+
+    let mut blocked = store.load_run(RUN_ID).unwrap().unwrap();
+    blocked.reason_code = Some("FORBIDDEN_OPERATION".into());
+    blocked.last_error = Some(RunDiagnostic {
+        code: "FORBIDDEN_OPERATION".into(),
+        detail: "integration command is not canonically completed with exit code zero".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some("primary".into()),
+        source_thread_id: None,
+        effective_thread_id: None,
+        participant_binding_generation: None,
+        participant_binding_mode: None,
+        participant_server: None,
+    });
+    store.save_state(&blocked).unwrap();
+
+    let accepted = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(accepted.status, RunStatus::Accepted);
+    assert_eq!(accepted.integration_sha.as_deref(), Some(INTEGRATION_SHA));
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    assert!(
+        store
+            .successful_patch_recorded(RUN_ID, &pending.message_hash)
+            .unwrap()
+    );
+    let retry_prompt = app
+        .prompts()
+        .into_iter()
+        .rfind(|prompt| prompt.contains("REQUEST_PRIMARY_INTEGRATION"))
+        .unwrap();
+    assert!(retry_prompt.contains("Coordinator recovery override"));
+    assert!(retry_prompt.contains("Do not call consensus_apply_patch"));
+    assert!(
+        retry_prompt
+            .contains("Confirm repository instructions with a successful `git ls-files` query")
+    );
+}
+
+#[tokio::test]
 async fn participant_capability_generation_rejects_legacy_invalid_integration_evidence() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");
@@ -5404,6 +5506,26 @@ impl FakeAppServer {
             .find(|item| item.get("type").and_then(Value::as_str) == Some("agentMessage"))
             .unwrap();
         item["text"] = json!(text);
+    }
+
+    fn set_patch_plugin_id(&self, thread_id: &str, turn_id: &str, plugin_id: Value) {
+        let mut threads = self.threads.lock().unwrap();
+        let turn = threads
+            .get_mut(thread_id)
+            .unwrap()
+            .iter_mut()
+            .find(|turn| turn.get("id").and_then(Value::as_str) == Some(turn_id))
+            .unwrap();
+        let item = turn["items"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| {
+                item.get("type").and_then(Value::as_str) == Some("mcpToolCall")
+                    && item.get("tool").and_then(Value::as_str) == Some("consensus_apply_patch")
+            })
+            .unwrap();
+        item["pluginId"] = plugin_id;
     }
 
     fn complete_deferred_turns(&self) {
