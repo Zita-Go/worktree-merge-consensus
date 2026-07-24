@@ -874,6 +874,68 @@ fn completed_integration_forbidden_audit_is_retryable_for_ephemeral_primary() {
 }
 
 #[test]
+fn symbolic_ref_confirmation_blocker_is_retryable_for_ephemeral_primary() {
+    let mut state = fixture_plan_state();
+    let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
+    state.apply_message(approved_plan(&plan_hash)).unwrap();
+    let source_thread_id = state.facts.primary_thread_id.clone();
+    state.record_error(RunDiagnostic {
+        code: "FORBIDDEN_OPERATION".into(),
+        detail: "patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git symbolic-ref --short HEAD'".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some("primary-consensus-mirror-3".into()),
+        source_thread_id: Some(source_thread_id),
+        effective_thread_id: Some("primary-consensus-mirror-3".into()),
+        participant_binding_generation: Some(3),
+        participant_binding_mode: Some("EPHEMERAL_FORK".into()),
+        participant_server: Some("worktreeMergeConsensusParticipant".into()),
+    });
+    state.block("FORBIDDEN_OPERATION");
+
+    let action = state
+        .retry_blocked_completed_integration_forbidden_operation()
+        .unwrap();
+
+    assert_eq!(action, NextAction::RequestPrimaryIntegration);
+    assert_eq!(state.status, RunStatus::Running);
+    assert_eq!(state.phase, Phase::Integrate);
+    assert!(state.reason_code.is_none());
+    assert!(state.last_error.is_none());
+}
+
+#[test]
+fn arbitrary_symbolic_ref_confirmation_blocker_remains_terminal() {
+    let mut state = fixture_plan_state();
+    let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
+    state.apply_message(approved_plan(&plan_hash)).unwrap();
+    let source_thread_id = state.facts.primary_thread_id.clone();
+    state.record_error(RunDiagnostic {
+        code: "FORBIDDEN_OPERATION".into(),
+        detail: "patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git symbolic-ref HEAD refs/heads/evil'".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some("primary-consensus-mirror-3".into()),
+        source_thread_id: Some(source_thread_id),
+        effective_thread_id: Some("primary-consensus-mirror-3".into()),
+        participant_binding_generation: Some(3),
+        participant_binding_mode: Some("EPHEMERAL_FORK".into()),
+        participant_server: Some("worktreeMergeConsensusParticipant".into()),
+    });
+    state.block("FORBIDDEN_OPERATION");
+
+    let error = state
+        .retry_blocked_completed_integration_forbidden_operation()
+        .unwrap_err();
+
+    assert_eq!(error.code(), "NOT_RETRYABLE");
+    assert_eq!(state.status, RunStatus::Blocked);
+    assert_eq!(state.phase, Phase::Blocked);
+}
+
+#[test]
 fn unsent_ephemeral_source_recreation_blocker_restores_integration() {
     let mut state = fixture_plan_state();
     let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());

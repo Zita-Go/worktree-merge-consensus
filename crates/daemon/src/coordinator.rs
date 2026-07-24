@@ -6187,6 +6187,7 @@ fn completed_integration_forbidden_operation_retry_action(
             diagnostic.detail.as_str(),
             "integration command is not canonically completed with exit code zero"
                 | "integration command is outside the frozen execution policy"
+                | "patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git symbolic-ref --short HEAD'"
         )
     {
         return Ok(None);

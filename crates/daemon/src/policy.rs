@@ -329,6 +329,7 @@ fn is_allowed_read_only_git_invocation(
         }
         "branch" => safe_branch_list_arguments(state, arguments),
         "show-ref" => safe_show_ref_arguments(state, arguments),
+        "symbolic-ref" => matches!(arguments, ["--short", "HEAD"]),
         _ => false,
     }
 }
@@ -604,6 +605,60 @@ mod tests {
                 "/repo/primary",
                 command
             ));
+        }
+    }
+
+    #[test]
+    fn current_branch_symbolic_ref_is_exactly_scoped_and_read_only() {
+        let state = integration_state();
+
+        for command in [
+            "git symbolic-ref --short HEAD",
+            "/bin/bash -lc 'git symbolic-ref --short HEAD'",
+        ] {
+            assert_eq!(
+                decide_command_approval(
+                    &state,
+                    &json!({
+                        "cwd": "/repo/primary",
+                        "command": command,
+                        "availableDecisions": ["accept"]
+                    })
+                ),
+                ApprovalDecision::Accept
+            );
+            assert!(is_retry_safe_read_only_integration_command(
+                &state,
+                "/repo/primary",
+                command
+            ));
+        }
+        assert!(!is_retry_safe_read_only_integration_command(
+            &state,
+            "/repo/reviewer",
+            "git symbolic-ref --short HEAD"
+        ));
+        for command in [
+            "git symbolic-ref HEAD",
+            "git symbolic-ref --quiet --short HEAD",
+            "git symbolic-ref --short refs/heads/primary",
+            "git symbolic-ref HEAD refs/heads/primary",
+            "git symbolic-ref --short HEAD refs/heads/primary",
+            "git symbolic-ref -d HEAD",
+            "git symbolic-ref --delete HEAD",
+        ] {
+            assert_eq!(
+                decide_command_approval(
+                    &state,
+                    &json!({"cwd": "/repo/primary", "command": command})
+                ),
+                ApprovalDecision::Cancel,
+                "{command} must fail closed"
+            );
+            assert!(
+                !is_retry_safe_read_only_integration_command(&state, "/repo/primary", command),
+                "{command} must not be recovery-safe"
+            );
         }
     }
 

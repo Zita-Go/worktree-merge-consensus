@@ -1542,6 +1542,90 @@ async fn completed_integration_forbidden_read_only_nonzero_resumes_the_same_run(
 }
 
 #[tokio::test]
+async fn v0213_symbolic_ref_confirmation_blocker_resumes_the_same_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let (coordinator, app, store, safety) =
+        seed_invalid_integration_recovery_with_preloaded_primary(
+            &path,
+            PARTICIPANT_MCP_SERVER,
+            true,
+        )
+        .await;
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    let thread_id = pending.thread_id.clone().unwrap();
+    let turn_id = pending.turn_id.clone().unwrap();
+    let binding = store.active_primary_binding(RUN_ID).unwrap().unwrap();
+    app.set_patch_plugin_id(&thread_id, &turn_id, Value::Null);
+    insert_completed_integration_command_evidence(&app, &thread_id, &turn_id);
+    app.insert_turn_item_before_agent(
+        &thread_id,
+        &turn_id,
+        json!({
+            "id": "current-branch",
+            "type": "commandExecution",
+            "command": "/bin/bash -lc 'git symbolic-ref --short HEAD'",
+            "cwd": "/repo/primary",
+            "status": "completed",
+            "exitCode": 0,
+            "source": "unifiedExecStartup",
+        }),
+    );
+    replace_persisted_ephemeral_turn_evidence(&path, &store, &app, &thread_id, &turn_id);
+
+    let mut blocked = store.load_run(RUN_ID).unwrap().unwrap();
+    blocked.reason_code = Some("FORBIDDEN_OPERATION".into());
+    blocked.last_error = Some(RunDiagnostic {
+        code: "FORBIDDEN_OPERATION".into(),
+        detail: "patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git symbolic-ref --short HEAD'".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some(thread_id.clone()),
+        source_thread_id: Some(binding.source_primary_thread_id.clone()),
+        effective_thread_id: Some(thread_id.clone()),
+        participant_binding_generation: Some(binding.generation),
+        participant_binding_mode: Some("EPHEMERAL_FORK".into()),
+        participant_server: Some(PARTICIPANT_MCP_SERVER.into()),
+    });
+    store.save_state(&blocked).unwrap();
+    safety
+        .integration_branch_active
+        .store(true, Ordering::SeqCst);
+
+    let accepted = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(
+        accepted.status,
+        RunStatus::Accepted,
+        "{:?}",
+        accepted.last_error
+    );
+    assert_eq!(accepted.integration_sha.as_deref(), Some(INTEGRATION_SHA));
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    assert_eq!(
+        store
+            .active_primary_binding(RUN_ID)
+            .unwrap()
+            .unwrap()
+            .generation,
+        binding.generation
+    );
+    assert!(
+        store
+            .successful_patch_recorded(RUN_ID, &pending.message_hash)
+            .unwrap()
+    );
+    let retry_prompt = app
+        .prompts()
+        .into_iter()
+        .rfind(|prompt| prompt.contains("REQUEST_PRIMARY_INTEGRATION"))
+        .unwrap();
+    assert!(retry_prompt.contains("Coordinator recovery override"));
+    assert!(retry_prompt.contains("Do not call consensus_apply_patch"));
+}
+
+#[tokio::test]
 async fn completed_integration_recovery_reforks_an_unloaded_ephemeral_primary() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");
