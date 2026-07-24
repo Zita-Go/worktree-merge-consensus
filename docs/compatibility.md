@@ -270,6 +270,29 @@ exists for the same request and Effective Primary. The pending row and binding
 are not rewritten by the migration; normal proven-unsent rotation follows.
 Every near-match remains terminal without Git mutation.
 
+Version 0.2.14 adds one exact read-only command to the Primary integration
+policy: `git symbolic-ref --short HEAD` in the frozen Primary worktree.
+The command may appear directly or inside one canonical App Server
+`/bin/bash -lc` wrapper. No other `symbolic-ref` option, reference operand,
+delete form, or two-argument write is accepted.
+
+The same release adds one explicit migration for the exact 0.2.13 terminal
+state: `BLOCKED / FORBIDDEN_OPERATION`, no operation, Primary integration
+action, matching ephemeral binding identity, and detail
+`patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git symbolic-ref --short HEAD'`.
+Explicit resume requires an approved frozen plan, no recorded integration
+result or test evidence, the integration-in-progress repository state, the
+exact completed pending request turn, matching request hash and binding
+generation, one successful request-bound controlled patch, and canonical turn
+items that are all retry-safe. Every command must be terminal, agent-initiated,
+in the frozen Primary cwd, and read-only under the current policy. The
+authoritative target must remain clean, contain both frozen source commits, and
+match its changed-file result. The store then reacquires the repository lock
+and archives only that completed confirmation atomically on the same Run. The
+replacement prompt forbids another controlled patch, merge, staging, or
+commit. Changed identity, side effects, uncertain execution, a near-match
+diagnostic, or an existing accepted result remains terminal.
+
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
 fixed task ID for persisted direct and Reviewer tasks. Ephemeral Effective
 Primary tasks are already loaded and must not be resumed. `thread/read` can

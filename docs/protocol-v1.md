@@ -122,6 +122,18 @@ plan, target, one unsent pending request, active binding generation, frozen
 history hash, request hash, and archived completed patch attempt. Any sent,
 uncertain, or near-match state remains terminal.
 
+Version 0.2.14 recognizes exactly `git symbolic-ref --short HEAD` in the
+frozen Primary worktree as a read-only current-branch query, with at most one
+canonical `/bin/bash -lc` wrapper. Every other `symbolic-ref` form remains
+forbidden. It can explicitly resume only the exact 0.2.13
+`BLOCKED / FORBIDDEN_OPERATION` diagnostic that names that wrapped command.
+The same Run is reactivated only after the completed request, binding,
+successful controlled patch, canonical read-only history, unchanged frozen
+sources, clean target, ancestry, and authoritative result all revalidate.
+Only the confirmation turn is archived and retried; patch, merge, staging, and
+commit are never repeated. Every near-match or side-effectful history remains
+terminal.
+
 Preflight reason codes include `UNREGISTERED_WORKTREE`,
 `DUPLICATE_WORKTREE`, `REPOSITORY_MISMATCH`, `DIRTY_WORKTREE`, and
 `WORKTREE_UNAVAILABLE`. Once frozen, a task may reject an incorrect

@@ -256,6 +256,19 @@ start intent, the exact active ephemeral generation and frozen history hash,
 and the archived completed patch attempt for the same request. Every
 near-match fails closed.
 
+Release 0.2.14 adds exactly `git symbolic-ref --short HEAD` in the frozen
+Primary worktree to the read-only integration query policy. One canonical
+`/bin/bash -lc` wrapper is normalized; alternate options, references, deletes,
+and writes remain forbidden. Explicit resume may migrate only the exact 0.2.13
+`BLOCKED / FORBIDDEN_OPERATION` diagnostic naming that wrapped command. It
+requires the matching completed request and binding, canonical retry-safe turn
+items, successful request-bound controlled patch, unchanged frozen sources,
+clean authorized target, source ancestry, and authoritative result. The store
+atomically archives only the completed confirmation and reacquires the
+repository lock on the same Run. The retried Primary prompt forbids another
+patch, merge, staging, or commit. Every near-match, uncertain command, side
+effect, identity drift, or existing accepted result fails closed.
+
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the
 [legacy v1 protocol](protocol-v1.md).

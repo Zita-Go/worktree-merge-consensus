@@ -135,6 +135,17 @@ exact active ephemeral generation and frozen history hash, and the archived
 completed patch attempt for the same request. The migration does not rewrite
 the pending row or binding. Every near-match remains terminal.
 
+Release 0.2.14 treats exactly `git symbolic-ref --short HEAD` in the frozen
+Primary worktree as a read-only current-branch query, including one canonical
+`/bin/bash -lc` wrapper and no other `symbolic-ref` form. It may explicitly
+resume only the exact 0.2.13 `BLOCKED / FORBIDDEN_OPERATION` diagnostic naming
+that wrapped command. Recovery revalidates the completed request and binding,
+canonical read-only command history, successful controlled patch, unchanged
+sources, clean target, ancestry, and authoritative result. It atomically
+archives only the completed confirmation and reacquires the lock on the same
+Run; the retry must not call `consensus_apply_patch` or repeat merge, staging,
+or commit. Every near-match or side-effect remains terminal.
+
 The launcher may call only the operator-facing `consensus_*` tools listed
 above. It must never ask the invoking task to find, install, expose, or call
 participant-side `consensus_apply_patch`; injection, preflight, and any
@@ -384,6 +395,17 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   persisted Source with participant configuration, and performs the normal
   proven-unsent replacement. It never repeats the patch, merge, staging, or
   commit. Every near-match remains terminal.
+- If a matching v0.2.13 binary left that Run `BLOCKED` with
+  `FORBIDDEN_OPERATION` and exact detail
+  `patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git symbolic-ref --short HEAD'`,
+  install matching v0.2.14 binary and plugin artifacts, then explicitly call
+  `consensus_resume` once. Recovery is limited to the exact completed pending
+  Primary integration request and binding, canonical retry-safe turn history,
+  successful request-bound controlled patch, unchanged frozen sources, clean
+  authorized target, source ancestry, and authoritative result. It archives
+  only the confirmation, keeps the same Run, branch, commit, and source refs,
+  and requests the result without another patch, merge, staging, or commit.
+  Any near-match remains terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
 Read [references/protocol.md](references/protocol.md) when explaining lifecycle states, acceptance evidence, or recovery behavior.

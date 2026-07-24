@@ -288,6 +288,22 @@ or binding; subsequent rotation still requires the exact active generation,
 frozen history hash, request hash, and archived completed patch attempt, with
 no task ID, turn ID, or turn-start intent. Every near-match remains terminal.
 
+Version 0.2.14 permits exactly `git symbolic-ref --short HEAD` in the frozen
+Primary worktree as a read-only current-branch query. One canonical
+`/bin/bash -lc` App Server wrapper is normalized before the same exact check;
+all other `symbolic-ref` options, references, deletes, and writes remain
+forbidden. An explicit resume may migrate only the exact 0.2.13
+`BLOCKED / FORBIDDEN_OPERATION` diagnostic
+`patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git symbolic-ref --short HEAD'`.
+Before retrying, the coordinator revalidates the completed request turn and
+binding, canonical read-only command history, successful controlled-patch
+provenance, unchanged frozen sources, clean authorized target, source
+ancestry, and authoritative integration result. It atomically archives only
+the completed confirmation and reacquires the repository lock on the same Run,
+then requests the result confirmation without another patch, merge, staging,
+or commit. Any near-match, side-effectful history, changed identity, or
+existing accepted result remains terminal.
+
 Read [the v2 participant protocol](docs/protocol-v2.md), the
 [legacy v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
@@ -316,8 +332,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.13-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.13-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.14-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.14-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or

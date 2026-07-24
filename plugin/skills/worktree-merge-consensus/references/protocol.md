@@ -252,6 +252,19 @@ start intent, the exact active ephemeral generation and frozen history hash,
 and the archived completed patch attempt for the same request. It preserves
 the same Run and pending row; every near-match remains terminal.
 
+Release 0.2.14 allows exactly `git symbolic-ref --short HEAD` in the frozen
+Primary worktree as a read-only current-branch query. One canonical
+`/bin/bash -lc` wrapper is accepted; every alternate `symbolic-ref` form is
+rejected. Explicit resume may migrate only the exact 0.2.13
+`BLOCKED / FORBIDDEN_OPERATION` diagnostic naming that wrapped query.
+Recovery revalidates the completed request and binding, canonical retry-safe
+turn history, successful controlled patch, unchanged frozen sources, clean
+target, ancestry, and authoritative result. It atomically archives only the
+confirmation and reacquires the lock on the same Run, then requests the result
+without another patch, merge, staging, or commit. Near-matches, uncertain
+commands, side effects, identity drift, and accepted-result state remain
+terminal.
+
 The same release contains one migration only for the exact legacy 0.2.4
 blocked-verification history: the same Run, Primary task, request, round,
 verification clone, integration branch and SHA, frozen refs, and three archived

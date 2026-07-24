@@ -145,7 +145,14 @@ the evidence below.
    the exact 0.2.12 `BLOCKED / HISTORY_UNAVAILABLE` boundary and confirm one
    explicit resume keeps the same Run and request before completing. Then add
    start intent or a sent identity and confirm recovery is rejected without a
-   refork or resend. Interrupt one `thread/fork` response after dispatch and
+   refork or resend. Complete an integration turn containing the exact
+   `/bin/bash -lc 'git symbolic-ref --short HEAD'` query, recreate the 0.2.13
+   `BLOCKED / FORBIDDEN_OPERATION` diagnostic for it, and confirm one explicit
+   resume archives only the confirmation while preserving the same Run,
+   branch, commit, patch provenance, and source refs. Confirm no second patch,
+   merge, staging, or commit occurs. Repeat with a two-argument
+   `git symbolic-ref` write and confirm recovery is rejected. Interrupt one
+   `thread/fork` response after dispatch and
    confirm the non-idempotent request is not automatically repeated.
 8. Verify `accepted_result` records the authoritative tests,
    `source_refs_unchanged: true`, and local-only/no-push/no-PR fields. Verify the

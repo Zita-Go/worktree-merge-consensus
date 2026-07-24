@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.14
+
+- Permit exactly `git symbolic-ref --short HEAD`, either directly or through
+  one canonical App Server shell wrapper, as a read-only current-branch query
+  in the frozen Primary worktree.
+- Keep every other `git symbolic-ref` form forbidden, including alternate
+  references, option variants, deletes, and two-argument writes.
+- Add an explicit same-Run migration for the exact 0.2.13
+  `FORBIDDEN_OPERATION` blocker produced after a successful integration when
+  that one query was misclassified during the read-only confirmation.
+- Revalidate the completed turn, request and binding provenance, successful
+  controlled patch, frozen source refs, clean target, source ancestry, and
+  authoritative integration result before atomically archiving only the
+  confirmation and reacquiring the repository lock.
+- Retry only the result confirmation; never repeat the patch, merge, staging,
+  or commit, and keep every near-match or side-effectful history terminal.
+
 ## 0.2.13
 
 - Load a persisted Source Primary reported as `notLoaded` with the
