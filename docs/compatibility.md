@@ -213,6 +213,18 @@ delivery therefore fail closed without a second `turn/start` or replacement
 fork. Stored Source, Reviewer, and direct Primary tasks keep the canonical
 full-history path.
 
+Version 0.2.9 accepts canonical nonzero terminal results only for retry-safe
+read-only integration inspections. Approved writes still require
+`completed`/exit-zero evidence. This permits explicit same-Run recovery of the
+exact completed integration response that was blocked only after its
+request-bound patch and commit succeeded. Recovery reuses the existing branch
+and SHA after checking patch provenance, frozen refs, ancestry, and
+cleanliness; it archives one response attempt and sends one read-only
+confirmation. The live command gate does not approve `git diff --no-index`;
+only the exact historical `/dev/null` to normalized repository-relative path
+shape is recovery-safe. An explicit null `pluginId` is compatible only for the
+exact injected participant server and controlled patch tool.
+
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
 fixed task ID for persisted direct and Reviewer tasks. Ephemeral Effective
 Primary tasks are already loaded and must not be resumed. `thread/read` can

@@ -83,6 +83,15 @@ preflight; and permits one request-bound corrective patch and commit. The
 integration SHA must advance and all frozen verification reruns. Installing or
 enabling the operator plugin alone never mutates a blocked Run.
 
+Version 0.2.9 also permits explicit same-Run recovery of one exact completed
+integration turn whose request-bound patch and commit succeeded before the
+legacy command audit blocked it. Approved writes must still be completed with
+exit code zero; only retry-safe read-only inspections may have a canonical
+numeric nonzero result. Recovery revalidates the frozen refs, patch record,
+clean target, ancestry, and SHA, archives only that response attempt, and
+requests one read-only confirmation without repeating any write. Every
+near-match remains terminal.
+
 Preflight reason codes include `UNREGISTERED_WORKTREE`,
 `DUPLICATE_WORKTREE`, `REPOSITORY_MISMATCH`, `DIRTY_WORKTREE`, and
 `WORKTREE_UNAVAILABLE`. Once frozen, a task may reject an incorrect

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.9
+
+- Audit integration commands by side effect: approved writes still require a
+  canonical completed result with exit code zero, while retry-safe read-only
+  inspections may be archived after a canonical nonzero terminal result.
+- Recover the exact completed integration turn that successfully applied its
+  request-bound patch and commit before the legacy command audit blocked it.
+  Explicit resume preserves the same Run and existing integration result,
+  archives only the rejected response attempt, and requests one read-only
+  confirmation without repeating a write.
+- Accept an explicit null App Server `pluginId` only for the exact injected
+  participant server and patch tool, while retaining all request, generation,
+  patch-hash, and source-identity checks.
+- Match retry diagnostics to a provenance-complete ephemeral Effective Primary
+  without weakening the frozen Source Primary identity.
+- Direct Primary integration turns to use `git ls-files` when `rg` is absent
+  and to stage new files before inspecting them instead of using
+  `git diff --no-index`.
+
 ## 0.2.8
 
 - Support Codex App Server ephemeral task constraints by using summary-only

@@ -233,6 +233,19 @@ therefore never resent, and a missing terminal event fails closed instead of
 querying unsupported ephemeral history. Stored Source, Reviewer, and direct
 Primary tasks retain canonical full-history recovery.
 
+Version 0.2.9 makes completed integration auditing side-effect-aware. Approved
+write commands still require a canonical completed result with exit code zero;
+retry-safe read-only inspections may have a canonical nonzero terminal result
+without being mistaken for a failed write. Explicit `consensus_resume` may
+recover only the exact completed integration turn whose request-bound patch and
+commit already succeeded before the old audit blocked it. Recovery revalidates
+the frozen sources, patch provenance, clean target branch, ancestry, and final
+SHA, archives only that response attempt, and requests one read-only
+`INTEGRATION_READY` confirmation on the same Run. It never repeats the patch,
+branch creation, merge, staging, or commit. An injected participant call may
+carry an explicit null App Server `pluginId` only when its server and tool
+identity are exact; missing or mismatched identity still fails closed.
+
 Read [the v2 participant protocol](docs/protocol-v2.md), the
 [legacy v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
@@ -261,8 +274,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.8-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.8-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.9-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.9-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or

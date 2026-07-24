@@ -202,6 +202,21 @@ turn-start intent before dispatch; if delivery becomes uncertain without a
 turn ID, automatic resend and refork are forbidden. Stored Source, Reviewer,
 and direct Primary histories continue to use canonical full-history reads.
 
+Release 0.2.9 makes post-turn integration command auditing side-effect-aware.
+Approved write commands remain canonical only when completed with exit code
+zero. Retry-safe read-only commands may have a numeric nonzero terminal result;
+this is archival safety, not evidence that the check succeeded. Explicit
+same-Run resume is available only when the exact request-bound controlled patch
+and integration commit already succeeded and the legacy audit then blocked the
+completed turn. Recovery verifies the successful patch record, frozen refs,
+clean target result, both source ancestors, and final SHA, archives only that
+response attempt, and starts one read-only confirmation turn without repeating
+the branch, merge, patch, staging, or commit. The historical
+`git diff --no-index -- /dev/null <normalized-relative-path>` form is accepted
+only by this recovery audit and remains denied by live approval. An explicit
+null App Server `pluginId` is accepted only for the exact injected participant
+server and patch tool.
+
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the
 [legacy v1 protocol](protocol-v1.md).

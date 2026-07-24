@@ -82,6 +82,19 @@ Persisted start intent prevents uncertain delivery from being resent. Reviewer
 routing and both frozen source identities are unchanged. A pending or
 uncertain turn is never reforked or resent.
 
+Release 0.2.9 makes completed integration command auditing side-effect-aware.
+Approved writes still require canonical completion with exit code zero.
+Retry-safe read-only inspections may terminate canonically with a numeric
+nonzero result and can be archived only as evidence for an explicit same-Run
+recovery. That recovery is limited to a completed integration turn whose exact
+request-bound patch and commit already succeeded. It revalidates patch
+provenance, frozen refs, target ancestry, cleanliness, and final SHA, archives
+only the rejected response attempt, and requests one read-only confirmation;
+it never repeats the patch or another write. An explicit null App Server
+`pluginId` is accepted only for the exact injected participant server and
+`consensus_apply_patch` tool. Missing identity, an unsafe read, any nonzero
+write, or any near-match still fails closed.
+
 The launcher may call only the operator-facing `consensus_*` tools listed
 above. It must never ask the invoking task to find, install, expose, or call
 participant-side `consensus_apply_patch`; injection, preflight, and any
@@ -287,6 +300,19 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   correction commit. The new SHA must advance and all frozen verification
   reruns. Installation alone does not mutate the blocked Run; every near-match
   remains terminal.
+- If a v0.2.8 Run is `BLOCKED` with `FORBIDDEN_OPERATION` after the
+  request-bound patch and integration commit completed, install matching
+  v0.2.9 binary and plugin artifacts, then explicitly call
+  `consensus_resume`. Recovery is available only when the originating
+  diagnostic is the completed integration command audit and every archived
+  item is canonical: writes completed with exit code zero, while only
+  retry-safe read-only inspections may have a numeric nonzero terminal result.
+  The coordinator revalidates the successful patch record, frozen refs, clean
+  target, both ancestors, and final SHA; archives only that completed response;
+  and asks the same Effective Primary for one read-only confirmation. It does
+  not recreate the branch, re-merge, reapply the patch, stage, or commit.
+  Unsafe `git diff --no-index`, a failed write, uncertain delivery, changed
+  identity, or drift remains terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
 Read [references/protocol.md](references/protocol.md) when explaining lifecycle states, acceptance evidence, or recovery behavior.

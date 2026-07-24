@@ -283,4 +283,3 @@ Expected: version `0.2.9`, doctor `Ready`, plugin enabled at `0.2.9`.
 - [ ] **Step 5: Resume and accept Run `433797ff-11b2-49b9-9873-ff1179740da8`**
 
 Resume the same Run. Verify it reuses the existing target branch and successful patch, executes all frozen tests in isolation, receives Reviewer approval for the exact final SHA, preserves both source refs and clean source worktrees, and leaves only the local integration branch.
-

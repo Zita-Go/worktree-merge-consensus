@@ -204,6 +204,20 @@ pre-dispatch start intent prevent changed-history reforks and duplicate sends.
 Missing terminal evidence fails closed. Stored Source, Reviewer, and direct
 Primary tasks retain full-history recovery.
 
+Release 0.2.9 separates canonical terminal shape from side-effect policy when
+auditing a completed integration turn. Approved writes remain valid only as
+`completed` with exit code zero. Retry-safe read-only inspections may terminate
+with a numeric nonzero code, but that result is not considered a successful
+check; it is only safe to archive before a fresh read-only confirmation.
+Explicit resume is limited to the exact turn whose request-bound controlled
+patch and integration commit already succeeded. The same Run revalidates the
+patch record, frozen refs, clean target result, both source ancestors, and
+final SHA, archives only the rejected response, and forbids all repeated
+writes. One recovery-only `git diff --no-index -- /dev/null <relative-path>`
+shape is recognized only in historical evidence and never enters the live
+approval allowlist. An explicit null `pluginId` is compatible only with the
+exact injected participant server and patch tool.
+
 The same release contains one migration only for the exact legacy 0.2.4
 blocked-verification history: the same Run, Primary task, request, round,
 verification clone, integration branch and SHA, frozen refs, and three archived
