@@ -1502,7 +1502,7 @@ async fn completed_integration_forbidden_read_only_nonzero_resumes_the_same_run(
             "cwd": "/repo/primary",
             "status": status,
             "exitCode": exit_code,
-            "source": "agent",
+            "source": "unifiedExecStartup",
         })
     };
     for item in [
@@ -3031,7 +3031,7 @@ async fn interrupted_forbidden_operation_with_terminal_read_only_queries_retries
             "cwd": "/repo/primary",
             "status": "completed",
             "exitCode": 0,
-            "source": "agent"
+            "source": "unifiedExecStartup"
         }),
     );
     app.append_turn_item(
@@ -3044,7 +3044,7 @@ async fn interrupted_forbidden_operation_with_terminal_read_only_queries_retries
             "cwd": "/repo/primary",
             "status": "completed",
             "exitCode": 0,
-            "source": "agent"
+            "source": "unifiedExecStartup"
         }),
     );
     app.append_turn_item(
@@ -3057,7 +3057,7 @@ async fn interrupted_forbidden_operation_with_terminal_read_only_queries_retries
             "cwd": "/repo/primary",
             "status": "declined",
             "exitCode": null,
-            "source": "agent"
+            "source": "unifiedExecStartup"
         }),
     );
     app.append_turn_item(
@@ -3070,7 +3070,7 @@ async fn interrupted_forbidden_operation_with_terminal_read_only_queries_retries
             "cwd": "/repo/primary",
             "status": "declined",
             "exitCode": null,
-            "source": "agent"
+            "source": "unifiedExecStartup"
         }),
     );
     app.append_turn_item(
@@ -3083,7 +3083,7 @@ async fn interrupted_forbidden_operation_with_terminal_read_only_queries_retries
             "cwd": "/repo/primary",
             "status": "declined",
             "exitCode": null,
-            "source": "agent"
+            "source": "unifiedExecStartup"
         }),
     );
     app.set_turn_status("primary", "turn-5", "interrupted");

@@ -5188,6 +5188,14 @@ fn controlled_patch_mcp_identity_blocker_for_recovery(
     None
 }
 
+fn has_agent_initiated_command_source(item: &Value) -> bool {
+    match item.get("source") {
+        None => true,
+        Some(Value::String(source)) => matches!(source.as_str(), "agent" | "unifiedExecStartup"),
+        Some(_) => false,
+    }
+}
+
 fn integration_command_blocker(state: &RunState, item: &Value) -> Option<String> {
     let Some(command) = item.get("command").and_then(Value::as_str) else {
         return Some("integration command omits its canonical command".into());
@@ -5195,10 +5203,7 @@ fn integration_command_blocker(state: &RunState, item: &Value) -> Option<String>
     let Some(cwd) = item.get("cwd").and_then(Value::as_str) else {
         return Some("integration command omits its canonical cwd".into());
     };
-    if item
-        .get("source")
-        .is_some_and(|source| source.as_str() != Some("agent"))
-    {
+    if !has_agent_initiated_command_source(item) {
         return Some("integration command has a non-agent source".into());
     }
 
@@ -5729,9 +5734,7 @@ fn interrupted_forbidden_operation_retry_blocker(state: &RunState, turn: &Value)
                 let Some(cwd) = item.get("cwd").and_then(Value::as_str) else {
                     return Some("read-only command execution omits its canonical cwd".into());
                 };
-                if item
-                    .get("source")
-                    .is_some_and(|source| source.as_str() != Some("agent"))
+                if !has_agent_initiated_command_source(item)
                     || !is_retry_safe_read_only_integration_command(state, cwd, command)
                 {
                     return Some(
@@ -6957,7 +6960,7 @@ mod retry_safety_tests {
                 "cwd": "/repo/primary",
                 "status": status,
                 "exitCode": exit_code,
-                "source": "agent",
+                "source": "unifiedExecStartup",
             })
         };
         let turn = json!({
@@ -7004,6 +7007,43 @@ mod retry_safety_tests {
             ),
             None
         );
+
+        let mut legacy_default = turn.clone();
+        legacy_default["items"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("source");
+        assert_eq!(
+            recoverable_integration_turn_blocker(
+                &state,
+                &legacy_default,
+                request_hash,
+                &successful_hash,
+                false,
+            ),
+            None
+        );
+
+        for source in [
+            json!("userShell"),
+            json!("unifiedExecInteraction"),
+            json!("unknown"),
+            Value::Null,
+        ] {
+            let mut non_agent = turn.clone();
+            non_agent["items"][1]["source"] = source;
+            assert!(
+                recoverable_integration_turn_blocker(
+                    &state,
+                    &non_agent,
+                    request_hash,
+                    &successful_hash,
+                    false,
+                )
+                .unwrap()
+                .contains("non-agent source")
+            );
+        }
 
         let mut failed_write = turn;
         failed_write["items"][2]["status"] = json!("failed");
