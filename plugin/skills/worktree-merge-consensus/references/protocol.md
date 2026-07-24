@@ -265,6 +265,20 @@ without another patch, merge, staging, or commit. Near-matches, uncertain
 commands, side effects, identity drift, and accepted-result state remain
 terminal.
 
+Release 0.2.15 recognizes the production two-attempt form of that recovery.
+The successful controlled patch must be the one SQLite record attributed to an
+archived completed ephemeral Primary attempt with the exact frozen binding
+lineage. The current completed attempt is audited separately and must contain
+no MCP, file-change, or dynamic-tool item. Only canonical messages, reasoning,
+context compaction, the final response, and agent-initiated, exit-zero,
+retry-safe read-only commands in the Primary cwd before that response are
+accepted. Frozen refs, clean target, ancestry, and the authoritative result
+must still revalidate. Only the current confirmation is archived, preserving
+the same Run, request, branch, commit, binding lineage, and single patch
+record. A matching 0.2.14 resume that failed before state mutation with
+`MODEL_RESPONSE_RETRY_UNSAFE` may be explicitly retried once with 0.2.15 while
+the exact original blocker remains recorded.
+
 The same release contains one migration only for the exact legacy 0.2.4
 blocked-verification history: the same Run, Primary task, request, round,
 verification clone, integration branch and SHA, frozen refs, and three archived

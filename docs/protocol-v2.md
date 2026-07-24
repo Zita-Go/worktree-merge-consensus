@@ -269,6 +269,21 @@ repository lock on the same Run. The retried Primary prompt forbids another
 patch, merge, staging, or commit. Every near-match, uncertain command, side
 effect, identity drift, or existing accepted result fails closed.
 
+Release 0.2.15 supports the production two-attempt evidence shape for that
+same migration. The single successful controlled patch is validated from an
+archived completed ephemeral Primary attempt and its frozen binding lineage;
+the current completed turn is separately required to be a patch-free,
+side-effect-free result confirmation. Only canonical messages, reasoning,
+context compaction, the final response, and agent-initiated, exit-zero,
+retry-safe read-only commands in the Primary cwd before that response are
+allowed. MCP calls, file changes, dynamic tools, writes, uncertain commands,
+and commands after the response fail closed. The coordinator revalidates the
+frozen refs and authoritative target before archiving only the current
+confirmation and retrying the same Run without changing its branch, commit,
+request, or one-patch record. This also permits one explicit 0.2.15 resume
+after a matching 0.2.14 resume failed before state mutation with
+`MODEL_RESPONSE_RETRY_UNSAFE` and left the exact original blocker intact.
+
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the
 [legacy v1 protocol](protocol-v1.md).

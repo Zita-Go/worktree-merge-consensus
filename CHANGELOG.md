@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.15
+
+- Recover the production confirmation shape in which the one successful
+  controlled patch belongs to an archived ephemeral Primary attempt while the
+  current completed attempt contains only read-only result confirmation.
+- Validate the archived patch record and frozen Source lineage separately from
+  the current confirmation turn instead of requiring a second patch call in
+  that turn.
+- Permit only canonical, agent-initiated, exit-zero read-only commands in the
+  Primary worktree before the final response; reject MCP calls, file changes,
+  dynamic tools, writes, uncertain commands, and commands after the response.
+- Revalidate the unchanged frozen refs, clean authorized target, source
+  ancestry, and authoritative integration result before archiving only the
+  current confirmation and retrying the same Run.
+- Preserve the existing integration branch, commit, request, binding lineage,
+  and single patch record; never repeat the patch, merge, staging, or commit.
+
 ## 0.2.14
 
 - Permit exactly `git symbolic-ref --short HEAD`, either directly or through

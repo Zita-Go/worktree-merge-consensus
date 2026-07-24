@@ -304,6 +304,23 @@ then requests the result confirmation without another patch, merge, staging,
 or commit. Any near-match, side-effectful history, changed identity, or
 existing accepted result remains terminal.
 
+Version 0.2.15 completes that migration for the production retry shape. The
+single successful controlled patch may belong to an archived ephemeral
+Primary attempt while the current completed attempt contains only the
+read-only result confirmation. Recovery validates the archived patch record,
+request hash, frozen Source lineage, and active binding separately from the
+current confirmation. The current turn must contain only canonical
+user/reasoning/compaction/final-response items and agent-initiated, exit-zero,
+retry-safe read-only commands in the Primary worktree before the final
+response; any MCP call, file change, dynamic tool, write, uncertain command,
+or later command remains terminal. The coordinator then revalidates the
+unchanged sources and authoritative target, archives only that confirmation,
+and retries the same Run without changing its branch, commit, or one-patch
+record. A 0.2.14 resume that failed with
+`MODEL_RESPONSE_RETRY_UNSAFE` before state mutation can therefore be retried
+explicitly with matching 0.2.15 artifacts while the original exact 0.2.13
+blocker remains recorded.
+
 Read [the v2 participant protocol](docs/protocol-v2.md), the
 [legacy v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
@@ -332,8 +349,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.14-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.14-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.15-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.15-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or

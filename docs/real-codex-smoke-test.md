@@ -151,7 +151,14 @@ the evidence below.
    resume archives only the confirmation while preserving the same Run,
    branch, commit, patch provenance, and source refs. Confirm no second patch,
    merge, staging, or commit occurs. Repeat with a two-argument
-   `git symbolic-ref` write and confirm recovery is rejected. Interrupt one
+   `git symbolic-ref` write and confirm recovery is rejected. Repeat the
+   production layout with the successful patch on an archived ephemeral
+   Primary attempt and a separate current confirmation-only attempt. Confirm
+   matching 0.2.15 artifacts accept only the patch-free, read-only
+   confirmation, preserve exactly one patch record, and resume the same Run.
+   Add an MCP call, file change, dynamic tool, failed or uncertain command, or
+   command after the final response and confirm each variant remains
+   terminal. Interrupt one
    `thread/fork` response after dispatch and
    confirm the non-idempotent request is not automatically repeated.
 8. Verify `accepted_result` records the authoritative tests,

@@ -293,6 +293,27 @@ replacement prompt forbids another controlled patch, merge, staging, or
 commit. Changed identity, side effects, uncertain execution, a near-match
 diagnostic, or an existing accepted result remains terminal.
 
+Version 0.2.15 corrects the second-stage inspection used by that migration.
+In production, the successful controlled patch may be attached to an archived
+ephemeral Primary attempt while the current completed attempt contains only
+the result confirmation. The coordinator first validates the one SQLite patch
+record against the archived completed binding and frozen Source lineage, then
+audits the current confirmation independently. That current turn must contain
+no MCP, file-change, or dynamic-tool item. It may contain only canonical
+message, reasoning, context-compaction, and final-response items plus
+agent-initiated commands in the Primary cwd that complete with exit code zero
+and match the exact retry-safe read-only policy before the final response.
+The unchanged source refs, clean target, source ancestry, and authoritative
+result are revalidated before only the current confirmation is archived.
+
+A 0.2.14 explicit resume can fail with `MODEL_RESPONSE_RETRY_UNSAFE` before
+any state mutation because it incorrectly required the current confirmation
+to contain the already archived patch. If the same Run still records the
+exact 0.2.13 blocker and all identities remain unchanged, matching 0.2.15
+binary and plugin artifacts may explicitly resume it once. The same Run,
+request, integration branch, commit, binding lineage, and single patch record
+are preserved; patch, merge, staging, and commit are never repeated.
+
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
 fixed task ID for persisted direct and Reviewer tasks. Ephemeral Effective
 Primary tasks are already loaded and must not be resumed. `thread/read` can

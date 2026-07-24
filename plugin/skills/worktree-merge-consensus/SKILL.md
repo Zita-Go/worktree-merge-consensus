@@ -146,6 +146,18 @@ archives only the completed confirmation and reacquires the lock on the same
 Run; the retry must not call `consensus_apply_patch` or repeat merge, staging,
 or commit. Every near-match or side-effect remains terminal.
 
+Release 0.2.15 handles the production shape in which that successful patch is
+on an archived completed ephemeral Primary attempt and the current completed
+attempt is only a patch-free, read-only result confirmation. It validates the
+archived patch record and frozen binding lineage separately, then permits only
+canonical messages, reasoning, context compaction, a final response, and
+agent-initiated, exit-zero, retry-safe read-only commands in the Primary cwd
+before that response. MCP calls, file changes, dynamic tools, writes,
+uncertain commands, and commands after the response remain terminal. Recovery
+revalidates the frozen sources and authoritative target, archives only the
+current confirmation, and preserves the same Run, branch, commit, request,
+binding lineage, and single patch record.
+
 The launcher may call only the operator-facing `consensus_*` tools listed
 above. It must never ask the invoking task to find, install, expose, or call
 participant-side `consensus_apply_patch`; injection, preflight, and any
@@ -406,6 +418,19 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   only the confirmation, keeps the same Run, branch, commit, and source refs,
   and requests the result without another patch, merge, staging, or commit.
   Any near-match remains terminal.
+- If a matching v0.2.14 explicit resume of that exact Run returned
+  `MODEL_RESPONSE_RETRY_UNSAFE` before state mutation and `consensus_status`
+  still reports the original exact 0.2.13 blocker, install matching v0.2.15
+  binary and plugin artifacts, then explicitly call `consensus_resume` once.
+  This path requires one successful patch record on an archived completed
+  ephemeral Primary attempt and a separate current completed confirmation
+  with no MCP, file-change, or dynamic-tool items. Every command must be
+  agent-initiated, exit-zero, retry-safe, in the Primary cwd, and before the
+  final response. The coordinator revalidates the frozen refs and
+  authoritative target, archives only the confirmation, and preserves the
+  same Run, branch, commit, request, binding lineage, source refs, and single
+  patch record. Any state mutation, identity drift, second patch, side effect,
+  uncertain command, or near-match remains terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
 Read [references/protocol.md](references/protocol.md) when explaining lifecycle states, acceptance evidence, or recovery behavior.

@@ -134,6 +134,20 @@ Only the confirmation turn is archived and retried; patch, merge, staging, and
 commit are never repeated. Every near-match or side-effectful history remains
 terminal.
 
+Version 0.2.15 accepts the production evidence layout in which the one
+successful controlled patch is on an archived completed ephemeral Primary
+attempt and the current completed attempt is only a read-only confirmation.
+Patch provenance, request hash, frozen Source lineage, and the current binding
+are validated independently from that confirmation. The current turn must be
+patch-free and side-effect-free: only canonical message/reasoning/compaction
+items, a final response, and agent-initiated, exit-zero, retry-safe read-only
+commands in the Primary cwd before the response are allowed. After frozen refs
+and the authoritative target revalidate, only the confirmation is archived
+and the same Run is retried without changing its branch, commit, request, or
+single patch record. A matching 0.2.14 resume that failed before state
+mutation with `MODEL_RESPONSE_RETRY_UNSAFE` may be explicitly retried once
+with 0.2.15 while the exact original blocker remains recorded.
+
 Preflight reason codes include `UNREGISTERED_WORKTREE`,
 `DUPLICATE_WORKTREE`, `REPOSITORY_MISMATCH`, `DIRTY_WORKTREE`, and
 `WORKTREE_UNAVAILABLE`. Once frozen, a task may reject an incorrect
