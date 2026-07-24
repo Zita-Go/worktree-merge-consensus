@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.10
+
+- Revalidate a completed-integration command-audit recovery with the authorized
+  integration-in-progress policy instead of requiring the Primary worktree to
+  remain checked out at its frozen source HEAD.
+- Preserve the same frozen source-ref, reviewer-worktree, target-branch, patch,
+  ancestry, cleanliness, and final-SHA checks while allowing the Primary
+  worktree to be attached to the already-created integration branch.
+- Add a regression test that makes the frozen-HEAD check fail after a
+  successful integration commit and proves same-Run recovery uses the
+  authorized target-branch path.
+
 ## 0.2.9
 
 - Audit integration commands by side effect: approved writes still require a

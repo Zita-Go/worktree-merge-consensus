@@ -218,6 +218,13 @@ shape is recognized only in historical evidence and never enters the live
 approval allowlist. An explicit null `pluginId` is compatible only with the
 exact injected participant server and patch tool.
 
+Release 0.2.10 uses the integration-in-progress repository check before that
+completed-turn recovery. The Primary worktree may already be attached to the
+exact authorized target branch, while the frozen source refs and Reviewer
+worktree must remain unchanged. The existing authoritative target, patch
+record, source ancestry, cleanliness, changed-file, and final-SHA checks still
+run before the response attempt is archived.
+
 The same release contains one migration only for the exact legacy 0.2.4
 blocked-verification history: the same Run, Primary task, request, round,
 verification clone, integration branch and SHA, frozen refs, and three archived

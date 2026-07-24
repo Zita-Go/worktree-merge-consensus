@@ -225,6 +225,13 @@ only the exact historical `/dev/null` to normalized repository-relative path
 shape is recovery-safe. An explicit null `pluginId` is compatible only for the
 exact injected participant server and controlled patch tool.
 
+Version 0.2.10 replaces the completed-integration recovery's frozen-worktree
+HEAD preflight with the existing integration-in-progress check. This permits
+the Primary worktree to be attached to the exact authorized target after its
+successful commit, while continuing to require unchanged source refs, a frozen
+Reviewer worktree, and the same repository. All later authoritative integration
+result checks remain unchanged.
+
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
 fixed task ID for persisted direct and Reviewer tasks. Ephemeral Effective
 Primary tasks are already loaded and must not be resumed. `thread/read` can

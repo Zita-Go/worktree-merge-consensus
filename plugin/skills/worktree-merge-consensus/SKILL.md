@@ -95,6 +95,15 @@ it never repeats the patch or another write. An explicit null App Server
 `consensus_apply_patch` tool. Missing identity, an unsafe read, any nonzero
 write, or any near-match still fails closed.
 
+Release 0.2.10 corrects that recovery's repository preflight. A successful
+integration turn leaves the Primary worktree attached to the authorized target,
+so recovery validates the integration-in-progress state instead of requiring
+the worktree HEAD to equal the frozen Primary SHA. The check still requires the
+Reviewer worktree and both frozen source refs to remain unchanged and permits
+the Primary worktree only on its source or the exact target branch. Patch
+provenance, target cleanliness, both source ancestors, changed files, and final
+SHA are then revalidated exactly as before.
+
 The launcher may call only the operator-facing `consensus_*` tools listed
 above. It must never ask the invoking task to find, install, expose, or call
 participant-side `consensus_apply_patch`; injection, preflight, and any
@@ -300,9 +309,9 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   correction commit. The new SHA must advance and all frozen verification
   reruns. Installation alone does not mutate the blocked Run; every near-match
   remains terminal.
-- If a v0.2.8 Run is `BLOCKED` with `FORBIDDEN_OPERATION` after the
+- If a v0.2.8 or v0.2.9 Run is `BLOCKED` with `FORBIDDEN_OPERATION` after the
   request-bound patch and integration commit completed, install matching
-  v0.2.9 binary and plugin artifacts, then explicitly call
+  v0.2.10 binary and plugin artifacts, then explicitly call
   `consensus_resume`. Recovery is available only when the originating
   diagnostic is the completed integration command audit and every archived
   item is canonical: writes completed with exit code zero, while only
@@ -313,6 +322,9 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   not recreate the branch, re-merge, reapply the patch, stage, or commit.
   Unsafe `git diff --no-index`, a failed write, uncertain delivery, changed
   identity, or drift remains terminal.
+  If v0.2.9 already returned `SOURCE_DRIFT: primary HEAD changed after freeze`
+  for this exact state, it made no Run or Git mutation; after installing
+  v0.2.10, explicitly resume the same Run once.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
 Read [references/protocol.md](references/protocol.md) when explaining lifecycle states, acceptance evidence, or recovery behavior.

@@ -92,6 +92,12 @@ clean target, ancestry, and SHA, archives only that response attempt, and
 requests one read-only confirmation without repeating any write. Every
 near-match remains terminal.
 
+Version 0.2.10 performs that recovery's initial repository check with the
+integration-in-progress policy. It permits the Primary worktree to be attached
+to the exact authorized target after a successful commit, but still requires
+the Reviewer worktree and frozen source refs to remain unchanged and then
+revalidates the authoritative target result.
+
 Preflight reason codes include `UNREGISTERED_WORKTREE`,
 `DUPLICATE_WORKTREE`, `REPOSITORY_MISMATCH`, `DIRTY_WORKTREE`, and
 `WORKTREE_UNAVAILABLE`. Once frozen, a task may reject an incorrect

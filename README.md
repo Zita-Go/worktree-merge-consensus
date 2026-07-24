@@ -246,6 +246,16 @@ branch creation, merge, staging, or commit. An injected participant call may
 carry an explicit null App Server `pluginId` only when its server and tool
 identity are exact; missing or mismatched identity still fails closed.
 
+Version 0.2.10 corrects the recovery preflight for that completed integration
+case. Once the authorized branch and commit already exist, the Primary
+worktree is expected to be attached to the integration branch rather than its
+frozen source HEAD. Recovery therefore uses the integration-in-progress check,
+which still requires the original source refs to be unchanged, the Reviewer
+worktree to remain frozen, and the Primary worktree to be in the same
+repository on either its source or the exact authorized target. The subsequent
+patch-provenance, clean-target, ancestry, changed-file, and final-SHA checks are
+unchanged.
+
 Read [the v2 participant protocol](docs/protocol-v2.md), the
 [legacy v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
@@ -274,8 +284,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.9-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.9-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.10-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.10-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or

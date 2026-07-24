@@ -217,6 +217,14 @@ only by this recovery audit and remains denied by live approval. An explicit
 null App Server `pluginId` is accepted only for the exact injected participant
 server and patch tool.
 
+Release 0.2.10 corrects the repository preflight for this recovery. After the
+successful commit, the Primary worktree may be attached to the exact authorized
+target branch instead of the frozen source HEAD. The
+integration-in-progress check still requires an unchanged Reviewer worktree,
+unchanged frozen source refs, and the same repository. Authoritative target,
+patch provenance, source ancestry, cleanliness, changed files, and final SHA
+are revalidated before archival.
+
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the
 [legacy v1 protocol](protocol-v1.md).
