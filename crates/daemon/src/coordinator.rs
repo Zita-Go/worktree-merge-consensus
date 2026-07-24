@@ -1970,13 +1970,33 @@ where
                 ));
             }
         };
-        if let Some(blocker) = recoverable_integration_turn_blocker(
-            state,
-            &turn,
-            &pending.message_hash,
-            &successful_patch_hash,
-            allow_legacy_server,
-        ) {
+        let has_archived_attempt = !self
+            .store
+            .archived_turn_ids(&run_id, &pending.message_hash)?
+            .is_empty();
+        let current_turn_has_patch_call = turn
+            .get("items")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|item| item.get("type").and_then(Value::as_str) == Some("mcpToolCall"));
+        let blocker = if current_turn_has_patch_call {
+            recoverable_integration_turn_blocker(
+                state,
+                &turn,
+                &pending.message_hash,
+                &successful_patch_hash,
+                allow_legacy_server,
+            )
+        } else if has_archived_attempt {
+            recoverable_integration_confirmation_turn_blocker(state, &turn)
+        } else {
+            Some(
+                "integration invalid-response recovery requires exactly one recorded successful patch"
+                    .into(),
+            )
+        };
+        if let Some(blocker) = blocker {
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
                 blocker,
@@ -5585,6 +5605,66 @@ fn recoverable_integration_turn_blocker(
     None
 }
 
+fn recoverable_integration_confirmation_turn_blocker(
+    state: &RunState,
+    turn: &Value,
+) -> Option<String> {
+    let Some(items) = turn.get("items").and_then(Value::as_array) else {
+        return Some("canonical confirmation items are unavailable".into());
+    };
+    if items.is_empty() {
+        return Some("canonical confirmation items are empty".into());
+    }
+
+    let mut final_agent_seen = false;
+    for item in items {
+        let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+            return Some("canonical confirmation item has no type".into());
+        };
+        match item_type {
+            "userMessage" | "reasoning" => {}
+            "agentMessage" => final_agent_seen = true,
+            "contextCompaction" => {
+                if let Some(blocker) = context_compaction_retry_blocker(item) {
+                    return Some(blocker);
+                }
+            }
+            "commandExecution" => {
+                if final_agent_seen {
+                    return Some(
+                        "integration confirmation command appears after the final agent response"
+                            .into(),
+                    );
+                }
+                let Some(command) = item.get("command").and_then(Value::as_str) else {
+                    return Some("integration confirmation command omits its command".into());
+                };
+                let Some(cwd) = item.get("cwd").and_then(Value::as_str) else {
+                    return Some("integration confirmation command omits its cwd".into());
+                };
+                if !has_agent_initiated_command_source(item)
+                    || item.get("status").and_then(Value::as_str) != Some("completed")
+                    || item.get("exitCode").and_then(Value::as_i64) != Some(0)
+                    || !is_retry_safe_read_only_integration_command(state, cwd, command)
+                {
+                    return Some(format!(
+                        "patch-success confirmation executed a non-read-only command: {command}"
+                    ));
+                }
+            }
+            _ => {
+                return Some(format!(
+                    "canonical confirmation item type {item_type} may have side effects"
+                ));
+            }
+        }
+    }
+    if !final_agent_seen {
+        return Some("integration confirmation has no final agent response".into());
+    }
+    None
+}
+
 fn verify_marker_only_verification_turn(turn: &Value) -> Result<(), CoordinatorError> {
     let items = turn.get("items").and_then(Value::as_array).ok_or_else(|| {
         CoordinatorError::operational(
@@ -7238,6 +7318,82 @@ mod retry_safety_tests {
             )
             .unwrap()
             .contains("exit code zero")
+        );
+    }
+
+    #[test]
+    fn archived_patch_confirmation_is_read_only_and_patch_free() {
+        let mut state = integration_state();
+        state.next_action = NextAction::RequestPrimaryIntegration;
+        let command = |id: &str, value: &str| {
+            json!({
+                "id": id,
+                "type": "commandExecution",
+                "command": value,
+                "cwd": "/repo/primary",
+                "status": "completed",
+                "exitCode": 0,
+                "source": "unifiedExecStartup",
+            })
+        };
+        let turn = json!({
+            "items": [
+                {"id": "user", "type": "userMessage"},
+                {"id": "compact", "type": "contextCompaction"},
+                command("branch", "/bin/bash -lc 'git symbolic-ref --short HEAD'"),
+                command("head", "/bin/bash -lc 'git rev-parse HEAD'"),
+                {"id": "agent", "type": "agentMessage", "text": "ready"}
+            ]
+        });
+
+        assert_eq!(
+            recoverable_integration_confirmation_turn_blocker(&state, &turn),
+            None
+        );
+
+        let mut patch_call = turn.clone();
+        patch_call["items"].as_array_mut().unwrap().insert(
+            3,
+            json!({
+                "id": "patch",
+                "type": "mcpToolCall",
+                "tool": "consensus_apply_patch",
+                "status": "completed"
+            }),
+        );
+        assert!(
+            recoverable_integration_confirmation_turn_blocker(&state, &patch_call)
+                .unwrap()
+                .contains("side effects")
+        );
+
+        let mut write = turn.clone();
+        write["items"][2]["command"] =
+            json!("/bin/bash -lc 'git symbolic-ref HEAD refs/heads/evil'");
+        assert!(
+            recoverable_integration_confirmation_turn_blocker(&state, &write)
+                .unwrap()
+                .contains("non-read-only")
+        );
+
+        let mut failed = turn.clone();
+        failed["items"][2]["status"] = json!("failed");
+        failed["items"][2]["exitCode"] = json!(1);
+        assert!(
+            recoverable_integration_confirmation_turn_blocker(&state, &failed)
+                .unwrap()
+                .contains("non-read-only")
+        );
+
+        let mut after_agent = turn;
+        after_agent["items"]
+            .as_array_mut()
+            .unwrap()
+            .push(command("late", "git status --porcelain=v1"));
+        assert!(
+            recoverable_integration_confirmation_turn_blocker(&state, &after_agent)
+                .unwrap()
+                .contains("after the final agent")
         );
     }
 

@@ -1552,15 +1552,62 @@ async fn v0213_symbolic_ref_confirmation_blocker_resumes_the_same_run() {
             true,
         )
         .await;
-    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
-    let thread_id = pending.thread_id.clone().unwrap();
-    let turn_id = pending.turn_id.clone().unwrap();
+    let patch_pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    let thread_id = patch_pending.thread_id.clone().unwrap();
+    let patch_turn_id = patch_pending.turn_id.clone().unwrap();
     let binding = store.active_primary_binding(RUN_ID).unwrap().unwrap();
-    app.set_patch_plugin_id(&thread_id, &turn_id, Value::Null);
-    insert_completed_integration_command_evidence(&app, &thread_id, &turn_id);
+    app.set_patch_plugin_id(&thread_id, &patch_turn_id, Value::Null);
+    insert_completed_integration_command_evidence(&app, &thread_id, &patch_turn_id);
+    replace_persisted_ephemeral_turn_evidence(&path, &store, &app, &thread_id, &patch_turn_id);
+
+    let mut initial_blocked = store.load_run(RUN_ID).unwrap().unwrap();
+    initial_blocked.reason_code = Some("FORBIDDEN_OPERATION".into());
+    initial_blocked.last_error = Some(RunDiagnostic {
+        code: "FORBIDDEN_OPERATION".into(),
+        detail: "integration command is not canonically completed with exit code zero".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some(thread_id.clone()),
+        source_thread_id: Some(binding.source_primary_thread_id.clone()),
+        effective_thread_id: Some(thread_id.clone()),
+        participant_binding_generation: Some(binding.generation),
+        participant_binding_mode: Some("EPHEMERAL_FORK".into()),
+        participant_server: Some(PARTICIPANT_MCP_SERVER.into()),
+    });
+    store.save_state(&initial_blocked).unwrap();
+    safety
+        .integration_branch_active
+        .store(true, Ordering::SeqCst);
+
+    let prepared = coordinator.prepare_resume(RUN_ID).await.unwrap();
+    assert_eq!(prepared.status, RunStatus::Running);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    let confirmation_pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    assert_eq!(
+        confirmation_pending.message_hash,
+        patch_pending.message_hash
+    );
+    assert_eq!(confirmation_pending.thread_id, None);
+    assert_eq!(confirmation_pending.turn_id, None);
+    assert_eq!(
+        confirmation_pending.participant_binding_generation,
+        Some(binding.generation)
+    );
+
+    let confirmation_turn_id = "production-symbolic-ref-confirmation";
+    let original_prompt = app.prompts().last().unwrap().clone();
+    app.inject_completed_turn(
+        &thread_id,
+        confirmation_turn_id,
+        &original_prompt,
+        json!(
+            "<consensus-result>INTEGRATION_READY</consensus-result>\n\nThe existing integration is ready."
+        ),
+    );
     app.insert_turn_item_before_agent(
         &thread_id,
-        &turn_id,
+        confirmation_turn_id,
         json!({
             "id": "current-branch",
             "type": "commandExecution",
@@ -1571,11 +1618,27 @@ async fn v0213_symbolic_ref_confirmation_blocker_resumes_the_same_run() {
             "source": "unifiedExecStartup",
         }),
     );
-    replace_persisted_ephemeral_turn_evidence(&path, &store, &app, &thread_id, &turn_id);
+    store
+        .record_turn_start_intent(RUN_ID, &confirmation_pending.message_hash)
+        .unwrap();
+    store
+        .record_turn_started(
+            RUN_ID,
+            &confirmation_pending.message_hash,
+            &thread_id,
+            confirmation_turn_id,
+        )
+        .unwrap();
+    replace_persisted_ephemeral_turn_evidence(
+        &path,
+        &store,
+        &app,
+        &thread_id,
+        confirmation_turn_id,
+    );
 
     let mut blocked = store.load_run(RUN_ID).unwrap().unwrap();
-    blocked.reason_code = Some("FORBIDDEN_OPERATION".into());
-    blocked.last_error = Some(RunDiagnostic {
+    blocked.record_error(RunDiagnostic {
         code: "FORBIDDEN_OPERATION".into(),
         detail: "patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git symbolic-ref --short HEAD'".into(),
         operation: None,
@@ -1588,10 +1651,9 @@ async fn v0213_symbolic_ref_confirmation_blocker_resumes_the_same_run() {
         participant_binding_mode: Some("EPHEMERAL_FORK".into()),
         participant_server: Some(PARTICIPANT_MCP_SERVER.into()),
     });
+    blocked.block("FORBIDDEN_OPERATION");
     store.save_state(&blocked).unwrap();
-    safety
-        .integration_branch_active
-        .store(true, Ordering::SeqCst);
+    store.release_lock(RUN_ID).unwrap();
 
     let accepted = coordinator.resume(RUN_ID).await.unwrap();
 
@@ -1602,7 +1664,7 @@ async fn v0213_symbolic_ref_confirmation_blocker_resumes_the_same_run() {
         accepted.last_error
     );
     assert_eq!(accepted.integration_sha.as_deref(), Some(INTEGRATION_SHA));
-    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 2);
     assert_eq!(
         store
             .active_primary_binding(RUN_ID)
@@ -1613,9 +1675,19 @@ async fn v0213_symbolic_ref_confirmation_blocker_resumes_the_same_run() {
     );
     assert!(
         store
-            .successful_patch_recorded(RUN_ID, &pending.message_hash)
+            .successful_patch_recorded(RUN_ID, &patch_pending.message_hash)
             .unwrap()
     );
+    let patch_count = Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM patch_applications
+             WHERE run_id = ?1 AND message_hash = ?2",
+            params![RUN_ID, &patch_pending.message_hash],
+            |row| row.get::<_, u64>(0),
+        )
+        .unwrap();
+    assert_eq!(patch_count, 1);
     let retry_prompt = app
         .prompts()
         .into_iter()
