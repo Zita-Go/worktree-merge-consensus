@@ -945,7 +945,14 @@ where
                 &changed_files(current_integration_payload(&state)?)?,
             )?;
         } else if retry_completed_integration_forbidden_action.is_some() {
-            self.safety.verify_frozen(&state.facts)?;
+            let target = state.target_integration_branch.as_deref().ok_or_else(|| {
+                CoordinatorError::operational(
+                    "INVALID_STATE",
+                    "target integration branch is missing",
+                )
+            })?;
+            self.safety
+                .verify_integration_in_progress(&state.facts, target)?;
         } else if retry_execution_tool_action.is_some()
             || retry_forbidden_operation_action.is_some()
         {

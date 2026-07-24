@@ -1465,7 +1465,7 @@ async fn invalid_plan_approval_revision_can_resume_the_same_blocked_run() {
 async fn legacy_capability_generation_allows_exact_invalid_integration_recovery() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");
-    let (coordinator, app, store) =
+    let (coordinator, app, store, _safety) =
         seed_invalid_integration_recovery(&path, "worktreeMergeConsensus").await;
     set_turn_capability_generation(&path, None);
 
@@ -1489,7 +1489,7 @@ async fn legacy_capability_generation_allows_exact_invalid_integration_recovery(
 async fn completed_integration_forbidden_read_only_nonzero_resumes_the_same_run() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");
-    let (coordinator, app, store) =
+    let (coordinator, app, store, safety) =
         seed_invalid_integration_recovery(&path, PARTICIPANT_MCP_SERVER).await;
     let pending = store.pending_send(RUN_ID).unwrap().unwrap();
     let turn_id = pending.turn_id.clone().unwrap();
@@ -1563,11 +1563,15 @@ async fn completed_integration_forbidden_read_only_nonzero_resumes_the_same_run(
         participant_server: None,
     });
     store.save_state(&blocked).unwrap();
+    safety
+        .integration_branch_active
+        .store(true, Ordering::SeqCst);
 
     let accepted = coordinator.resume(RUN_ID).await.unwrap();
 
     assert_eq!(accepted.status, RunStatus::Accepted);
     assert_eq!(accepted.integration_sha.as_deref(), Some(INTEGRATION_SHA));
+    assert!(safety.in_progress_calls.load(Ordering::SeqCst) > 0);
     assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
     assert!(
         store
@@ -1591,7 +1595,7 @@ async fn completed_integration_forbidden_read_only_nonzero_resumes_the_same_run(
 async fn participant_capability_generation_rejects_legacy_invalid_integration_evidence() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");
-    let (coordinator, app, store) =
+    let (coordinator, app, store, _safety) =
         seed_invalid_integration_recovery(&path, "worktreeMergeConsensus").await;
 
     let error = coordinator.resume(RUN_ID).await.unwrap_err();
@@ -1606,7 +1610,7 @@ async fn participant_capability_generation_rejects_legacy_invalid_integration_ev
 async fn malformed_capability_generation_fails_closed_for_invalid_integration_recovery() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");
-    let (coordinator, app, store) =
+    let (coordinator, app, store, _safety) =
         seed_invalid_integration_recovery(&path, "worktreeMergeConsensus").await;
     set_turn_capability_generation(&path, Some("unknown-generation"));
 
@@ -1625,6 +1629,7 @@ async fn seed_invalid_integration_recovery(
     Coordinator<FakeAppServer, RecordingSafety>,
     Arc<FakeAppServer>,
     SqliteRunStore,
+    Arc<RecordingSafety>,
 ) {
     let store = SqliteRunStore::open(path).unwrap();
     let mut replies = conflict_free_replies();
@@ -1654,10 +1659,11 @@ async fn seed_invalid_integration_recovery(
     );
     replies[6] = json!("<consensus-result>APPROVED</consensus-result>");
     let app = Arc::new(FakeAppServer::new(replies).with_marker_protocol());
+    let safety = Arc::new(RecordingSafety::default());
     let coordinator = Coordinator::new(
         Arc::clone(&app),
         store.clone(),
-        Arc::new(RecordingSafety::default()),
+        Arc::clone(&safety),
         fast_options(),
     );
     coordinator
@@ -1701,7 +1707,7 @@ async fn seed_invalid_integration_recovery(
         .record_successful_patch(RUN_ID, &pending.message_hash, &successful_patch_hash)
         .unwrap();
 
-    (coordinator, app, store)
+    (coordinator, app, store, safety)
 }
 
 fn set_turn_capability_generation(path: &Path, generation: Option<&str>) {
@@ -4637,6 +4643,8 @@ async fn configured_round_limit_blocks_after_the_last_rejection() {
 #[derive(Default)]
 struct RecordingSafety {
     events: Mutex<Vec<String>>,
+    integration_branch_active: AtomicBool,
+    in_progress_calls: AtomicUsize,
 }
 
 impl RecordingSafety {
@@ -4647,12 +4655,31 @@ impl RecordingSafety {
 
 impl RepositorySafety for RecordingSafety {
     fn verify_frozen(&self, _facts: &RunFacts) -> Result<(), SafetyError> {
+        if self.integration_branch_active.load(Ordering::SeqCst) {
+            return Err(SafetyError::new(
+                "SOURCE_DRIFT",
+                "primary HEAD has moved to the authorized integration branch",
+            ));
+        }
         self.events.lock().unwrap().push("frozen".into());
         Ok(())
     }
 
     fn verify_branch_absent(&self, _facts: &RunFacts, branch: &str) -> Result<(), SafetyError> {
         self.events.lock().unwrap().push(format!("absent:{branch}"));
+        Ok(())
+    }
+
+    fn verify_integration_in_progress(
+        &self,
+        _facts: &RunFacts,
+        target_branch: &str,
+    ) -> Result<(), SafetyError> {
+        self.in_progress_calls.fetch_add(1, Ordering::SeqCst);
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("in-progress:{target_branch}"));
         Ok(())
     }
 
