@@ -327,14 +327,17 @@ fn is_allowed_read_only_git_invocation(
         "status" | "diff" | "show" | "log" | "rev-parse" | "merge-base" | "ls-files" => {
             safe_read_only_git_arguments(arguments)
         }
-        "branch" => safe_branch_list_arguments(state, arguments),
+        "branch" => safe_branch_arguments(state, arguments),
         "show-ref" => safe_show_ref_arguments(state, arguments),
         "symbolic-ref" => matches!(arguments, ["--short", "HEAD"]),
         _ => false,
     }
 }
 
-fn safe_branch_list_arguments(state: &RunState, arguments: &[&str]) -> bool {
+fn safe_branch_arguments(state: &RunState, arguments: &[&str]) -> bool {
+    if matches!(arguments, ["--show-current"]) {
+        return state.target_integration_branch.is_some();
+    }
     let Some(branch) = state.target_integration_branch.as_deref() else {
         return false;
     };
@@ -609,12 +612,14 @@ mod tests {
     }
 
     #[test]
-    fn current_branch_symbolic_ref_is_exactly_scoped_and_read_only() {
+    fn current_branch_queries_are_exactly_scoped_and_read_only() {
         let state = integration_state();
 
         for command in [
             "git symbolic-ref --short HEAD",
             "/bin/bash -lc 'git symbolic-ref --short HEAD'",
+            "git branch --show-current",
+            "/bin/bash -lc 'git branch --show-current'",
         ] {
             assert_eq!(
                 decide_command_approval(
@@ -638,6 +643,20 @@ mod tests {
             "/repo/reviewer",
             "git symbolic-ref --short HEAD"
         ));
+        assert!(!is_retry_safe_read_only_integration_command(
+            &state,
+            "/repo/reviewer",
+            "git branch --show-current"
+        ));
+        let mut unbound = state.clone();
+        unbound.target_integration_branch = None;
+        assert_eq!(
+            decide_command_approval(
+                &unbound,
+                &json!({"cwd": "/repo/primary", "command": "git branch --show-current"})
+            ),
+            ApprovalDecision::Cancel
+        );
         for command in [
             "git symbolic-ref HEAD",
             "git symbolic-ref --quiet --short HEAD",
@@ -646,6 +665,9 @@ mod tests {
             "git symbolic-ref --short HEAD refs/heads/primary",
             "git symbolic-ref -d HEAD",
             "git symbolic-ref --delete HEAD",
+            "git branch --show-current HEAD",
+            "git branch --show-current=HEAD",
+            "git branch -a --show-current",
         ] {
             assert_eq!(
                 decide_command_approval(

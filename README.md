@@ -330,6 +330,20 @@ The `after_cursor` input resumes observation after interruption. Unchanged
 long-poll heartbeats stay small, and the public stream excludes hidden reasoning,
 participant prompts, raw task history, and command stdout/stderr.
 
+Version 0.3.1 accepts the exact read-only `git branch --show-current` query in
+the frozen Primary worktree, either directly or through one canonical
+`/bin/bash -lc` wrapper. The coordinator already derives and validates the
+current branch and HEAD before and after Primary integration; the prompt now
+makes that ownership explicit and names both accepted equivalent queries so a
+model's command choice cannot change the outcome. An explicit resume can
+recover the same side-effect-free Run when an older binary denied this query,
+including a completed post-patch confirmation: canonical terminal history,
+the successful patch record, unchanged frozen refs, and the authoritative
+target must all revalidate, and patch, merge, staging, and commit are never
+repeated. The public `no_progress_rounds` value is the configured unchanged
+review threshold; plan-content progress changes the review fingerprint and
+starts a new streak.
+
 Read [the v2 participant protocol](docs/protocol-v2.md), the
 [legacy v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
@@ -358,8 +372,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.3.0-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.3.0-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.3.1-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.3.1-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -685,6 +699,11 @@ Codex task history, and `status --json` are the operational record.
   escalation is denied instead and ends as `FORBIDDEN_OPERATION`.
 - `NO_PROGRESS` or `ROUND_LIMIT`: the run is terminal. Review the contracts and
   start a new run rather than forcing acceptance.
+- A v0.3.0 or earlier `FORBIDDEN_OPERATION` caused only by exact
+  `git branch --show-current` in the frozen Primary worktree can be retried on
+  the same Run after installing matching v0.3.1 binary and plugin artifacts.
+  Call `consensus_resume` once; the coordinator rejects any uncertain command,
+  side effect, identity mismatch, or changed repository state.
 - Daemon startup failure: check ownership and permissions of the state
   directory, remove no files automatically, and retry `codex-consensus doctor`
   with `--state-dir` if isolation is needed.

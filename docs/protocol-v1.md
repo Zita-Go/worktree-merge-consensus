@@ -148,6 +148,19 @@ single patch record. A matching 0.2.14 resume that failed before state
 mutation with `MODEL_RESPONSE_RETRY_UNSAFE` may be explicitly retried once
 with 0.2.15 while the exact original blocker remains recorded.
 
+Version 0.3.1 additionally recognizes exact `git branch --show-current` as a
+read-only current-branch query in the frozen Primary worktree, directly or
+through one canonical `/bin/bash -lc` wrapper. The coordinator independently
+derives and validates current branch and HEAD identity; accepting both this
+preferred query and `git symbolic-ref --short HEAD` prevents equivalent model
+choices from changing the Run outcome. Explicit resume may recover the same
+side-effect-free Run after an older binary denied this command, including a
+completed post-patch confirmation, only after canonical terminal history and
+the authoritative repository result revalidate. It never repeats patch,
+merge, staging, or commit. `no_progress_rounds` is the configured unchanged
+fingerprint threshold; a materially revised plan changes the fingerprint and
+starts a new streak.
+
 Preflight reason codes include `UNREGISTERED_WORKTREE`,
 `DUPLICATE_WORKTREE`, `REPOSITORY_MISMATCH`, `DIRTY_WORKTREE`, and
 `WORKTREE_UNAVAILABLE`. Once frozen, a task may reject an incorrect

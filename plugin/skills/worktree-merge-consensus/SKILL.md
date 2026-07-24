@@ -169,6 +169,20 @@ returns at most six events per batch, and includes the cumulative public
 snapshot only when the Run pauses or terminates. A cursor can resume observation after a launcher interruption or
 daemon restart without changing either source ref or the integration result.
 
+Release 0.3.1 accepts exactly `git branch --show-current` in the frozen
+Primary worktree as a read-only current-branch query, directly or through one
+canonical `/bin/bash -lc` wrapper. The coordinator itself derives and validates
+the current branch and HEAD before and after integration; the Primary should
+not query them merely to report result identity. When retry reasoning requires
+that check, both this preferred form and `git symbolic-ref --short HEAD` are
+accepted so equivalent model command choices have the same outcome. Explicit
+resume can recover the same side-effect-free Run after an older release denied
+this exact query, including a completed patch-success confirmation. Recovery
+revalidates canonical terminal history and the authoritative target and never
+repeats patch, merge, staging, or commit. `no_progress_rounds` is the configured
+unchanged-review threshold, not the current streak; a changed plan fingerprint
+starts a new streak.
+
 The launcher may call only the operator-facing `consensus_*` tools listed
 above. It must never ask the invoking task to find, install, expose, or call
 participant-side `consensus_apply_patch`; injection, preflight, and any
@@ -454,6 +468,16 @@ integration, verification, final approval, recovery, and fail-closed pauses.
   same Run, branch, commit, request, binding lineage, source refs, and single
   patch record. Any state mutation, identity drift, second patch, side effect,
   uncertain command, or near-match remains terminal.
+- If v0.3.0 or an earlier matching installation left a Run `BLOCKED` with
+  `FORBIDDEN_OPERATION` solely because the frozen Primary executed exact
+  `git branch --show-current` (directly or through one canonical
+  `/bin/bash -lc` wrapper), install matching v0.3.1 binary and plugin artifacts,
+  then call `consensus_resume` once. Recovery keeps the same Run and accepts
+  only canonical terminal, agent-initiated, side-effect-free history. For a
+  post-patch confirmation it also requires the existing successful patch
+  record, unchanged frozen refs, clean authorized target, ancestry, and
+  authoritative result. It never repeats patch, merge, staging, or commit;
+  every uncertain or near-match state remains terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
 Read [references/protocol.md](references/protocol.md) when explaining lifecycle states, acceptance evidence, or recovery behavior.

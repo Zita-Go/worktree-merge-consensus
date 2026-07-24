@@ -279,6 +279,18 @@ record. A matching 0.2.14 resume that failed before state mutation with
 `MODEL_RESPONSE_RETRY_UNSAFE` may be explicitly retried once with 0.2.15 while
 the exact original blocker remains recorded.
 
+Release 0.3.1 accepts exact `git branch --show-current` in the frozen Primary
+worktree, directly or under one canonical `/bin/bash -lc` wrapper. The
+coordinator itself derives and validates current branch and HEAD identity, and
+the command gate now accepts both this preferred form and
+`git symbolic-ref --short HEAD` so equivalent model choices cannot change the
+outcome. Explicit same-Run recovery covers an older interrupted denial and a
+completed post-patch confirmation only when canonical terminal history,
+successful patch provenance when applicable, unchanged frozen refs, and the
+authoritative target all revalidate. Recovery never repeats patch, merge,
+staging, or commit. `no_progress_rounds` is the unchanged-review threshold;
+material plan changes create a new fingerprint streak.
+
 The same release contains one migration only for the exact legacy 0.2.4
 blocked-verification history: the same Run, Primary task, request, round,
 verification clone, integration branch and SHA, frozen refs, and three archived

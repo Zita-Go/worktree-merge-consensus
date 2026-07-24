@@ -156,6 +156,13 @@ the evidence below.
    Primary attempt and a separate current confirmation-only attempt. Confirm
    matching 0.2.15 artifacts accept only the patch-free, read-only
    confirmation, preserve exactly one patch record, and resume the same Run.
+   Repeat both the interrupted-denial and completed-confirmation cases with
+   exact `/bin/bash -lc 'git branch --show-current'`; matching 0.3.1 artifacts
+   must resume the same Run without repeating patch, merge, staging, or commit.
+   Confirm direct `git branch --show-current` also passes live policy while an
+   argument-bearing variant remains denied. Submit the same Reviewer issue
+   before and after a materially revised plan and confirm the second verdict
+   starts a new fingerprint streak rather than producing `NO_PROGRESS`.
    Add an MCP call, file change, dynamic tool, failed or uncertain command, or
    command after the final response and confirm each variant remains
    terminal. Interrupt one

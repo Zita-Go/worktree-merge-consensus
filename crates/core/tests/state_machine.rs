@@ -99,6 +99,31 @@ fn two_identical_issue_sets_block_as_no_progress() {
 }
 
 #[test]
+fn revised_plan_resets_the_effective_no_progress_streak() {
+    let mut state = fixture_plan_state();
+    state
+        .apply_message(changes_required_with_ids(1, json!(["missing-test"])))
+        .unwrap();
+    state
+        .record_plan(json!({
+            "revision": 2,
+            "coverage": ["primary", "reviewer", "missing-test"],
+            "test_commands": ["cargo test"]
+        }))
+        .unwrap();
+
+    let action = state
+        .apply_message(changes_required_with_ids(2, json!(["missing-test"])))
+        .unwrap();
+
+    assert_eq!(state.no_progress_rounds, 2);
+    assert_eq!(action, NextAction::RequestPrimaryPlan);
+    assert_eq!(state.status, RunStatus::Running);
+    assert!(state.reason_code.is_none());
+    assert_eq!(state.round, 3);
+}
+
+#[test]
 fn exact_result_approval_requires_read_only_revalidation_before_acceptance() {
     let integration_sha = "cccccccccccccccccccccccccccccccccccccccc";
     let mut state = fixture_result_state(integration_sha);
@@ -874,65 +899,77 @@ fn completed_integration_forbidden_audit_is_retryable_for_ephemeral_primary() {
 }
 
 #[test]
-fn symbolic_ref_confirmation_blocker_is_retryable_for_ephemeral_primary() {
-    let mut state = fixture_plan_state();
-    let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
-    state.apply_message(approved_plan(&plan_hash)).unwrap();
-    let source_thread_id = state.facts.primary_thread_id.clone();
-    state.record_error(RunDiagnostic {
-        code: "FORBIDDEN_OPERATION".into(),
-        detail: "patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git symbolic-ref --short HEAD'".into(),
-        operation: None,
-        action: NextAction::RequestPrimaryIntegration,
-        role: Some(Role::Primary),
-        thread_id: Some("primary-consensus-mirror-3".into()),
-        source_thread_id: Some(source_thread_id),
-        effective_thread_id: Some("primary-consensus-mirror-3".into()),
-        participant_binding_generation: Some(3),
-        participant_binding_mode: Some("EPHEMERAL_FORK".into()),
-        participant_server: Some("worktreeMergeConsensusParticipant".into()),
-    });
-    state.block("FORBIDDEN_OPERATION");
+fn exact_current_branch_confirmation_blockers_are_retryable_for_ephemeral_primary() {
+    for detail in [
+        "patch-success confirmation executed a non-read-only command: git symbolic-ref --short HEAD",
+        "patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git symbolic-ref --short HEAD'",
+        "patch-success confirmation executed a non-read-only command: git branch --show-current",
+        "patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git branch --show-current'",
+    ] {
+        let mut state = fixture_plan_state();
+        let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
+        state.apply_message(approved_plan(&plan_hash)).unwrap();
+        let source_thread_id = state.facts.primary_thread_id.clone();
+        state.record_error(RunDiagnostic {
+            code: "FORBIDDEN_OPERATION".into(),
+            detail: detail.into(),
+            operation: None,
+            action: NextAction::RequestPrimaryIntegration,
+            role: Some(Role::Primary),
+            thread_id: Some("primary-consensus-mirror-3".into()),
+            source_thread_id: Some(source_thread_id),
+            effective_thread_id: Some("primary-consensus-mirror-3".into()),
+            participant_binding_generation: Some(3),
+            participant_binding_mode: Some("EPHEMERAL_FORK".into()),
+            participant_server: Some("worktreeMergeConsensusParticipant".into()),
+        });
+        state.block("FORBIDDEN_OPERATION");
 
-    let action = state
-        .retry_blocked_completed_integration_forbidden_operation()
-        .unwrap();
+        let action = state
+            .retry_blocked_completed_integration_forbidden_operation()
+            .unwrap();
 
-    assert_eq!(action, NextAction::RequestPrimaryIntegration);
-    assert_eq!(state.status, RunStatus::Running);
-    assert_eq!(state.phase, Phase::Integrate);
-    assert!(state.reason_code.is_none());
-    assert!(state.last_error.is_none());
+        assert_eq!(action, NextAction::RequestPrimaryIntegration, "{detail}");
+        assert_eq!(state.status, RunStatus::Running, "{detail}");
+        assert_eq!(state.phase, Phase::Integrate, "{detail}");
+        assert!(state.reason_code.is_none(), "{detail}");
+        assert!(state.last_error.is_none(), "{detail}");
+    }
 }
 
 #[test]
-fn arbitrary_symbolic_ref_confirmation_blocker_remains_terminal() {
-    let mut state = fixture_plan_state();
-    let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
-    state.apply_message(approved_plan(&plan_hash)).unwrap();
-    let source_thread_id = state.facts.primary_thread_id.clone();
-    state.record_error(RunDiagnostic {
-        code: "FORBIDDEN_OPERATION".into(),
-        detail: "patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git symbolic-ref HEAD refs/heads/evil'".into(),
-        operation: None,
-        action: NextAction::RequestPrimaryIntegration,
-        role: Some(Role::Primary),
-        thread_id: Some("primary-consensus-mirror-3".into()),
-        source_thread_id: Some(source_thread_id),
-        effective_thread_id: Some("primary-consensus-mirror-3".into()),
-        participant_binding_generation: Some(3),
-        participant_binding_mode: Some("EPHEMERAL_FORK".into()),
-        participant_server: Some("worktreeMergeConsensusParticipant".into()),
-    });
-    state.block("FORBIDDEN_OPERATION");
+fn argument_bearing_current_branch_confirmation_blockers_remain_terminal() {
+    for detail in [
+        "patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git symbolic-ref HEAD refs/heads/evil'",
+        "patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git branch --show-current HEAD'",
+    ] {
+        let mut state = fixture_plan_state();
+        let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
+        state.apply_message(approved_plan(&plan_hash)).unwrap();
+        let source_thread_id = state.facts.primary_thread_id.clone();
+        state.record_error(RunDiagnostic {
+            code: "FORBIDDEN_OPERATION".into(),
+            detail: detail.into(),
+            operation: None,
+            action: NextAction::RequestPrimaryIntegration,
+            role: Some(Role::Primary),
+            thread_id: Some("primary-consensus-mirror-3".into()),
+            source_thread_id: Some(source_thread_id),
+            effective_thread_id: Some("primary-consensus-mirror-3".into()),
+            participant_binding_generation: Some(3),
+            participant_binding_mode: Some("EPHEMERAL_FORK".into()),
+            participant_server: Some("worktreeMergeConsensusParticipant".into()),
+        });
+        state.block("FORBIDDEN_OPERATION");
 
-    let error = state
-        .retry_blocked_completed_integration_forbidden_operation()
-        .unwrap_err();
+        let error = state
+            .retry_blocked_completed_integration_forbidden_operation()
+            .unwrap_err();
 
-    assert_eq!(error.code(), "NOT_RETRYABLE");
-    assert_eq!(state.status, RunStatus::Blocked);
-    assert_eq!(state.phase, Phase::Blocked);
+        assert_eq!(error.code(), "NOT_RETRYABLE", "{detail}");
+        assert_eq!(state.status, RunStatus::Blocked, "{detail}");
+        assert_eq!(state.phase, Phase::Blocked, "{detail}");
+    }
 }
 
 #[test]

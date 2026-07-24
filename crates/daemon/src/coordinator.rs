@@ -34,7 +34,8 @@ use tokio::sync::Mutex;
 
 use crate::policy::{
     ApprovalDecision, command_approval_denial, decide_command_approval,
-    is_retry_safe_read_only_integration_command, validate_test_command,
+    is_retry_safe_read_only_integration_command, normalize_app_server_command,
+    validate_test_command,
 };
 use crate::store::{
     AcceptedTurn, PARTICIPANT_CAPABILITY_GENERATION, SqliteRunStore, StoreError,
@@ -6263,12 +6264,7 @@ fn completed_integration_forbidden_operation_retry_action(
         || diagnostic.action != NextAction::RequestPrimaryIntegration
         || diagnostic.role != Some(Role::Primary)
         || !diagnostic_matches_primary_identity(state, diagnostic)
-        || !matches!(
-            diagnostic.detail.as_str(),
-            "integration command is not canonically completed with exit code zero"
-                | "integration command is outside the frozen execution policy"
-                | "patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git symbolic-ref --short HEAD'"
-        )
+        || !completed_integration_forbidden_detail_is_retryable(state, &diagnostic.detail)
     {
         return Ok(None);
     }
@@ -6284,6 +6280,35 @@ fn completed_integration_forbidden_operation_retry_action(
         ));
     }
     Ok(Some(NextAction::RequestPrimaryIntegration))
+}
+
+fn completed_integration_forbidden_detail_is_retryable(state: &RunState, detail: &str) -> bool {
+    if matches!(
+        detail,
+        "integration command is not canonically completed with exit code zero"
+            | "integration command is outside the frozen execution policy"
+    ) {
+        return true;
+    }
+    let Some(command) =
+        detail.strip_prefix("patch-success confirmation executed a non-read-only command: ")
+    else {
+        return false;
+    };
+    let Some(normalized) = normalize_app_server_command(command) else {
+        return false;
+    };
+    if !matches!(
+        normalized.trim(),
+        "git symbolic-ref --short HEAD" | "git branch --show-current"
+    ) {
+        return false;
+    }
+    state
+        .facts
+        .primary_worktree
+        .to_str()
+        .is_some_and(|cwd| is_retry_safe_read_only_integration_command(state, cwd, command))
 }
 
 fn verification_without_execution_retry_action(
@@ -7051,6 +7076,44 @@ mod retry_safety_tests {
     }
 
     #[test]
+    fn completed_confirmation_recovery_accepts_only_exact_current_branch_queries() {
+        let mut state = integration_state();
+        state.target_integration_branch = Some("consensus/test-run".into());
+        for command in [
+            "git symbolic-ref --short HEAD",
+            "/bin/bash -lc 'git symbolic-ref --short HEAD'",
+            "git branch --show-current",
+            "/bin/bash -lc 'git branch --show-current'",
+        ] {
+            assert!(
+                completed_integration_forbidden_detail_is_retryable(
+                    &state,
+                    &format!(
+                        "patch-success confirmation executed a non-read-only command: {command}"
+                    )
+                ),
+                "{command}"
+            );
+        }
+        for command in [
+            "git branch --show-current HEAD",
+            "/bin/bash -lc 'git branch --show-current HEAD'",
+            "/bin/bash -lc \"bash -lc 'git branch --show-current'\"",
+            "git status --porcelain=v1",
+        ] {
+            assert!(
+                !completed_integration_forbidden_detail_is_retryable(
+                    &state,
+                    &format!(
+                        "patch-success confirmation executed a non-read-only command: {command}"
+                    )
+                ),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
     fn only_exact_local_read_only_consensus_queries_are_retry_safe() {
         for tool in [
             "consensus_list_threads",
@@ -7324,6 +7387,7 @@ mod retry_safety_tests {
     #[test]
     fn archived_patch_confirmation_is_read_only_and_patch_free() {
         let mut state = integration_state();
+        state.target_integration_branch = Some("consensus/test-run".into());
         state.next_action = NextAction::RequestPrimaryIntegration;
         let command = |id: &str, value: &str| {
             json!({
@@ -7340,7 +7404,7 @@ mod retry_safety_tests {
             "items": [
                 {"id": "user", "type": "userMessage"},
                 {"id": "compact", "type": "contextCompaction"},
-                command("branch", "/bin/bash -lc 'git symbolic-ref --short HEAD'"),
+                command("branch", "/bin/bash -lc 'git branch --show-current'"),
                 command("head", "/bin/bash -lc 'git rev-parse HEAD'"),
                 {"id": "agent", "type": "agentMessage", "text": "ready"}
             ]

@@ -1541,8 +1541,10 @@ async fn completed_integration_forbidden_read_only_nonzero_resumes_the_same_run(
     );
 }
 
-#[tokio::test]
-async fn v0213_symbolic_ref_confirmation_blocker_resumes_the_same_run() {
+async fn assert_current_branch_confirmation_blocker_resumes_the_same_run(
+    command: &str,
+    confirmation_turn_id: &str,
+) {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");
     let (coordinator, app, store, safety) =
@@ -1595,7 +1597,6 @@ async fn v0213_symbolic_ref_confirmation_blocker_resumes_the_same_run() {
         Some(binding.generation)
     );
 
-    let confirmation_turn_id = "production-symbolic-ref-confirmation";
     let original_prompt = app.prompts().last().unwrap().clone();
     app.inject_completed_turn(
         &thread_id,
@@ -1611,7 +1612,7 @@ async fn v0213_symbolic_ref_confirmation_blocker_resumes_the_same_run() {
         json!({
             "id": "current-branch",
             "type": "commandExecution",
-            "command": "/bin/bash -lc 'git symbolic-ref --short HEAD'",
+            "command": command,
             "cwd": "/repo/primary",
             "status": "completed",
             "exitCode": 0,
@@ -1640,7 +1641,7 @@ async fn v0213_symbolic_ref_confirmation_blocker_resumes_the_same_run() {
     let mut blocked = store.load_run(RUN_ID).unwrap().unwrap();
     blocked.record_error(RunDiagnostic {
         code: "FORBIDDEN_OPERATION".into(),
-        detail: "patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git symbolic-ref --short HEAD'".into(),
+        detail: format!("patch-success confirmation executed a non-read-only command: {command}"),
         operation: None,
         action: NextAction::RequestPrimaryIntegration,
         role: Some(Role::Primary),
@@ -1695,6 +1696,24 @@ async fn v0213_symbolic_ref_confirmation_blocker_resumes_the_same_run() {
         .unwrap();
     assert!(retry_prompt.contains("Coordinator recovery override"));
     assert!(retry_prompt.contains("Do not call consensus_apply_patch"));
+}
+
+#[tokio::test]
+async fn v0213_symbolic_ref_confirmation_blocker_resumes_the_same_run() {
+    assert_current_branch_confirmation_blocker_resumes_the_same_run(
+        "/bin/bash -lc 'git symbolic-ref --short HEAD'",
+        "production-symbolic-ref-confirmation",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn branch_show_current_confirmation_blocker_resumes_the_same_run() {
+    assert_current_branch_confirmation_blocker_resumes_the_same_run(
+        "/bin/bash -lc 'git branch --show-current'",
+        "production-branch-show-current-confirmation",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -3473,6 +3492,19 @@ async fn interrupted_forbidden_operation_with_terminal_read_only_queries_retries
             "id": "read-only-command-turn-5",
             "type": "commandExecution",
             "command": "/bin/bash -lc 'git rev-parse HEAD'",
+            "cwd": "/repo/primary",
+            "status": "completed",
+            "exitCode": 0,
+            "source": "unifiedExecStartup"
+        }),
+    );
+    app.append_turn_item(
+        "primary",
+        "turn-5",
+        json!({
+            "id": "current-branch-command-turn-5",
+            "type": "commandExecution",
+            "command": "/bin/bash -lc 'git branch --show-current'",
             "cwd": "/repo/primary",
             "status": "completed",
             "exitCode": 0,

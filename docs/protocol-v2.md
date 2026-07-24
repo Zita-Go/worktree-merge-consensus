@@ -293,6 +293,18 @@ only pause and terminal responses include the full public snapshot. Observation 
 read-only and can resume after daemon or launcher restart without affecting the
 Run state machine or either frozen source.
 
+Release 0.3.1 adds exact `git branch --show-current` to the read-only Primary
+integration policy, with at most one canonical `/bin/bash -lc` wrapper. The
+coordinator remains authoritative for branch and HEAD identity, while both
+this preferred form and `git symbolic-ref --short HEAD` are accepted so
+equivalent model command choices are deterministic. Same-Run recovery covers
+both interrupted denials and completed post-patch confirmations only when the
+canonical turn, successful patch provenance when present, frozen refs, and
+authoritative target all revalidate. No patch, merge, staging, or commit is
+repeated. The serialized `no_progress_rounds` member is a policy threshold,
+not a live counter; material plan changes reset the effective fingerprint
+streak.
+
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the
 [legacy v1 protocol](protocol-v1.md).

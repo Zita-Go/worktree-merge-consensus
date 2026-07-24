@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.1
+
+- Accept exactly `git branch --show-current`, directly or through one canonical
+  `/bin/bash -lc` wrapper, as a read-only current-branch query in the frozen
+  Primary worktree; keep every argument-bearing or write-capable `git branch`
+  form outside the existing exact branch-list exception fail-closed.
+- Make the integration prompt explicit that the coordinator derives and
+  validates branch/HEAD identity itself, while naming both accepted equivalent
+  current-branch queries so model command choice cannot change the outcome.
+- Recover the same Run after either an interrupted command denial or a
+  completed post-patch confirmation that misclassified this exact query.
+  Recovery revalidates canonical terminal history and the authoritative target
+  and never repeats the patch, merge, staging, or commit.
+- Add regressions proving a revised plan resets the effective unchanged-review
+  fingerprint. `no_progress_rounds` remains the configured threshold, not the
+  current no-progress counter.
+
 ## 0.3.0
 
 - Persist a bounded public event for every consensus Run state transition in

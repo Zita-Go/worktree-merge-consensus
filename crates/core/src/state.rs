@@ -566,12 +566,7 @@ impl RunState {
             || diagnostic.action != NextAction::RequestPrimaryIntegration
             || diagnostic.role != Some(Role::Primary)
             || !diagnostic_matches_primary(&self.facts, diagnostic)
-            || !matches!(
-                diagnostic.detail.as_str(),
-                "integration command is not canonically completed with exit code zero"
-                    | "integration command is outside the frozen execution policy"
-                    | "patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git symbolic-ref --short HEAD'"
-            )
+            || !completed_integration_command_audit_detail(&diagnostic.detail)
         {
             return Err(state_error(
                 "NOT_RETRYABLE",
@@ -1672,6 +1667,18 @@ impl RunState {
         self.next_action = NextAction::Stop;
         self.next_action
     }
+}
+
+fn completed_integration_command_audit_detail(detail: &str) -> bool {
+    matches!(
+        detail,
+        "integration command is not canonically completed with exit code zero"
+            | "integration command is outside the frozen execution policy"
+            | "patch-success confirmation executed a non-read-only command: git symbolic-ref --short HEAD"
+            | "patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git symbolic-ref --short HEAD'"
+            | "patch-success confirmation executed a non-read-only command: git branch --show-current"
+            | "patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git branch --show-current'"
+    )
 }
 
 fn revalidate_message(message: ProtocolMessage) -> Result<ProtocolMessage, StateError> {

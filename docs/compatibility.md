@@ -377,6 +377,28 @@ hidden reasoning, participant prompts, raw task history, and command output.
 Only a pause or terminal response includes the full cumulative snapshot, so
 long-running Codex App tasks do not accumulate repeated artifacts.
 
+Release 0.3.1 adds exact `git branch --show-current` to the frozen Primary's
+read-only command policy. It is accepted directly or through one canonical
+`/bin/bash -lc` wrapper; extra arguments, combined options, and every existing
+write-capable `git branch` form remain forbidden, apart from the separately
+scoped exact target-branch list query. The coordinator independently validates
+the current branch and HEAD before and after the Primary integration turn, so
+the model does not own result identity. Accepting this query alongside exact
+`git symbolic-ref --short HEAD` removes command-choice nondeterminism.
+
+An explicit v0.3.1 resume may recover the same v0.3.0-or-earlier Run when the
+only blocker is that exact query. Interrupted or failed turns require every
+canonical command item to be terminal, agent-initiated, in the frozen Primary
+cwd, and retry-safe under the current policy. A completed post-patch
+confirmation additionally requires the existing successful patch record,
+matching request and binding lineage, unchanged frozen refs, clean authorized
+target, source ancestry, and authoritative result. The coordinator archives
+only the affected attempt and never repeats patch, merge, staging, or commit.
+Uncertain, in-progress, side-effectful, identity-drifted, or near-match states
+remain terminal. `no_progress_rounds` is the configured consecutive unchanged
+review-fingerprint threshold rather than a live progress counter; a materially
+different plan hash starts a new streak.
+
 `doctor` validates a fresh App Server protocol connection and asks the
 coordinator daemon to probe its own connection, but deliberately does not spend
 a model turn. If the managed App Server restarts after the coordinator daemon,
