@@ -225,6 +225,12 @@ worktree must remain unchanged. The existing authoritative target, patch
 record, source ancestry, cleanliness, changed-file, and final-SHA checks still
 run before the response attempt is archived.
 
+Release 0.2.11 recognizes `unifiedExecStartup` as canonical agent-initiated
+command provenance during recovery. It continues to reject `userShell`,
+`unifiedExecInteraction`, null, malformed, and unknown sources, and does not
+weaken the command, terminal-result, side-effect, frozen-state, or target-result
+checks.
+
 The same release contains one migration only for the exact legacy 0.2.4
 blocked-verification history: the same Run, Primary task, request, round,
 verification clone, integration branch and SHA, frozen refs, and three archived

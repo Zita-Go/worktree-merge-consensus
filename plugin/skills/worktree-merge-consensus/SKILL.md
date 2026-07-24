@@ -104,6 +104,13 @@ the Primary worktree only on its source or the exact target branch. Patch
 provenance, target cleanliness, both source ancestors, changed files, and final
 SHA are then revalidated exactly as before.
 
+Release 0.2.11 aligns recovery provenance with canonical App Server command
+items. Treat `source: "unifiedExecStartup"` as agent-initiated execution
+alongside `agent`; continue to reject `userShell`, `unifiedExecInteraction`,
+null, malformed, and unknown sources. An omitted source remains compatible only
+as the schema's legacy default. No command-policy, terminal-result,
+frozen-state, or target-result check is relaxed.
+
 The launcher may call only the operator-facing `consensus_*` tools listed
 above. It must never ask the invoking task to find, install, expose, or call
 participant-side `consensus_apply_patch`; injection, preflight, and any
@@ -309,9 +316,10 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   correction commit. The new SHA must advance and all frozen verification
   reruns. Installation alone does not mutate the blocked Run; every near-match
   remains terminal.
-- If a v0.2.8 or v0.2.9 Run is `BLOCKED` with `FORBIDDEN_OPERATION` after the
+- If a v0.2.8, v0.2.9, or v0.2.10 Run is `BLOCKED` with
+  `FORBIDDEN_OPERATION` after the
   request-bound patch and integration commit completed, install matching
-  v0.2.10 binary and plugin artifacts, then explicitly call
+  v0.2.11 binary and plugin artifacts, then explicitly call
   `consensus_resume`. Recovery is available only when the originating
   diagnostic is the completed integration command audit and every archived
   item is canonical: writes completed with exit code zero, while only
@@ -324,7 +332,12 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   identity, or drift remains terminal.
   If v0.2.9 already returned `SOURCE_DRIFT: primary HEAD changed after freeze`
   for this exact state, it made no Run or Git mutation; after installing
-  v0.2.10, explicitly resume the same Run once.
+  v0.2.11, explicitly resume the same Run once.
+  If v0.2.10 already returned
+  `MODEL_RESPONSE_RETRY_UNSAFE: integration command has a non-agent source`
+  and the canonical archived source is `unifiedExecStartup`, it likewise made
+  no Run or Git mutation; after installing v0.2.11, explicitly resume the same
+  Run once. Every other source remains terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
 Read [references/protocol.md](references/protocol.md) when explaining lifecycle states, acceptance evidence, or recovery behavior.

@@ -98,6 +98,11 @@ to the exact authorized target after a successful commit, but still requires
 the Reviewer worktree and frozen source refs to remain unchanged and then
 revalidates the authoritative target result.
 
+Version 0.2.11 also recognizes the App Server's canonical
+`unifiedExecStartup` value as agent-initiated command provenance when auditing
+that completed turn. User-shell, unified-exec interaction, null, malformed, and
+unknown sources remain rejected.
+
 Preflight reason codes include `UNREGISTERED_WORKTREE`,
 `DUPLICATE_WORKTREE`, `REPOSITORY_MISMATCH`, `DIRTY_WORKTREE`, and
 `WORKTREE_UNAVAILABLE`. Once frozen, a task may reject an incorrect

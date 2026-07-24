@@ -169,6 +169,11 @@ worktree 按设计应位于集成分支，而不是冻结源 HEAD。恢复因此
 仍在同一仓库且只位于冻结源或精确授权目标分支。后续补丁来源、目标清洁度、祖先关系、
 变更文件与最终 SHA 校验完全不变。
 
+0.2.11 将恢复命令来源判定与 Codex App Server 的规范 schema 对齐。通过 unified exec
+启动的 agent 命令会记录为 `source: "unifiedExecStartup"`，因此恢复只在原有
+`agent` 之外接受这个精确来源。`userShell`、`unifiedExecInteraction`、null、畸形和
+未知来源仍会故障关闭；命令、cwd、终态、读写副作用、冻结状态与目标结果校验均不变。
+
 精确边界见 [v2 参与任务协议](docs/protocol-v2.md)、[旧版 v1 协议](docs/protocol-v1.md)、
 [兼容性策略](docs/compatibility.md)与[安全策略](SECURITY.md)。
 
@@ -191,8 +196,8 @@ worktree 按设计应位于集成分支，而不是冻结源 HEAD。恢复因此
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.10-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.10-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.11-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.11-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 v0.1.0 的 GNU 产物要求 GLIBC 2.39，现已停止推荐；受支持的 Linux 主机请使用

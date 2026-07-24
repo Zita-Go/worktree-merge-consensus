@@ -256,6 +256,14 @@ repository on either its source or the exact authorized target. The subsequent
 patch-provenance, clean-target, ancestry, changed-file, and final-SHA checks are
 unchanged.
 
+Version 0.2.11 aligns recovery command provenance with the canonical Codex App
+Server schema. Commands started through unified exec are emitted with
+`source: "unifiedExecStartup"` even when the agent initiated them, so recovery
+accepts that exact source alongside `agent`. It still rejects `userShell`,
+`unifiedExecInteraction`, null, malformed, and unknown sources, and all command,
+cwd, terminal-result, side-effect, frozen-state, and target-result checks remain
+unchanged.
+
 Read [the v2 participant protocol](docs/protocol-v2.md), the
 [legacy v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
@@ -284,8 +292,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.10-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.10-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.11-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.11-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or

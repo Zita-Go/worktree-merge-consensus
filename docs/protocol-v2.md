@@ -225,6 +225,13 @@ unchanged frozen source refs, and the same repository. Authoritative target,
 patch provenance, source ancestry, cleanliness, changed files, and final SHA
 are revalidated before archival.
 
+Release 0.2.11 accepts `source: "unifiedExecStartup"` as canonical
+agent-initiated command evidence during that recovery. This is the source Codex
+0.145.0 emits for unified-exec commands. `userShell`,
+`unifiedExecInteraction`, null, malformed, and unknown sources remain
+non-agent evidence and fail closed. All command-policy and repository-result
+checks remain unchanged.
+
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the
 [legacy v1 protocol](protocol-v1.md).

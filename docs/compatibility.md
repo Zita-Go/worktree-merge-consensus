@@ -232,6 +232,14 @@ successful commit, while continuing to require unchanged source refs, a frozen
 Reviewer worktree, and the same repository. All later authoritative integration
 result checks remain unchanged.
 
+Version 0.2.11 treats the App Server's canonical `unifiedExecStartup` source as
+agent-initiated command provenance during recovery. Codex 0.145.0 emits that
+source for commands started through unified exec. Recovery continues to accept
+an omitted legacy source as the schema default and rejects `userShell`,
+`unifiedExecInteraction`, null, malformed, and unknown sources. Command, cwd,
+terminal-result, side-effect, frozen-state, and authoritative target checks are
+unchanged.
+
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
 fixed task ID for persisted direct and Reviewer tasks. Ephemeral Effective
 Primary tasks are already loaded and must not be resumed. `thread/read` can

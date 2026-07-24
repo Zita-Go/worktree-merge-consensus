@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.11
+
+- Recognize Codex App Server `unifiedExecStartup` command items as
+  agent-initiated execution evidence during completed-integration and
+  interrupted-turn recovery.
+- Continue to accept a missing source only as the App Server schema's legacy
+  default while rejecting `userShell`, `unifiedExecInteraction`, null,
+  malformed, and unknown sources.
+- Add focused recovery regressions using the canonical source emitted by Codex
+  0.145.0 and preserve the existing command, cwd, terminal-result, side-effect,
+  frozen-state, and target-result checks.
+
 ## 0.2.10
 
 - Revalidate a completed-integration command-audit recovery with the authorized
