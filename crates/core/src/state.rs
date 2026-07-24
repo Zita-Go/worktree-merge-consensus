@@ -609,6 +609,73 @@ impl RunState {
         Ok(self.next_action)
     }
 
+    pub fn retry_blocked_unsent_ephemeral_source_recreation(
+        &mut self,
+    ) -> Result<NextAction, StateError> {
+        if self.status != RunStatus::Blocked
+            || self.phase != Phase::Blocked
+            || self.next_action != NextAction::Stop
+            || self.reason_code.as_deref() != Some("HISTORY_UNAVAILABLE")
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "only the terminal unsent ephemeral Source recreation blocker can be retried",
+            ));
+        }
+        let diagnostic = self.last_error.as_ref().ok_or_else(|| {
+            state_error(
+                "INCOMPATIBLE_STATE",
+                "ephemeral Source recreation recovery requires its originating diagnostic",
+            )
+        })?;
+        if diagnostic.code != "HISTORY_UNAVAILABLE"
+            || diagnostic.detail != "Source Primary before safe mirror recreation is not idle"
+            || diagnostic.operation.is_some()
+            || diagnostic.action != NextAction::RequestPrimaryIntegration
+            || diagnostic.role != Some(Role::Primary)
+            || !diagnostic_matches_primary(&self.facts, diagnostic)
+            || diagnostic.thread_id.as_deref() == Some(self.facts.primary_thread_id.as_str())
+            || diagnostic.thread_id.as_deref() == Some(self.facts.reviewer_thread_id.as_str())
+            || diagnostic.participant_binding_mode.as_deref() != Some("EPHEMERAL_FORK")
+            || diagnostic.participant_server.as_deref() != Some("worktreeMergeConsensusParticipant")
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "ephemeral Source recreation recovery is limited to the exact bound Primary mirror",
+            ));
+        }
+        if !self.plan_approved
+            || self.current_plan_payload.is_none()
+            || self.plan_approval_payload.is_none()
+            || self.target_integration_branch.is_none()
+        {
+            return Err(state_error(
+                "INCOMPATIBLE_STATE",
+                "ephemeral Source recreation recovery requires an approved frozen plan",
+            ));
+        }
+        if self.integration_branch.is_some()
+            || self.integration_sha.is_some()
+            || self.current_integration_payload.is_some()
+            || self.verification_worktree.is_some()
+            || !self.test_evidence.is_empty()
+            || self.accepted_result.is_some()
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "ephemeral Source recreation recovery cannot replace an accepted result",
+            ));
+        }
+
+        self.status = RunStatus::Running;
+        self.phase = Phase::Integrate;
+        self.next_action = NextAction::RequestPrimaryIntegration;
+        self.reason_code = None;
+        self.last_error = None;
+        self.validate_persisted()?;
+        Ok(self.next_action)
+    }
+
     pub fn retry_blocked_verification_without_execution(
         &mut self,
     ) -> Result<NextAction, StateError> {

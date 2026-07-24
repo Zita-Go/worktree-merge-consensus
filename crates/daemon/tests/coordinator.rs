@@ -1580,6 +1580,7 @@ async fn completed_integration_recovery_reforks_an_unloaded_ephemeral_primary() 
     safety
         .integration_branch_active
         .store(true, Ordering::SeqCst);
+    app.set_primary_runtime_status(ThreadRuntimeStatus::NotLoaded);
     app.remove_thread(&thread_id);
 
     let accepted = coordinator.resume(RUN_ID).await.unwrap();
@@ -1597,6 +1598,128 @@ async fn completed_integration_recovery_reforks_an_unloaded_ephemeral_primary() 
     assert_eq!(binding.generation, original_binding.generation + 1);
     assert_ne!(binding.effective_primary_thread_id, thread_id);
     assert_eq!(app.forks().len(), 2);
+    assert!(app.request_order().iter().any(|request| {
+        request
+            == &format!(
+                "{}:REQUEST_PRIMARY_INTEGRATION",
+                binding.effective_primary_thread_id
+            )
+    }));
+}
+
+#[tokio::test]
+async fn v0212_unloaded_source_blocker_resumes_the_same_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let (coordinator, app, store, safety) =
+        seed_invalid_integration_recovery_with_preloaded_primary(
+            &path,
+            PARTICIPANT_MCP_SERVER,
+            true,
+        )
+        .await;
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    let thread_id = pending.thread_id.clone().unwrap();
+    let turn_id = pending.turn_id.clone().unwrap();
+    let original_binding = store.active_primary_binding(RUN_ID).unwrap().unwrap();
+    app.set_patch_plugin_id(&thread_id, &turn_id, Value::Null);
+    insert_completed_integration_command_evidence(&app, &thread_id, &turn_id);
+    replace_persisted_ephemeral_turn_evidence(&path, &store, &app, &thread_id, &turn_id);
+
+    let mut blocked = store.load_run(RUN_ID).unwrap().unwrap();
+    blocked.reason_code = Some("FORBIDDEN_OPERATION".into());
+    blocked.last_error = Some(RunDiagnostic {
+        code: "FORBIDDEN_OPERATION".into(),
+        detail: "integration command is not canonically completed with exit code zero".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some(thread_id.clone()),
+        source_thread_id: Some("primary".into()),
+        effective_thread_id: Some(thread_id.clone()),
+        participant_binding_generation: Some(original_binding.generation),
+        participant_binding_mode: Some("EPHEMERAL_FORK".into()),
+        participant_server: Some(PARTICIPANT_MCP_SERVER.into()),
+    });
+    store.save_state(&blocked).unwrap();
+    safety
+        .integration_branch_active
+        .store(true, Ordering::SeqCst);
+
+    let prepared = coordinator.prepare_resume(RUN_ID).await.unwrap();
+    assert_eq!(prepared.status, RunStatus::Running);
+    let unsent = store.pending_send(RUN_ID).unwrap().unwrap();
+    assert_eq!(unsent.thread_id, None);
+    assert_eq!(unsent.turn_id, None);
+    assert_eq!(unsent.turn_start_intent_at, None);
+    assert_eq!(
+        unsent.participant_binding_generation,
+        Some(original_binding.generation)
+    );
+
+    let mut legacy_blocked = store.load_run(RUN_ID).unwrap().unwrap();
+    legacy_blocked.record_error(RunDiagnostic {
+        code: "HISTORY_UNAVAILABLE".into(),
+        detail: "Source Primary before safe mirror recreation is not idle".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some(thread_id.clone()),
+        source_thread_id: Some("primary".into()),
+        effective_thread_id: Some(thread_id.clone()),
+        participant_binding_generation: Some(original_binding.generation),
+        participant_binding_mode: Some("EPHEMERAL_FORK".into()),
+        participant_server: Some(PARTICIPANT_MCP_SERVER.into()),
+    });
+    legacy_blocked.block("HISTORY_UNAVAILABLE");
+    store.save_state(&legacy_blocked).unwrap();
+
+    store
+        .record_turn_start_intent(RUN_ID, &unsent.message_hash)
+        .unwrap();
+    let mut unsafe_resumed = legacy_blocked.clone();
+    unsafe_resumed
+        .retry_blocked_unsent_ephemeral_source_recreation()
+        .unwrap();
+    let unsafe_error = store
+        .reactivate_blocked_run_with_unsent_ephemeral_recreation_retry(
+            &legacy_blocked,
+            &unsafe_resumed,
+        )
+        .unwrap_err();
+    assert!(
+        unsafe_error
+            .to_string()
+            .contains("pending request is not at the exact unsent ephemeral recovery boundary")
+    );
+    assert_eq!(store.load_run(RUN_ID).unwrap().unwrap(), legacy_blocked);
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE turns
+             SET turn_start_intent_at = NULL, capability_generation = NULL
+             WHERE run_id = ?1 AND message_hash = ?2",
+            params![RUN_ID, &unsent.message_hash],
+        )
+        .unwrap();
+
+    app.set_primary_runtime_status(ThreadRuntimeStatus::NotLoaded);
+    app.remove_thread(&thread_id);
+
+    let accepted = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(
+        accepted.status,
+        RunStatus::Accepted,
+        "{:?}",
+        accepted.last_error
+    );
+    assert_eq!(accepted.integration_sha.as_deref(), Some(INTEGRATION_SHA));
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    let binding = store.active_primary_binding(RUN_ID).unwrap().unwrap();
+    assert_eq!(binding.generation, original_binding.generation + 1);
+    assert_ne!(binding.effective_primary_thread_id, thread_id);
+    assert!(app.resumes().iter().any(|thread| thread == "primary"));
     assert!(app.request_order().iter().any(|request| {
         request
             == &format!(
@@ -5432,6 +5555,10 @@ impl FakeAppServer {
     fn with_primary_runtime_status(self, status: ThreadRuntimeStatus) -> Self {
         *self.primary_runtime_status.lock().unwrap() = status;
         self
+    }
+
+    fn set_primary_runtime_status(&self, status: ThreadRuntimeStatus) {
+        *self.primary_runtime_status.lock().unwrap() = status;
     }
 
     fn without_primary_participant(self) -> Self {

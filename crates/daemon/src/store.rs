@@ -1448,6 +1448,208 @@ impl SqliteRunStore {
         Ok(())
     }
 
+    pub fn reactivate_blocked_run_with_unsent_ephemeral_recreation_retry(
+        &self,
+        blocked_state: &RunState,
+        resumed_state: &RunState,
+    ) -> Result<(), StoreError> {
+        let mut expected_resumed = blocked_state.clone();
+        expected_resumed
+            .retry_blocked_unsent_ephemeral_source_recreation()
+            .map_err(|error| StoreError::TerminalTurnNotRetryable(error.to_string()))?;
+        if expected_resumed != *resumed_state {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "unsent ephemeral recreation recovery state is not the exact restored state".into(),
+            ));
+        }
+        let diagnostic = blocked_state.last_error.as_ref().ok_or_else(|| {
+            StoreError::TerminalTurnNotRetryable(
+                "unsent ephemeral recreation recovery has no diagnostic".into(),
+            )
+        })?;
+        let generation = diagnostic.participant_binding_generation.ok_or_else(|| {
+            StoreError::TerminalTurnNotRetryable(
+                "unsent ephemeral recreation recovery has no binding generation".into(),
+            )
+        })?;
+        let effective_thread_id = diagnostic.effective_thread_id.as_deref().ok_or_else(|| {
+            StoreError::TerminalTurnNotRetryable(
+                "unsent ephemeral recreation recovery has no Effective Primary".into(),
+            )
+        })?;
+
+        let run_id = blocked_state.facts.run_id.to_string();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let current_json = transaction
+            .query_row(
+                "SELECT state_json FROM runs WHERE run_id = ?1",
+                [&run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::RunNotFound(run_id.clone()))?;
+        if deserialize_state(&current_json)? != *blocked_state {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "run {run_id} changed while preparing unsent ephemeral recreation recovery"
+            )));
+        }
+
+        let open_turn_count = transaction.query_row(
+            "SELECT COUNT(*) FROM turns
+             WHERE run_id = ?1 AND delivery_state IN ('PENDING', 'SENT')",
+            [&run_id],
+            |row| row.get::<_, u64>(0),
+        )?;
+        let pending = transaction
+            .query_row(
+                "SELECT message_hash, role, phase, delivery_state, thread_id, turn_id,
+                        participant_binding_generation, turn_start_intent_at
+                 FROM turns
+                 WHERE run_id = ?1 AND delivery_state IN ('PENDING', 'SENT')
+                 ORDER BY id DESC LIMIT 1",
+                [&run_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<u32>>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            message_hash,
+            role,
+            phase,
+            delivery_state,
+            thread_id,
+            turn_id,
+            pending_generation,
+            turn_start_intent_at,
+        )) = pending
+        else {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "run {run_id} has no pending request for ephemeral recreation recovery"
+            )));
+        };
+        if open_turn_count != 1
+            || role != "PRIMARY"
+            || phase != "INTEGRATE"
+            || delivery_state != "PENDING"
+            || thread_id.is_some()
+            || turn_id.is_some()
+            || turn_start_intent_at.is_some()
+            || pending_generation != Some(generation)
+        {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "run {run_id} pending request is not at the exact unsent ephemeral recovery boundary"
+            )));
+        }
+
+        let binding = query_active_primary_binding(&transaction, &run_id)?.ok_or_else(|| {
+            StoreError::TerminalTurnNotRetryable(format!(
+                "run {run_id} has no active ephemeral binding for recovery"
+            ))
+        })?;
+        if binding.generation != generation
+            || binding.mode != PrimaryBindingMode::EphemeralFork
+            || binding.source_primary_thread_id != blocked_state.facts.primary_thread_id
+            || binding.effective_primary_thread_id != effective_thread_id
+            || binding.participant_server != "worktreeMergeConsensusParticipant"
+            || binding
+                .source_history_hash
+                .as_deref()
+                .is_none_or(str::is_empty)
+        {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "run {run_id} active binding does not match the blocked ephemeral recovery identity"
+            )));
+        }
+
+        let successful_patch_matches = transaction
+            .query_row(
+                "SELECT 1 FROM patch_applications
+                 WHERE run_id = ?1 AND message_hash = ?2
+                   AND source_primary_thread_id = ?3
+                   AND effective_primary_thread_id = ?4
+                   AND participant_binding_generation = ?5
+                 LIMIT 1",
+                params![
+                    run_id,
+                    message_hash,
+                    blocked_state.facts.primary_thread_id,
+                    effective_thread_id,
+                    generation
+                ],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        let archived_completed_attempt_matches = transaction
+            .query_row(
+                "SELECT 1 FROM turn_attempts
+                 WHERE run_id = ?1 AND message_hash = ?2
+                   AND thread_id = ?3 AND terminal_status = 'completed'
+                 LIMIT 1",
+                params![run_id, message_hash, effective_thread_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !successful_patch_matches || !archived_completed_attempt_matches {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "run {run_id} has no exact archived completed patch attempt for recovery"
+            )));
+        }
+
+        let common_dir = resumed_state.facts.git_common_dir.to_string_lossy();
+        match transaction.execute(
+            "INSERT INTO locks (repository_id, run_id, primary_worktree, acquired_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                common_dir.as_ref(),
+                run_id,
+                resumed_state
+                    .facts
+                    .primary_worktree
+                    .to_string_lossy()
+                    .as_ref(),
+                now_unix(),
+            ],
+        ) {
+            Ok(_) => {}
+            Err(error) if is_constraint(&error) => {
+                return Err(StoreError::ActiveRunExists(format!(
+                    "repository {} already has an active run",
+                    resumed_state.facts.git_common_dir.display()
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        update_run_row(&transaction, &run_id, resumed_state)?;
+        transaction.execute(
+            "INSERT INTO transitions (
+                run_id, from_phase, to_phase, status, reason_code,
+                response_hash, created_at
+             ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)",
+            params![
+                run_id,
+                enum_name(&blocked_state.phase)?,
+                enum_name(&resumed_state.phase)?,
+                enum_name(&resumed_state.status)?,
+                now_unix(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn reactivate_blocked_run_with_completed_turn_retry(
         &self,
         blocked_state: &RunState,

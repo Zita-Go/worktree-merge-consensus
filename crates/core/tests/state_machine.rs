@@ -874,6 +874,38 @@ fn completed_integration_forbidden_audit_is_retryable_for_ephemeral_primary() {
 }
 
 #[test]
+fn unsent_ephemeral_source_recreation_blocker_restores_integration() {
+    let mut state = fixture_plan_state();
+    let plan_hash = canonical_json_hash(state.current_plan_payload.as_ref().unwrap());
+    state.apply_message(approved_plan(&plan_hash)).unwrap();
+    let source_thread_id = state.facts.primary_thread_id.clone();
+    state.record_error(RunDiagnostic {
+        code: "HISTORY_UNAVAILABLE".into(),
+        detail: "Source Primary before safe mirror recreation is not idle".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some("primary-consensus-mirror-2".into()),
+        source_thread_id: Some(source_thread_id),
+        effective_thread_id: Some("primary-consensus-mirror-2".into()),
+        participant_binding_generation: Some(2),
+        participant_binding_mode: Some("EPHEMERAL_FORK".into()),
+        participant_server: Some("worktreeMergeConsensusParticipant".into()),
+    });
+    state.block("HISTORY_UNAVAILABLE");
+
+    let action = state
+        .retry_blocked_unsent_ephemeral_source_recreation()
+        .unwrap();
+
+    assert_eq!(action, NextAction::RequestPrimaryIntegration);
+    assert_eq!(state.status, RunStatus::Running);
+    assert_eq!(state.phase, Phase::Integrate);
+    assert!(state.reason_code.is_none());
+    assert!(state.last_error.is_none());
+}
+
+#[test]
 fn forbidden_operation_after_integration_identity_is_not_retryable() {
     let mut state = fixture_result_state("cccccccccccccccccccccccccccccccccccccccc");
     state.record_error(RunDiagnostic {

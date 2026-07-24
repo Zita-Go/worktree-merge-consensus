@@ -895,6 +895,8 @@ where
             verification_without_execution_retry_action(&state)?;
         let retry_verification_environment_action =
             verification_environment_unavailable_retry_action(&state)?;
+        let retry_unsent_ephemeral_source_recreation_action =
+            unsent_ephemeral_source_recreation_retry_action(&state)?;
         let retry_invalid_response_action = if retry_integration_invalid_response_action.is_none() {
             invalid_response_retry_action(&state)?
         } else {
@@ -920,6 +922,7 @@ where
             .or(retry_integration_invalid_response_action)
             .or(retry_verification_without_execution_action)
             .or(retry_verification_environment_action)
+            .or(retry_unsent_ephemeral_source_recreation_action)
             .or(retry_completed_response_action)
             .unwrap_or(state.next_action);
         if effective_action == NextAction::RequestPrimaryIntegration {
@@ -1019,6 +1022,22 @@ where
                     &retry.thread_id,
                     &retry.turn_id,
                     &retry.observed_status,
+                )?;
+            return Ok(state);
+        }
+        if let Some(action) = retry_unsent_ephemeral_source_recreation_action {
+            let blocked_state = state.clone();
+            let restored_action = state.retry_blocked_unsent_ephemeral_source_recreation()?;
+            if restored_action != action {
+                return Err(CoordinatorError::operational(
+                    "INCOMPATIBLE_STATE",
+                    "restored ephemeral Source recreation action does not match its diagnostic",
+                ));
+            }
+            self.store
+                .reactivate_blocked_run_with_unsent_ephemeral_recreation_retry(
+                    &blocked_state,
+                    &state,
                 )?;
             return Ok(state);
         }
@@ -3692,10 +3711,29 @@ where
         let source_thread_id = state.facts.primary_thread_id.clone();
         let source = self.read_thread_with_retry(&source_thread_id).await?;
         self.verify_thread_identity(state, Role::Primary, &source)?;
-        let source = if source.summary.is_active() {
-            self.wait_until_idle(state, &source_thread_id).await?
-        } else {
-            source
+        let source = match runtime_status(&source)? {
+            ThreadRuntimeStatus::Active => self.wait_until_idle(state, &source_thread_id).await?,
+            ThreadRuntimeStatus::NotLoaded => {
+                let resumed = self
+                    .resume_thread_with_retry(
+                        &source_thread_id,
+                        &ThreadResumePolicy::Participant(self.participant_mcp_config()),
+                    )
+                    .await?;
+                verify_requested_thread_identity(&source_thread_id, &resumed)?;
+                if resumed.summary.is_active() {
+                    self.wait_until_idle(state, &source_thread_id).await?
+                } else {
+                    resumed
+                }
+            }
+            ThreadRuntimeStatus::Idle => source,
+            ThreadRuntimeStatus::SystemError => {
+                return Err(CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "Source Primary is in systemError state before safe mirror recreation",
+                ));
+            }
         };
         require_idle_thread(&source, "Source Primary before safe mirror recreation")?;
         self.create_ephemeral_primary_binding_with_pending_rotation(
@@ -6313,6 +6351,32 @@ fn corrective_patch_tool_unavailable_retry_action(
             CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
                 format!("corrective patch-tool blocker is not retryable: {error}"),
+            )
+        })?;
+    Ok(Some(NextAction::RequestPrimaryIntegration))
+}
+
+fn unsent_ephemeral_source_recreation_retry_action(
+    state: &RunState,
+) -> Result<Option<NextAction>, CoordinatorError> {
+    if state.reason_code.as_deref() != Some("HISTORY_UNAVAILABLE") {
+        return Ok(None);
+    }
+    let Some(diagnostic) = state.last_error.as_ref() else {
+        return Ok(None);
+    };
+    if diagnostic.code != "HISTORY_UNAVAILABLE"
+        || diagnostic.detail != "Source Primary before safe mirror recreation is not idle"
+    {
+        return Ok(None);
+    }
+    let mut candidate = state.clone();
+    candidate
+        .retry_blocked_unsent_ephemeral_source_recreation()
+        .map_err(|error| {
+            CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                format!("ephemeral Source recreation blocker is not retryable: {error}"),
             )
         })?;
     Ok(Some(NextAction::RequestPrimaryIntegration))
