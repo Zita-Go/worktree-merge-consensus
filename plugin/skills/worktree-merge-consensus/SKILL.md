@@ -79,8 +79,10 @@ Before every Primary turn, the coordinator fully paginates
 `consensus_apply_patch`. This preflight completes before `turn/start`. A frozen
 Source-history hash prevents a replacement mirror from silently diverging.
 Persisted start intent prevents uncertain delivery from being resent. Reviewer
-routing and both frozen source identities are unchanged. A pending or
-uncertain turn is never reforked or resent.
+routing and both frozen source identities are unchanged. Release 0.2.12 may
+atomically rebind a pending request to a replacement ephemeral generation only
+when no effective task ID, turn ID, or turn-start intent exists. An uncertain
+turn is never reforked or resent.
 
 Release 0.2.9 makes completed integration command auditing side-effect-aware.
 Approved writes still require canonical completion with exit code zero.
@@ -110,6 +112,15 @@ alongside `agent`; continue to reject `userShell`, `unifiedExecInteraction`,
 null, malformed, and unknown sources. An omitted source remains compatible only
 as the schema's legacy default. No command-policy, terminal-result,
 frozen-state, or target-result check is relaxed.
+
+Release 0.2.12 recovers a completed-integration read-only confirmation when its
+ephemeral Effective Primary disappears before dispatch. Binding rotation and
+pending-request rebinding are one SQLite transaction and require an exact
+active generation, the same frozen Source-history hash, and no stored task ID,
+turn ID, or start intent. The successful controlled patch remains attributed
+to the archived completed old generation and is accepted across generations
+only for the exact same frozen ephemeral lineage. Any sent, uncertain,
+divergent, or mixed-provenance state still fails closed.
 
 The launcher may call only the operator-facing `consensus_*` tools listed
 above. It must never ask the invoking task to find, install, expose, or call
@@ -338,6 +349,16 @@ The launcher does not conduct or relay review rounds. The persistent coordinator
   and the canonical archived source is `unifiedExecStartup`, it likewise made
   no Run or Git mutation; after installing v0.2.11, explicitly resume the same
   Run once. Every other source remains terminal.
+- If a v0.2.11 Run is `PAUSED_USER_ACTION` with `COMMUNICATION_FAILURE` because
+  the ephemeral Effective Primary returned `thread not loaded` before the
+  completed-integration read-only confirmation was sent, install matching
+  v0.2.12 binary and plugin artifacts, then explicitly call
+  `consensus_resume` once. The coordinator may rotate the binding only when the
+  pending Primary row has no task ID, turn ID, or turn-start intent and still
+  references the active frozen-history generation. It preserves the same Run,
+  request hash, integration branch and SHA, archived patch provenance, commit,
+  and source refs. Any evidence of dispatch, uncertainty, changed history, or
+  mixed identity remains terminal.
 - Call `consensus_cancel` only when the user requests cancellation. Cancellation preserves existing Git state.
 
 Read [references/protocol.md](references/protocol.md) when explaining lifecycle states, acceptance evidence, or recovery behavior.

@@ -185,11 +185,12 @@ fully paginates `mcpServerStatus/list` using `threadId`, `detail:
 participant tools fail closed. The operator plugin's eight tools are not
 participant visibility evidence. Reviewer routing is unchanged, and the
 selected task IDs, source refs, and source worktrees remain frozen. A missing
-ephemeral mirror can be recreated only between completed actions with no
-pending or uncertain send; pending or uncertain turns are never reforked or
-resent. `thread/fork` is non-idempotent and is never automatically repeated
-after an uncertain response. The App Server contract remains Codex CLI
-`>=0.144.1`.
+ephemeral mirror can normally be recreated only between completed actions with
+no pending or uncertain send. Version 0.2.12 adds one atomic exception for a
+pending request proven unsent by the absence of an effective task ID, turn ID,
+and turn-start intent. Uncertain turns are never reforked or resent.
+`thread/fork` is non-idempotent and is never automatically repeated after an
+uncertain response. The App Server contract remains Codex CLI `>=0.144.1`.
 
 Version 0.2.7 also permits explicit recovery of only the exact production
 blocker left after the 0.2.6 recovery: the same blocked Run, correction round,
@@ -239,6 +240,17 @@ an omitted legacy source as the schema default and rejects `userShell`,
 `unifiedExecInteraction`, null, malformed, and unknown sources. Command, cwd,
 terminal-result, side-effect, frozen-state, and authoritative target checks are
 unchanged.
+
+Version 0.2.12 recovers that read-only confirmation when the active ephemeral
+Effective Primary is no longer loaded before dispatch. The store atomically
+deactivates the old binding, inserts a replacement with the same frozen Source
+history fingerprint, and rebinds the one pending request only when no task ID,
+turn ID, or turn-start intent exists. The successful controlled patch remains
+attributed to the archived completed old generation. Cross-generation
+validation requires two ephemeral bindings with the same frozen Source,
+participant server, nonempty history hash, an exact archived completed attempt,
+and the replacement as the active binding. Any sent, intent-recorded,
+uncertain, divergent, or mixed-provenance state remains terminal.
 
 Before every `turn/start`, the coordinator also calls `thread/resume` with the
 fixed task ID for persisted direct and Reviewer tasks. Ephemeral Effective

@@ -176,10 +176,12 @@ participant tool inventory is exactly `consensus_apply_patch`; the operator
 plugin's eight tools do not prove participant visibility. Reviewer routing is
 unchanged, while the selected source task IDs, refs, worktrees, and SHAs remain
 frozen. A lost mirror may be recreated only between completed actions with no
-pending or uncertain send. Pending or uncertain turns are never reforked or
-resent, and an uncertain non-idempotent `thread/fork` is never automatically
-repeated. This protocol depends on the experimental Codex CLI `>=0.144.1` App
-Server surface.
+pending or uncertain send, except that release 0.2.12 may atomically replace
+the binding for one pending request proven unsent by the absence of an
+effective task ID, turn ID, and turn-start intent. Uncertain turns are never
+reforked or resent, and an uncertain non-idempotent `thread/fork` is never
+automatically repeated. This protocol depends on the experimental Codex CLI
+`>=0.144.1` App Server surface.
 
 After a matching 0.2.8 deployment, explicit resume may recover only the exact
 post-0.2.6 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` correction blocker: the same
@@ -231,6 +233,15 @@ agent-initiated command evidence during that recovery. This is the source Codex
 `unifiedExecInteraction`, null, malformed, and unknown sources remain
 non-agent evidence and fail closed. All command-policy and repository-result
 checks remain unchanged.
+
+Release 0.2.12 allows the pending read-only confirmation to continue if its
+ephemeral Effective Primary disappears before dispatch. The daemon rotates the
+binding and rebinds the request atomically only at a proven-unsent boundary.
+Successful controlled-patch provenance stays on the archived completed old
+generation and is accepted across generations only when both are ephemeral,
+share the exact frozen Source, participant server, and nonempty Source-history
+hash, and the replacement is active. Sent, intent-recorded, uncertain,
+divergent, and mixed-provenance states fail closed.
 
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the

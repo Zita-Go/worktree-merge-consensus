@@ -137,9 +137,12 @@ the evidence below.
    does not pause; unchanged state must still hit the bounded idle timeout.
    Separately remove an idle ephemeral mirror between completed actions and
    confirm it is recreated from the Source Primary's complete history. Repeat
-   during a pending or uncertain Primary turn and confirm the coordinator does
-   not refork or resend it. Interrupt one `thread/fork` response after dispatch
-   and confirm the non-idempotent request is not automatically repeated.
+   with a pending Primary request that has no effective task ID, turn ID, or
+   turn-start intent and confirm the binding and request rotate atomically to
+   the replacement mirror. Then add start intent or a sent identity and confirm
+   the coordinator does not refork or resend it. Interrupt one `thread/fork`
+   response after dispatch and confirm the non-idempotent request is not
+   automatically repeated.
 8. Verify `accepted_result` records the authoritative tests,
    `source_refs_unchanged: true`, and local-only/no-push/no-PR fields. Verify the
    test cwd is a cleanly materialized clone of the exact integration SHA with a

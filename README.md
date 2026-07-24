@@ -209,10 +209,12 @@ page of `mcpServerStatus/list` with `detail: "toolsAndAuthOnly"` before
 `consensus_apply_patch`; the operator plugin's eight-tool visibility is not
 participant evidence. Reviewer routing is unchanged. Both selected source task
 IDs, source refs, and source worktrees remain frozen. If an ephemeral mirror is
-lost, it may be recreated only between completed actions when no send is
-pending or uncertain; a pending or uncertain turn is never reforked or resent.
-Because `thread/fork` is non-idempotent, an uncertain fork response is never
-automatically repeated. This contract requires Codex CLI `>=0.144.1`.
+lost, it may normally be recreated only between completed actions when no send
+is pending or uncertain. Version 0.2.12 additionally permits atomic replacement
+for a pending request that is provably unsent because it has no effective task
+ID, turn ID, or turn-start intent. Any uncertain turn is never reforked or
+resent. Because `thread/fork` is non-idempotent, an uncertain fork response is
+never automatically repeated. This contract requires Codex CLI `>=0.144.1`.
 
 After a matching 0.2.8 deployment, explicit `consensus_resume` may recover
 only the exact post-0.2.6 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` correction
@@ -264,6 +266,16 @@ accepts that exact source alongside `agent`. It still rejects `userShell`,
 cwd, terminal-result, side-effect, frozen-state, and target-result checks remain
 unchanged.
 
+Version 0.2.12 lets that same-Run recovery survive loss of its ephemeral
+Effective Primary before the read-only confirmation is dispatched. The
+coordinator rotates the binding and rebinds the existing pending request in one
+transaction only when no effective task ID, turn ID, or turn-start intent was
+stored and the binding generation and frozen Source-history hash still match.
+Successful patch evidence remains tied to the archived completed generation and
+is accepted across the replacement generation only for the exact same frozen
+ephemeral lineage. Any sent, intent-recorded, uncertain, divergent, or
+mixed-provenance state still fails closed.
+
 Read [the v2 participant protocol](docs/protocol-v2.md), the
 [legacy v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
@@ -292,8 +304,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.11-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.11-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.12-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.12-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or

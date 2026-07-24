@@ -231,6 +231,15 @@ command provenance during recovery. It continues to reject `userShell`,
 weaken the command, terminal-result, side-effect, frozen-state, or target-result
 checks.
 
+Release 0.2.12 lets a same-Run completed-integration confirmation recover from
+a missing ephemeral Effective Primary before dispatch. It atomically rotates
+the binding and rebinds the pending request only when no effective task ID,
+turn ID, or turn-start intent exists and the active generation and frozen
+Source-history fingerprint still match. Successful patch provenance remains on
+the archived completed old generation and crosses generations only for the
+exact same ephemeral lineage. Sent, intent-recorded, uncertain, divergent, or
+mixed-provenance states fail closed.
+
 The same release contains one migration only for the exact legacy 0.2.4
 blocked-verification history: the same Run, Primary task, request, round,
 verification clone, integration branch and SHA, frozen refs, and three archived

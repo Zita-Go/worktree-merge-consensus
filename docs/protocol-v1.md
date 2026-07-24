@@ -63,9 +63,11 @@ That Effective Primary is not a new source identity. Before every Primary turn,
 the daemon resumes the Effective Primary, fully paginates
 `mcpServerStatus/list`, requires exactly `consensus_apply_patch`, and only then
 sends `turn/start`. Reviewer routing and both frozen source task IDs, worktrees,
-refs, and SHAs remain unchanged. A pending or uncertain turn is never reforked
-or resent. This preflight occurs before every `turn/start` for a Primary
-action.
+refs, and SHAs remain unchanged. A pending request may be rebound to a
+replacement ephemeral Effective Primary only when it is proven unsent by the
+absence of an effective task ID, turn ID, and turn-start intent. An uncertain
+turn is never reforked or resent. This preflight occurs before every
+`turn/start` for a Primary action.
 
 Reading task history is not a substitute for resuming a task that App Server
 reports as `notLoaded`. Version 0.1.26 treats active-task waiting as a bounded
@@ -102,6 +104,13 @@ Version 0.2.11 also recognizes the App Server's canonical
 `unifiedExecStartup` value as agent-initiated command provenance when auditing
 that completed turn. User-shell, unified-exec interaction, null, malformed, and
 unknown sources remain rejected.
+
+Version 0.2.12 permits the pending read-only confirmation from that recovery to
+move to a replacement ephemeral generation only when the request is durably
+unsent. Binding replacement and pending-request rebinding are one transaction.
+The patch record remains attached to the archived completed old generation and
+is accepted only across the exact same frozen Source-history lineage. Any
+uncertain delivery or identity mismatch remains rejected.
 
 Preflight reason codes include `UNREGISTERED_WORKTREE`,
 `DUPLICATE_WORKTREE`, `REPOSITORY_MISMATCH`, `DIRTY_WORKTREE`, and

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.12
+
+- Recover a same-Run completed-integration confirmation when its ephemeral
+  Effective Primary has disappeared but the replacement request is provably
+  unsent: no effective task ID, turn ID, or turn-start intent has been stored.
+- Rotate the ephemeral binding and rebind that pending request in one SQLite
+  transaction while preserving the frozen Source Primary history fingerprint.
+- Retain successful controlled-patch provenance on the archived completed
+  generation and accept it across the replacement generation only when both
+  bindings share the exact frozen ephemeral lineage and archived request.
+- Continue to fail closed for sent, intent-recorded, uncertain, divergent, or
+  mixed-provenance requests, with unit and end-to-end regressions for both the
+  accepted and rejected boundaries.
+
 ## 0.2.11
 
 - Recognize Codex App Server `unifiedExecStartup` command items as

@@ -138,9 +138,10 @@ goal，因此协调器不会对镜像调用 `thread/goal/get`。
 `turn/start` 前读取 `mcpServerStatus/list` 的全部页面；参与服务必须只暴露
 `consensus_apply_patch`。操作者插件的 8 个工具不能作为参与任务可见性的证据。Reviewer
 路由不变，两个源任务 ID、源引用与源 worktree 始终冻结。ephemeral 镜像丢失后，只能在前一动作
-已完成且没有 pending 或 uncertain 发送时重建；pending 或 uncertain turn 不会重新 fork
-（refork），也不会重发（resent）。由于 `thread/fork` 非幂等，响应不确定时绝不会自动重试。
-该契约要求 Codex CLI `>=0.144.1`。
+已完成且没有 pending 或 uncertain 发送时正常重建。0.2.12 另允许对可证明尚未发送的 pending
+请求原子替换镜像：记录中必须没有 Effective Primary 任务 ID、turn ID 或 turn-start intent。
+任何 uncertain turn 仍不会重新 fork（refork）或重发（resent）。由于 `thread/fork` 非幂等，
+响应不确定时绝不会自动重试。该契约要求 Codex CLI `>=0.144.1`。
 
 部署匹配的 0.2.8 后，必须显式调用 `consensus_resume`，才可能恢复精确的 post-0.2.6
 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` 修正阻塞。恢复保留同一 Run、轮次、分支、旧 SHA 与失败的
@@ -174,6 +175,13 @@ worktree 按设计应位于集成分支，而不是冻结源 HEAD。恢复因此
 `agent` 之外接受这个精确来源。`userShell`、`unifiedExecInteraction`、null、畸形和
 未知来源仍会故障关闭；命令、cwd、终态、读写副作用、冻结状态与目标结果校验均不变。
 
+0.2.12 允许上述同一 Run 恢复在只读确认发送前丢失 ephemeral Effective Primary 时继续。
+只有当待发送记录尚无 Effective Primary 任务 ID、turn ID 或 turn-start intent，且绑定
+generation 与冻结 Source 历史哈希仍精确匹配时，协调器才会在一个 SQLite 事务中轮换绑定并
+重新绑定同一 pending 请求。成功补丁证据仍归属于旧 generation 的已归档完成尝试；只有新旧
+绑定属于完全相同的冻结 ephemeral 谱系时才可跨 generation 验证。已发送、已记录 intent、
+不确定、历史分歧或来源混合的状态仍会故障关闭。
+
 精确边界见 [v2 参与任务协议](docs/protocol-v2.md)、[旧版 v1 协议](docs/protocol-v1.md)、
 [兼容性策略](docs/compatibility.md)与[安全策略](SECURITY.md)。
 
@@ -196,8 +204,8 @@ worktree 按设计应位于集成分支，而不是冻结源 HEAD。恢复因此
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.11-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.11-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.2.12-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.2.12-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 v0.1.0 的 GNU 产物要求 GLIBC 2.39，现已停止推荐；受支持的 Linux 主机请使用
