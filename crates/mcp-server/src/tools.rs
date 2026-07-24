@@ -1,12 +1,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-pub const MCP_TOOL_NAMES: [&str; 8] = [
+pub const MCP_TOOL_NAMES: [&str; 9] = [
     "consensus_doctor",
     "consensus_list_threads",
     "consensus_list_worktrees",
     "consensus_start",
     "consensus_status",
+    "consensus_wait",
     "consensus_resume",
     "consensus_apply_patch",
     "consensus_cancel",
@@ -102,6 +103,29 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             MCP_TOOL_NAMES[5],
+            "Wait for public consensus progress events and return a resumable cursor plus a snapshot when the run pauses or terminates.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string", "minLength": 1},
+                    "after_cursor": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Return events newer than this cursor; use 0 for the complete public event stream."
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 30000,
+                        "description": "Long-poll timeout in milliseconds; defaults to 25000."
+                    }
+                },
+                "required": ["run_id"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            MCP_TOOL_NAMES[6],
             "Resume a paused consensus run after its blocking condition is resolved.",
             run_id_schema(),
         ),
@@ -125,7 +149,7 @@ pub fn tool_definitions() -> Vec<Value> {
             }),
         ),
         tool(
-            MCP_TOOL_NAMES[7],
+            MCP_TOOL_NAMES[8],
             "Cancel a consensus run without reverting or deleting Git state.",
             run_id_schema(),
         ),
@@ -150,6 +174,11 @@ pub(crate) fn validate_arguments(name: &str, arguments: Value) -> Result<Value, 
         }
         "consensus_status" => {
             let parsed: StatusArguments = parse(arguments)?;
+            parsed.validate()?;
+            serde_json::to_value(parsed).map_err(|error| error.to_string())
+        }
+        "consensus_wait" => {
+            let parsed: WaitArguments = parse(arguments)?;
             parsed.validate()?;
             serde_json::to_value(parsed).map_err(|error| error.to_string())
         }
@@ -253,6 +282,33 @@ impl StatusArguments {
 #[serde(deny_unknown_fields)]
 struct RunIdArguments {
     run_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WaitArguments {
+    run_id: String,
+    #[serde(default)]
+    after_cursor: i64,
+    #[serde(default = "default_wait_timeout_ms")]
+    timeout_ms: u64,
+}
+
+impl WaitArguments {
+    fn validate(&self) -> Result<(), String> {
+        nonempty("run_id", &self.run_id)?;
+        if self.after_cursor < 0 {
+            return Err("after_cursor must be at least 0".into());
+        }
+        if self.timeout_ms > 30_000 {
+            return Err("timeout_ms must not exceed 30000".into());
+        }
+        Ok(())
+    }
+}
+
+fn default_wait_timeout_ms() -> u64 {
+    25_000
 }
 
 #[derive(Debug, Serialize, Deserialize)]

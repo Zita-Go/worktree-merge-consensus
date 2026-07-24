@@ -69,6 +69,11 @@ secrets, and local filesystem identities.
   versions fail closed.
 - Sensitive App Server diagnostics containing authorization, key, secret, or
   token markers are redacted; home-directory prefixes are shortened.
+- The public observation stream is a bounded allowlist of declared contracts,
+  plans, review verdicts, integration identity, test command/exit-code evidence,
+  and final acceptance. It excludes hidden reasoning, participant prompts, raw
+  task history, and command stdout/stderr. Each artifact is capped at 48 KiB
+  and each response at six events before it crosses the local MCP boundary.
 - A manually installed legacy Skill with the plugin's public name is reported
   as `LEGACY_SKILL_CONFLICT`. Diagnostics never delete or overwrite it; users
   must migrate it manually and restart Codex or open a new task.
@@ -76,9 +81,10 @@ secrets, and local filesystem identities.
 ## Stored data
 
 SQLite stores task IDs, local worktree and verification-clone paths, Git refs
-and SHAs, canonical protocol payloads, state transitions, and pending-send
-metadata. It does not store credentials or full task transcripts. Codex task
-histories retain coordinator prompts and task replies under the user's normal
+and SHAs, canonical protocol payloads, state transitions, bounded public
+progress events, and pending-send metadata. It does not store credentials or
+full task transcripts. Codex task histories retain coordinator prompts, task
+replies, and public progress rendered by the launcher under the user's normal
 Codex data controls. The managed daemon writes no persistent application log by
 default.
 

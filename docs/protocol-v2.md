@@ -173,7 +173,7 @@ reject goal operations for ephemeral tasks.
 Before every Primary turn, the coordinator resumes the Effective Primary and
 fully paginates `mcpServerStatus/list` before `turn/start`. The only accepted
 participant tool inventory is exactly `consensus_apply_patch`; the operator
-plugin's eight tools do not prove participant visibility. Reviewer routing is
+plugin's nine tools do not prove participant visibility. Reviewer routing is
 unchanged, while the selected source task IDs, refs, worktrees, and SHAs remain
 frozen. A lost mirror may be recreated only between completed actions with no
 pending or uncertain send, except that release 0.2.12 may atomically replace
@@ -283,6 +283,15 @@ confirmation and retrying the same Run without changing its branch, commit,
 request, or one-patch record. This also permits one explicit 0.2.15 resume
 after a matching 0.2.14 resume failed before state mutation with
 `MODEL_RESPONSE_RETRY_UNSAFE` and left the exact original blocker intact.
+
+Release 0.3.0 adds a separate public observation protocol without changing
+participant markers. Each persisted Run transition receives a monotonic SQLite
+cursor. `consensus_wait` resumes from `after_cursor` and returns bounded batches of contracts, plans, verdicts,
+integration identity, test exit codes, and acceptance evidence. It excludes
+hidden reasoning, participant prompts, raw task history, and command output;
+only pause and terminal responses include the full public snapshot. Observation is
+read-only and can resume after daemon or launcher restart without affecting the
+Run state machine or either frozen source.
 
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the

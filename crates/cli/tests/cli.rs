@@ -15,6 +15,7 @@ fn help_lists_public_commands_but_not_internal_modes() {
         .stdout(predicate::str::contains("worktrees"))
         .stdout(predicate::str::contains("run"))
         .stdout(predicate::str::contains("status"))
+        .stdout(predicate::str::contains("watch"))
         .stdout(predicate::str::contains("resume"))
         .stdout(predicate::str::contains("cancel"))
         .stdout(predicate::str::contains("daemon serve").not())
@@ -81,6 +82,18 @@ fn worktree_discovery_help_requires_repository_anchor() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--repository"));
+}
+
+#[test]
+fn watch_rejects_a_negative_resume_cursor() {
+    Command::cargo_bin("codex-consensus")
+        .unwrap()
+        .args(["watch", "run-123", "--after-cursor=-1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--after-cursor must be at least 0",
+        ));
 }
 
 #[test]
@@ -164,7 +177,7 @@ fn hidden_mcp_server_mode_serves_the_protocol_over_stdio() {
         .collect::<Vec<_>>();
     assert_eq!(responses.len(), 2);
     assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
-    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 8);
+    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 9);
 }
 
 #[test]

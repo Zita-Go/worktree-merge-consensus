@@ -17,6 +17,81 @@ use uuid::Uuid;
 const RUN_ID: &str = "4b230bd8-d870-4ef4-bf20-05a4c61020af";
 
 #[test]
+fn public_progress_events_are_durable_cursor_ordered_and_idempotent() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    let mut state = fixture_run(RUN_ID, "/repo/.git");
+    store.insert_run(&state).unwrap();
+
+    let initial = store.run_events_after(RUN_ID, 0, 8).unwrap();
+    assert_eq!(initial.len(), 1);
+    assert_eq!(initial[0].kind, "run_started");
+    assert_eq!(initial[0].progress.index, 1);
+    let initial_cursor = initial[0].cursor;
+    assert!(initial_cursor > 0);
+    assert_eq!(
+        store.public_run_snapshot(RUN_ID).unwrap().cursor,
+        initial_cursor
+    );
+
+    store.save_state(&state).unwrap();
+    assert_eq!(
+        store.latest_run_event_cursor(RUN_ID).unwrap(),
+        initial_cursor
+    );
+
+    state.wait_for_thread().unwrap();
+    store.save_state(&state).unwrap();
+    let advanced = store.run_events_after(RUN_ID, initial_cursor, 8).unwrap();
+    assert_eq!(advanced.len(), 1);
+    assert_eq!(advanced[0].kind, "waiting_for_task");
+    assert!(advanced[0].cursor > initial_cursor);
+    let advanced_cursor = advanced[0].cursor;
+
+    drop(store);
+    let reopened = SqliteRunStore::open(&path).unwrap();
+    assert_eq!(
+        reopened.latest_run_event_cursor(RUN_ID).unwrap(),
+        advanced_cursor
+    );
+    assert_eq!(
+        reopened
+            .run_events_after(RUN_ID, initial_cursor, 8)
+            .unwrap()[0]
+            .cursor,
+        advanced_cursor
+    );
+}
+
+#[test]
+fn upgrading_a_pre_observation_database_backfills_one_public_baseline_event() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let store = SqliteRunStore::open(&path).unwrap();
+    let mut state = fixture_run(RUN_ID, "/repo/.git");
+    state.wait_for_thread().unwrap();
+    store.insert_run(&state).unwrap();
+    drop(store);
+
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch("DROP TABLE run_events;")
+        .unwrap();
+
+    let upgraded = SqliteRunStore::open(&path).unwrap();
+    let events = upgraded.run_events_after(RUN_ID, 0, 8).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, "run_started");
+    assert_eq!(events[0].status, RunStatus::WaitingThread);
+    assert!(events[0].cursor > 0);
+    assert_eq!(
+        upgraded.public_run_snapshot(RUN_ID).unwrap().cursor,
+        events[0].cursor
+    );
+}
+
+#[test]
 fn primary_binding_generations_are_atomic_and_auditable() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();

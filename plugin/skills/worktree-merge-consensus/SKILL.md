@@ -1,13 +1,13 @@
 ---
 name: worktree-merge-consensus
-description: Use when the user asks to launch or control a reviewed integration of two existing Codex tasks on the same host with committed changes in separate worktrees of one Git repository. Do not use for an internal Primary or Reviewer participant turn whose coordinator prompt says the run is already active.
+description: Use when the user asks to launch, observe, or control a reviewed integration of two existing Codex tasks on the same host with committed changes in separate worktrees of one Git repository. Do not use for an internal Primary or Reviewer participant turn whose coordinator prompt says the run is already active.
 ---
 
 # Worktree Merge Consensus
 
 ## Overview
 
-Launch the persistent local coordinator for two-task worktree integration. Keep this skill limited to choosing the tasks and starting the run; the daemon owns the consensus workflow.
+Launch the persistent local coordinator for two-task worktree integration, then observe its durable public event stream in this Codex task until the run finishes or needs user action. The daemon owns the consensus workflow; this skill selects the sources, starts the run, and renders progress without becoming a third review participant.
 
 This is a launcher and operator skill only. If a coordinator-authored prompt identifies the current task as the Primary or Reviewer participant inside an already-running automated consensus run, this skill is not applicable: do not read it recursively, call its tools, or start another run. Follow that self-contained participant prompt instead.
 
@@ -47,6 +47,7 @@ Codex starts the bundled MCP server with `codex-consensus mcp-server`. Do not st
 - `consensus_list_worktrees` → `codex-consensus worktrees list --repository <absolute-path>`
 - `consensus_start` → `codex-consensus run` with both task IDs and both worktree paths
 - `consensus_status` → `codex-consensus status <run-id>`
+- `consensus_wait` → `codex-consensus watch <run-id>`
 - `consensus_resume` → `codex-consensus resume <run-id>`
 - `consensus_cancel` → `codex-consensus cancel <run-id>`
 
@@ -55,7 +56,7 @@ tool. It writes and verifies only
 `plugins.worktree-merge-consensus.mcp_servers.worktreeMergeConsensus.tools.consensus_apply_patch.approval_mode = "approve"`.
 Do not replace it with a global approval change.
 
-The eighth tool, `consensus_apply_patch`, intentionally has no public CLI
+The participant-only tool, `consensus_apply_patch`, intentionally has no public CLI
 equivalent. It is not an operator or launcher tool. Only a coordinator-authored
 Primary integration prompt may call it with the exact active run ID and request
 hash; its daemon-side policy is described under recovery below. Never call it
@@ -158,6 +159,16 @@ revalidates the frozen sources and authoritative target, archives only the
 current confirmation, and preserves the same Run, branch, commit, request,
 binding lineage, and single patch record.
 
+Release 0.3.0 adds a durable public observation stream. Every state transition
+atomically records a bounded, cursor-ordered event in SQLite. The stream may
+contain participant contracts, plans, review feedback, integration summaries,
+frozen test evidence, source identities, and the accepted result; it never
+contains hidden reasoning, participant prompts, raw turn history, or command
+stdout/stderr. `consensus_wait` long-polls that stream for at most 30 seconds,
+returns at most six events per batch, and includes the cumulative public
+snapshot only when the Run pauses or terminates. A cursor can resume observation after a launcher interruption or
+daemon restart without changing either source ref or the integration result.
+
 The launcher may call only the operator-facing `consensus_*` tools listed
 above. It must never ask the invoking task to find, install, expose, or call
 participant-side `consensus_apply_patch`; injection, preflight, and any
@@ -174,13 +185,25 @@ Use those CLI commands only for diagnostics or when the user explicitly requests
 4. Present the registered entries with path, source ref or detached state, full HEAD SHA, and clean state. Assign two different, available, clean worktrees as primary and reviewer sources.
 5. Show one complete mapping: `primary_thread` → `primary_worktree`/ref/SHA and `reviewer_thread` → `reviewer_worktree`/ref/SHA. Ask the user to confirm this exact mapping. Do not continue without confirmation.
 6. Call `consensus_start` with all four required fields: `primary_thread`, `reviewer_thread`, `primary_worktree`, and `reviewer_worktree`. Include `integration_branch` only when the user supplied a unique new branch name. Include `test_commands` only when the user supplied additional verification commands.
-7. Report the returned `run_id` and initial status. State that the coordinator's participant turns are unattended and unsandboxed, so the selected tasks and repository must be trusted; the result will remain on a new local integration branch, and both frozen source refs remain protected. End the launch turn.
+7. Report the returned `run_id` and initial status. State that the coordinator's participant turns are unattended and unsandboxed, so the selected tasks and repository must be trusted; the result will remain on a new local integration branch, and both frozen source refs remain protected.
+8. Keep this launcher turn open and observe the Run. Set `after_cursor` to `0`, then call `consensus_wait` with the Run ID and `timeout_ms: 25000`. After each response, advance `after_cursor` only to the returned `next_cursor`; if `has_more` is true, call again immediately with that cursor.
+9. For every nonempty event batch, send one concise commentary update to the user. Show the machine stage as `[index/6 NAME]`, the review round, the active role when present, and the event summary. Explain the materially relevant public artifact: contract goals/constraints/tests, the proposed integration plan, every Reviewer objection or approval, branch/SHA and changed-result summary, frozen test exit codes, and final acceptance evidence. Preserve concrete rejection details. Do not dump raw batch JSON unless asked, and never claim or expose hidden reasoning, participant prompts, raw task history, or command stdout/stderr.
+10. A timed-out batch with no events is not a state change. Continue waiting without repeating the previous progress update. After two consecutive 25-second timeouts, emit at most one short liveness commentary using the last known stage, then continue. Reset that heartbeat counter whenever an event arrives.
+11. Stop the observation loop when `terminal` or `paused` is true. For `PAUSED_USER_ACTION`, report the exact public reason and required user action; do not call `consensus_resume` without the authorization described below. For `ACCEPTED`, report the exact local integration branch, SHA, tests, unchanged source refs, and no-push boundary. For `BLOCKED`, `CANCELLED`, or `INCOMPATIBLE_CODEX`, report the terminal reason and retained Git state. The final response must be self-contained.
 
-The launcher does not conduct or relay review rounds. The persistent coordinator handles contracts, plan revisions, integration, verification, final approval, recovery, and fail-closed pauses.
+The launcher observes and explains review rounds but never writes their content,
+approves a proposal, edits the integration branch, or relays one task's prompt
+manually. The persistent coordinator still owns contracts, plan revisions,
+integration, verification, final approval, recovery, and fail-closed pauses.
 
 ## Follow-up controls
 
-- Call `consensus_status` when the user asks for progress or the accepted result.
+- While the launch turn is still active, use `consensus_wait` and its last
+  `next_cursor` for progress. If observation was interrupted, call
+  `consensus_status` once to inspect the durable Run, then resume
+  `consensus_wait` from the last cursor visible in this task. If no cursor is
+  available, start at `0` and summarize the replay without pretending the
+  events just occurred.
 - If `consensus_start` returns `COMMUNICATION_FAILURE` before a `run_id` exists,
   call `consensus_doctor` once; v0.1.7 and later probe and repair the
   daemon-owned App Server proxy. Verify that no run was created, then retry the

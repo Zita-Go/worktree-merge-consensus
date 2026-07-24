@@ -30,7 +30,7 @@ fn plugin_manifest_and_mcp_registration_match_the_binary() {
             "mcpServers": {
                 "worktreeMergeConsensus": {
                     "title": "Worktree Merge Consensus",
-                    "description": "Coordinate reviewed integration across two existing Codex tasks.",
+                    "description": "Coordinate and expose public progress for reviewed integration across two existing Codex tasks.",
                     "cwd": ".",
                     "command": "/bin/sh",
                     "args": ["./scripts/start-mcp.sh"]
@@ -60,7 +60,7 @@ fn plugin_mcp_launcher_uses_the_explicit_binary_override() {
 }
 
 #[test]
-fn skill_is_a_launcher_for_the_daemon_not_a_review_relay() {
+fn skill_launches_and_observes_the_daemon_without_becoming_a_review_relay() {
     let root = repository_root();
     let skill =
         fs::read_to_string(root.join("plugin/skills/worktree-merge-consensus/SKILL.md")).unwrap();
@@ -74,6 +74,7 @@ fn skill_is_a_launcher_for_the_daemon_not_a_review_relay() {
         "codex-consensus worktrees list",
         "codex-consensus run",
         "codex-consensus status",
+        "codex-consensus watch",
         "codex-consensus resume",
         "codex-consensus cancel",
         "codex mcp list --json",
@@ -81,6 +82,7 @@ fn skill_is_a_launcher_for_the_daemon_not_a_review_relay() {
         "consensus_list_worktrees",
         "consensus_apply_patch",
         "consensus_start",
+        "consensus_wait",
         "primary_worktree",
         "reviewer_worktree",
         "repository_path",
@@ -92,7 +94,9 @@ fn skill_is_a_launcher_for_the_daemon_not_a_review_relay() {
         "trusted tasks",
         "coordinator-owned verification",
         "do not run Shell in the verification marker turn",
-        "End the launch turn",
+        "after_cursor",
+        "commentary update",
+        "hidden reasoning",
     ] {
         assert!(
             skill.contains(required),

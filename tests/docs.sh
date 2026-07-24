@@ -30,7 +30,7 @@ for path in "${required_files[@]}"; do
   [[ -f "$path" ]] || fail "missing required file: $path"
 done
 
-commands=(configure doctor threads worktrees run status resume cancel)
+commands=(configure doctor threads worktrees run status watch resume cancel)
 for readme in README.md README.zh-CN.md; do
   for command in "${commands[@]}"; do
     grep -Fq "codex-consensus $command" "$readme" ||
@@ -47,6 +47,7 @@ for readme in README.md README.zh-CN.md; do
 
   for marker in \
     consensus_list_worktrees \
+    consensus_wait \
     consensus_apply_patch \
     --primary-worktree \
     --reviewer-worktree \
@@ -61,6 +62,17 @@ for readme in README.md README.zh-CN.md; do
   grep -Fq 'codex plugin marketplace add' "$readme" ||
     fail "$readme is missing marketplace registration"
   grep -Fq 'codex plugin add' "$readme" || fail "$readme is missing plugin installation"
+done
+
+for document in README.md docs/compatibility.md docs/protocol-v2.md plugin/skills/worktree-merge-consensus/SKILL.md; do
+  for marker in consensus_wait after_cursor 'hidden reasoning'; do
+    grep -Fq "$marker" "$document" ||
+      fail "$document is missing the public observation marker: $marker"
+  done
+done
+for marker in consensus_wait after_cursor '隐藏推理'; do
+  grep -Fq "$marker" README.zh-CN.md ||
+    fail "README.zh-CN.md is missing the public observation marker: $marker"
 done
 
 for marker in dangerFullAccess command/exec VERIFICATION_EXECUTION_UNCERTAIN 'trusted tasks'; do

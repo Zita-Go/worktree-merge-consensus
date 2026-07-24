@@ -18,6 +18,11 @@ pub enum DaemonRequest {
     Status {
         run_id: Option<String>,
     },
+    Wait {
+        run_id: String,
+        after_cursor: i64,
+        timeout_ms: u64,
+    },
     Start {
         state: Box<RunState>,
         request: StartRequest,

@@ -2,6 +2,7 @@
 
 pub mod coordinator;
 pub mod lifecycle;
+pub mod observation;
 mod participant_binding;
 mod policy;
 pub mod server;

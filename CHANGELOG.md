@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.0
+
+- Persist a bounded public event for every consensus Run state transition in
+  the same SQLite transaction as the state change, with monotonic cursors that
+  survive daemon and launcher restarts.
+- Add `consensus_wait`, a bounded long-poll MCP tool that returns public
+  contracts, plans, Reviewer feedback, integration identity, test evidence,
+  and final acceptance without exposing hidden reasoning, prompts, raw task
+  history, or command output.
+- Keep nonterminal polling responses small, include the cumulative snapshot
+  only at pause or termination, cap each artifact at 48 KiB and each batch at
+  six events, and retain the existing full `consensus_status` contract for
+  compatibility.
+- Add `codex-consensus watch` for human-readable or JSON-lines observation with
+  cursor resume support.
+- Keep the launcher task active after `consensus_start` so Codex App users see
+  stage, round, proposal, objections, verification, and final result updates in
+  the task where they launched the workflow.
+
 ## 0.2.15
 
 - Recover the production confirmation shape in which the one successful

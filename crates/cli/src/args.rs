@@ -40,6 +40,11 @@ impl Cli {
                 );
             }
         }
+        if let Command::Watch(arguments) = &self.command {
+            if arguments.after_cursor < 0 {
+                return Err("--after-cursor must be at least 0".into());
+            }
+        }
         Ok(())
     }
 
@@ -55,6 +60,7 @@ impl Cli {
             },
             Command::Run(arguments) => arguments.json,
             Command::Status(arguments) => arguments.json,
+            Command::Watch(arguments) => arguments.json,
             Command::Resume(arguments) | Command::Cancel(arguments) => arguments.json,
             Command::Daemon(_) | Command::McpServer | Command::ParticipantMcpServer => false,
         }
@@ -75,6 +81,8 @@ pub enum Command {
     Run(RunArgs),
     /// Show one run or all runs.
     Status(StatusArgs),
+    /// Follow the public consensus event stream for one run.
+    Watch(WatchArgs),
     /// Resume a paused run after user action.
     Resume(RunIdArgs),
     /// Cancel a run without reverting or deleting Git state.
@@ -150,6 +158,23 @@ pub struct RunArgs {
 #[derive(Debug, Args)]
 pub struct StatusArgs {
     pub run_id: Option<String>,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WatchArgs {
+    pub run_id: String,
+    /// Resume after a previously returned event cursor.
+    #[arg(long, default_value_t = 0)]
+    pub after_cursor: i64,
+    /// Long-poll timeout for each request, in milliseconds.
+    #[arg(long, default_value_t = 25_000, value_parser = clap::value_parser!(u64).range(0..=30_000))]
+    pub timeout_ms: u64,
+    /// Return after one event batch or timeout instead of following the run.
+    #[arg(long)]
+    pub once: bool,
+    /// Emit each public event batch as one JSON line.
     #[arg(long)]
     pub json: bool,
 }

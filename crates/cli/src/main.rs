@@ -15,7 +15,7 @@ use app_server_client::{
     AppServer, CONTROLLED_PATCH_APPROVAL_KEY, CONTROLLED_PATCH_APPROVAL_MODE, CodexAppServer,
     ConnectOptions, ReconnectingCodexAppServer, ThreadDetail, ThreadSummary,
 };
-use args::{Cli, Command, DaemonCommand, RunArgs, ThreadsCommand, WorktreesCommand};
+use args::{Cli, Command, DaemonCommand, RunArgs, ThreadsCommand, WatchArgs, WorktreesCommand};
 use async_trait::async_trait;
 use clap::Parser;
 use consensus_core::{
@@ -113,6 +113,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             )
             .await
         }
+        Command::Watch(arguments) => watch_run(&state_dir, arguments).await,
         Command::Resume(arguments) => {
             daemon_request(
                 &state_dir,
@@ -302,7 +303,7 @@ async fn start_run(state_dir: &Path, arguments: RunArgs) -> Result<(), CliError>
         .unwrap_or("unknown");
     emit_value(&result, json_output, || {
         format!(
-            "Started consensus run {run_id}. Use `codex-consensus status {run_id}` to follow it."
+            "Started consensus run {run_id}. Use `codex-consensus watch {run_id}` to follow it."
         )
     });
     Ok(())
@@ -394,6 +395,112 @@ async fn daemon_request_value(state_dir: &Path, request: DaemonRequest) -> Resul
         .await
         .map_err(|error| CliError::new("DAEMON_UNREACHABLE", error.to_string()))?;
     response_result(response)
+}
+
+async fn watch_run(state_dir: &Path, arguments: WatchArgs) -> Result<(), CliError> {
+    let mut cursor = arguments.after_cursor;
+    loop {
+        let batch = daemon_request_value(
+            state_dir,
+            DaemonRequest::Wait {
+                run_id: arguments.run_id.clone(),
+                after_cursor: cursor,
+                timeout_ms: arguments.timeout_ms,
+            },
+        )
+        .await?;
+
+        if arguments.json {
+            println!(
+                "{}",
+                serde_json::to_string(&batch)
+                    .map_err(|error| CliError::new("SERIALIZATION_FAILURE", error.to_string()))?
+            );
+        } else {
+            print_public_progress(&batch, arguments.once);
+        }
+
+        cursor = batch
+            .get("next_cursor")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| {
+                CliError::new(
+                    "INVALID_DAEMON_RESPONSE",
+                    "progress response did not contain an integer next_cursor",
+                )
+            })?;
+        let terminal = batch
+            .get("terminal")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let paused = batch
+            .get("paused")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if arguments.once || terminal || paused {
+            return Ok(());
+        }
+    }
+}
+
+fn print_public_progress(batch: &Value, once: bool) {
+    let events = batch
+        .get("events")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    for event in events {
+        let index = event
+            .pointer("/progress/index")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let total = event
+            .pointer("/progress/total")
+            .and_then(Value::as_u64)
+            .unwrap_or(6);
+        let stage = event
+            .pointer("/progress/name")
+            .and_then(Value::as_str)
+            .unwrap_or("UNKNOWN");
+        let round = event.get("round").and_then(Value::as_u64).unwrap_or(0);
+        let summary = event
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or("The run changed state.");
+        println!("[{index}/{total} {stage} · round {round}] {summary}");
+        if let Some(artifact) = event.get("artifact") {
+            println!("{}", human_json(artifact));
+        }
+    }
+
+    if events.is_empty() {
+        let cursor = batch
+            .get("next_cursor")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let paused = batch
+            .get("paused")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let status = batch
+            .pointer("/snapshot/status")
+            .and_then(Value::as_str)
+            .unwrap_or(if paused {
+                "PAUSED_USER_ACTION"
+            } else {
+                "UNKNOWN"
+            });
+        let stopped = batch
+            .get("terminal")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || paused;
+        if stopped {
+            println!("Run is {status}; latest public event cursor is {cursor}.");
+        } else if once {
+            println!("No new public events after cursor {cursor}.");
+        }
+    }
 }
 
 async fn serve_daemon(state_dir: PathBuf, codex_binary: PathBuf) -> Result<(), CliError> {
@@ -488,6 +595,18 @@ impl ToolBackend for CliMcpBackend {
                 )
                 .await
             }
+            "consensus_wait" => {
+                let arguments: McpWaitArguments = decode_mcp_arguments(arguments)?;
+                daemon_request_value(
+                    &self.state_dir,
+                    DaemonRequest::Wait {
+                        run_id: arguments.run_id,
+                        after_cursor: arguments.after_cursor,
+                        timeout_ms: arguments.timeout_ms,
+                    },
+                )
+                .await
+            }
             "consensus_resume" => {
                 let arguments: McpRunIdArguments = decode_mcp_arguments(arguments)?;
                 daemon_request_value(
@@ -557,6 +676,19 @@ struct McpApplyPatchArguments {
 #[derive(Deserialize)]
 struct McpStatusArguments {
     run_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct McpWaitArguments {
+    run_id: String,
+    #[serde(default)]
+    after_cursor: i64,
+    #[serde(default = "default_mcp_wait_timeout_ms")]
+    timeout_ms: u64,
+}
+
+fn default_mcp_wait_timeout_ms() -> u64 {
+    25_000
 }
 
 #[derive(Deserialize)]

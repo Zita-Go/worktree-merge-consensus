@@ -57,6 +57,93 @@ async fn unix_socket_is_private_and_status_round_trips() {
 }
 
 #[tokio::test]
+async fn wait_rpc_streams_new_public_events_and_times_out_without_replay() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = ServerConfig::new(temp.path());
+    let store = SqliteRunStore::open(&config.database_path).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let mut server = tokio::spawn(run_server(config.clone(), store.clone(), shutdown_rx));
+    let client = wait_for_daemon(&config.socket_path, &mut server).await;
+
+    let initial = client
+        .request(DaemonRequest::Wait {
+            run_id: RUN_ID.into(),
+            after_cursor: 0,
+            timeout_ms: 0,
+        })
+        .await
+        .unwrap();
+    assert!(initial.ok);
+    let initial = initial.result.unwrap();
+    assert_eq!(initial["events"][0]["kind"], "run_started");
+    assert_eq!(initial["events"][0]["progress"]["index"], 1);
+    assert!(initial.get("snapshot").is_none());
+    let initial_cursor = initial["next_cursor"].as_i64().unwrap();
+
+    let wait_client = client.clone();
+    let waiter = tokio::spawn(async move {
+        wait_client
+            .request(DaemonRequest::Wait {
+                run_id: RUN_ID.into(),
+                after_cursor: initial_cursor,
+                timeout_ms: 1_000,
+            })
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let mut state = store.load_run(RUN_ID).unwrap().unwrap();
+    state.wait_for_thread().unwrap();
+    store.save_state(&state).unwrap();
+
+    let advanced = waiter.await.unwrap();
+    assert!(advanced.ok);
+    let advanced = advanced.result.unwrap();
+    assert_eq!(advanced["events"][0]["kind"], "waiting_for_task");
+    assert_eq!(advanced["timed_out"], false);
+    let advanced_cursor = advanced["next_cursor"].as_i64().unwrap();
+
+    let timed_out = client
+        .request(DaemonRequest::Wait {
+            run_id: RUN_ID.into(),
+            after_cursor: advanced_cursor,
+            timeout_ms: 5,
+        })
+        .await
+        .unwrap();
+    assert!(timed_out.ok);
+    let timed_out = timed_out.result.unwrap();
+    assert_eq!(timed_out["events"], serde_json::json!([]));
+    assert_eq!(timed_out["timed_out"], true);
+    assert_eq!(timed_out["next_cursor"], advanced_cursor);
+    assert!(timed_out.get("snapshot").is_none());
+
+    let mut state = store.load_run(RUN_ID).unwrap().unwrap();
+    state.pause("USER_INPUT_REQUIRED").unwrap();
+    store.save_state(&state).unwrap();
+    let paused = client
+        .request(DaemonRequest::Wait {
+            run_id: RUN_ID.into(),
+            after_cursor: advanced_cursor,
+            timeout_ms: 0,
+        })
+        .await
+        .unwrap();
+    assert!(paused.ok);
+    let paused = paused.result.unwrap();
+    assert_eq!(paused["paused"], true);
+    assert_eq!(paused["terminal"], false);
+    assert_eq!(paused["events"][0]["kind"], "paused_user_action");
+    assert_eq!(paused["snapshot"]["status"], "PAUSED_USER_ACTION");
+
+    shutdown_tx.send(()).unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn start_rpc_rejects_second_active_run_for_repository() {
     let temp = tempfile::tempdir().unwrap();
     let config = ServerConfig::new(temp.path());

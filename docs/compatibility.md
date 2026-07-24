@@ -182,7 +182,7 @@ fully paginates `mcpServerStatus/list` using `threadId`, `detail:
 "toolsAndAuthOnly"`, `limit: 100`, and an opaque nullable `cursor` before
 `turn/start`. The participant server must expose exactly
 `consensus_apply_patch`; missing, malformed, duplicate, or additional
-participant tools fail closed. The operator plugin's eight tools are not
+participant tools fail closed. The operator plugin's nine tools are not
 participant visibility evidence. Reviewer routing is unchanged, and the
 selected task IDs, source refs, and source worktrees remain frozen. A missing
 ephemeral mirror can normally be recreated only between completed actions with
@@ -356,17 +356,26 @@ registered worktree paths through CLI or MCP. The daemon still verifies the
 returned task IDs, but every turn uses the frozen explicit worktree even when
 both tasks report the same cwd or a non-Git directory.
 
-The plugin contract exposes eight MCP tools. Seven are operator tools,
-including `consensus_list_worktrees`; `consensus_start` requires both task IDs
-and both worktree paths. The eighth, `consensus_apply_patch`, is available only
-to an exact active Primary integration request and has no public CLI
-equivalent. Plugin and binary versions must come from the same release.
+The plugin contract exposes nine MCP tools. Eight launcher/operator tools
+include `consensus_list_worktrees` and the cursor-based `consensus_wait`;
+`consensus_start` requires both task IDs and both worktree paths.
+`consensus_apply_patch` is available only to an exact active Primary
+integration request and has no public CLI equivalent. Plugin and binary
+versions must come from the same release.
 After installing or updating the plugin, restart Codex or open a new task. A
 conflicting manually installed `$CODEX_HOME/skills/worktree-merge-consensus`
 is reported as `LEGACY_SKILL_CONFLICT` and is never deleted automatically.
 The same-account installation must also run `codex-consensus configure` once;
 a broad or global auto-approval configuration is neither required nor accepted
 as a substitute for the exact tool key.
+
+Release 0.3.0 adds the read-only `consensus_wait` observation endpoint. Its
+global monotonic SQLite cursor is resumed with `after_cursor`; each call waits
+at most 30 seconds and returns at most six bounded public events. The stream
+contains declared artifacts and machine-derived Git/test identity, but excludes
+hidden reasoning, participant prompts, raw task history, and command output.
+Only a pause or terminal response includes the full cumulative snapshot, so
+long-running Codex App tasks do not accumulate repeated artifacts.
 
 `doctor` validates a fresh App Server protocol connection and asks the
 coordinator daemon to probe its own connection, but deliberately does not spend

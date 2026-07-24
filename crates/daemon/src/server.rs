@@ -2,16 +2,18 @@ use std::{fs, path::PathBuf};
 
 use app_server_client::AppServer;
 use async_trait::async_trait;
-use consensus_core::state::RunState;
+use consensus_core::state::{RunState, RunStatus};
 use serde_json::json;
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     sync::oneshot,
+    time::{Duration, Instant, sleep},
 };
 
 use crate::{
     coordinator::{Coordinator, CoordinatorError, RepositorySafety, StartRequest},
+    observation::{MAX_EVENT_BATCH, RunObservationBatch},
     store::{SqliteRunStore, StoreError},
     wire::{DaemonRequest, DaemonResponse, ping_result},
 };
@@ -85,6 +87,8 @@ where
 }
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_WAIT_TIMEOUT_MS: u64 = 30_000;
+const WAIT_POLL_INTERVAL_MS: u64 = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
@@ -285,6 +289,25 @@ async fn handle_request(
                 Err(error) => store_failure(error),
             },
         },
+        DaemonRequest::Wait {
+            run_id,
+            after_cursor,
+            timeout_ms,
+        } => {
+            if after_cursor < 0 {
+                DaemonResponse::failure("INVALID_CURSOR", "after_cursor cannot be negative")
+            } else if timeout_ms > MAX_WAIT_TIMEOUT_MS {
+                DaemonResponse::failure(
+                    "INVALID_TIMEOUT",
+                    format!("timeout_ms cannot exceed {MAX_WAIT_TIMEOUT_MS}"),
+                )
+            } else {
+                match wait_for_run_events(store, &run_id, after_cursor, timeout_ms).await {
+                    Ok(batch) => serialize_success(&batch),
+                    Err(error) => store_failure(error),
+                }
+            }
+        }
         DaemonRequest::Start { state, request } => {
             let run_id = state.facts.run_id.to_string();
             if let Some(controller) = controller {
@@ -368,6 +391,51 @@ async fn handle_request(
                 }
             }
         }
+    }
+}
+
+async fn wait_for_run_events(
+    store: &SqliteRunStore,
+    run_id: &str,
+    after_cursor: i64,
+    timeout_ms: u64,
+) -> Result<RunObservationBatch, StoreError> {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let events = store.run_events_after(run_id, after_cursor, MAX_EVENT_BATCH)?;
+        let snapshot = store.public_run_snapshot(run_id)?;
+        if after_cursor > snapshot.cursor {
+            return Err(StoreError::IncompatibleState(format!(
+                "event cursor {after_cursor} is ahead of run {run_id} cursor {}",
+                snapshot.cursor
+            )));
+        }
+        let terminal = snapshot.terminal;
+        let paused = snapshot.status == RunStatus::PausedUserAction;
+        let timed_out = events.is_empty() && !terminal && Instant::now() >= deadline;
+        if !events.is_empty() || terminal || timed_out || timeout_ms == 0 {
+            let next_cursor = events
+                .last()
+                .map(|event| event.cursor)
+                .unwrap_or(after_cursor);
+            let has_more = snapshot.cursor > next_cursor;
+            let include_snapshot = !has_more && (terminal || paused);
+            return Ok(RunObservationBatch {
+                schema_version: crate::observation::OBSERVATION_SCHEMA_VERSION,
+                run_id: run_id.to_owned(),
+                after_cursor,
+                next_cursor,
+                latest_cursor: snapshot.cursor,
+                timed_out,
+                has_more,
+                terminal,
+                paused,
+                events,
+                snapshot: include_snapshot.then_some(snapshot),
+            });
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        sleep(remaining.min(Duration::from_millis(WAIT_POLL_INTERVAL_MS))).await;
     }
 }
 

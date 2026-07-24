@@ -126,7 +126,7 @@ async fn participant_patch_surface_lists_only_patch_and_rejects_other_tools_befo
 }
 
 #[tokio::test]
-async fn initializes_and_lists_exactly_the_eight_public_tools() {
+async fn initializes_and_lists_exactly_the_nine_public_tools() {
     let input = concat!(
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
         "\n",
@@ -162,6 +162,7 @@ async fn initializes_and_lists_exactly_the_eight_public_tools() {
             "consensus_list_worktrees",
             "consensus_start",
             "consensus_status",
+            "consensus_wait",
             "consensus_resume",
             "consensus_apply_patch",
             "consensus_cancel",
@@ -186,11 +187,12 @@ async fn initializes_and_lists_exactly_the_eight_public_tools() {
     );
     assert_eq!(tools[4]["inputSchema"]["required"], json!([]));
     assert_eq!(tools[5]["inputSchema"]["required"], json!(["run_id"]));
+    assert_eq!(tools[6]["inputSchema"]["required"], json!(["run_id"]));
     assert_eq!(
-        tools[6]["inputSchema"]["required"],
+        tools[7]["inputSchema"]["required"],
         json!(["run_id", "request_hash", "patch"])
     );
-    assert_eq!(tools[7]["inputSchema"]["required"], json!(["run_id"]));
+    assert_eq!(tools[8]["inputSchema"]["required"], json!(["run_id"]));
 }
 
 #[tokio::test]
@@ -206,9 +208,32 @@ async fn accepts_codex_paginated_list_and_request_metadata_params() {
 
     let responses = exchange(input, Arc::new(FakeBackend::default())).await;
     assert_eq!(responses.len(), 3);
-    assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 8);
-    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 8);
+    assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 9);
+    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 9);
     assert_eq!(responses[2]["result"], json!({}));
+}
+
+#[tokio::test]
+async fn wait_tool_supplies_bounded_long_poll_defaults() {
+    let backend = Arc::new(FakeBackend::default());
+    let input = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"consensus_wait","arguments":{"run_id":"run-123"}}}"#,
+        "\n",
+    );
+
+    let responses = exchange(input, backend.clone()).await;
+    assert_eq!(responses[0]["result"]["isError"], false);
+    assert_eq!(
+        backend.calls.lock().unwrap().as_slice(),
+        [(
+            "consensus_wait".to_owned(),
+            json!({
+                "run_id": "run-123",
+                "after_cursor": 0,
+                "timeout_ms": 25_000
+            })
+        )]
+    );
 }
 
 #[tokio::test]
@@ -270,9 +295,15 @@ async fn unsupported_methods_and_invalid_tool_arguments_use_json_rpc_errors() {
         "\n",
         r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"consensus_list_worktrees","arguments":{}}}"#,
         "\n",
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"consensus_wait","arguments":{"run_id":"run-123","after_cursor":-1}}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"consensus_wait","arguments":{"run_id":"run-123","timeout_ms":30001}}}"#,
+        "\n",
     );
     let responses = exchange(input, Arc::new(FakeBackend::default())).await;
     assert_eq!(responses[0]["error"]["code"], -32601);
     assert_eq!(responses[1]["error"]["code"], -32602);
     assert_eq!(responses[2]["error"]["code"], -32602);
+    assert_eq!(responses[3]["error"]["code"], -32602);
+    assert_eq!(responses[4]["error"]["code"], -32602);
 }

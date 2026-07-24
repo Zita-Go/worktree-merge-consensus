@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::observation::{PublicRunSnapshot, RunProgressEvent, progress_event, public_snapshot};
 use crate::{PrimaryBindingMode, PrimaryParticipantBinding};
 
 pub const LEGACY_PARTICIPANT_CAPABILITY_GENERATION: &str = "participant-mcp-v1";
@@ -162,7 +163,7 @@ impl SqliteRunStore {
         fs::create_dir_all(parent)?;
         set_private_directory_permissions(parent)?;
         let state_root = fs::canonicalize(parent)?;
-        let connection = Connection::open(path)?;
+        let mut connection = Connection::open(path)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
@@ -170,6 +171,7 @@ impl SqliteRunStore {
              PRAGMA synchronous = FULL;",
         )?;
         migrate(&connection)?;
+        backfill_run_events(&mut connection)?;
         set_private_file_permissions(path)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
@@ -409,6 +411,7 @@ impl SqliteRunStore {
             }
             Err(error) => return Err(error.into()),
         }
+        insert_run_event(&transaction, None, state)?;
         transaction.commit()?;
         Ok(())
     }
@@ -447,6 +450,63 @@ impl SqliteRunStore {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn latest_run_event_cursor(&self, run_id: &str) -> Result<i64, StoreError> {
+        let connection = self.lock()?;
+        let cursor = connection.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM run_events WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        if cursor == 0 {
+            ensure_run_exists_connection(&connection, run_id)?;
+        }
+        Ok(cursor)
+    }
+
+    pub fn run_events_after(
+        &self,
+        run_id: &str,
+        after_cursor: i64,
+        limit: usize,
+    ) -> Result<Vec<RunProgressEvent>, StoreError> {
+        let connection = self.lock()?;
+        ensure_run_exists_connection(&connection, run_id)?;
+        let limit = i64::try_from(limit.max(1)).unwrap_or(i64::MAX);
+        let mut statement = connection.prepare(
+            "SELECT id, event_json
+             FROM run_events
+             WHERE run_id = ?1 AND id > ?2
+             ORDER BY id ASC
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(params![run_id, after_cursor, limit], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.map(|row| {
+            let (cursor, encoded) = row?;
+            let mut event = serde_json::from_str::<RunProgressEvent>(&encoded)?;
+            event.cursor = cursor;
+            Ok(event)
+        })
+        .collect()
+    }
+
+    pub fn public_run_snapshot(&self, run_id: &str) -> Result<PublicRunSnapshot, StoreError> {
+        let connection = self.lock()?;
+        let (state_json, cursor) = connection
+            .query_row(
+                "SELECT state_json,
+                        (SELECT COALESCE(MAX(id), 0) FROM run_events WHERE run_id = ?1)
+                 FROM runs WHERE run_id = ?1",
+                [run_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::RunNotFound(run_id.to_owned()))?;
+        let state = deserialize_state(&state_json)?;
+        Ok(public_snapshot(&state, cursor))
     }
 
     pub fn activate_primary_binding(
@@ -3366,6 +3426,14 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             response_hash TEXT,
             created_at INTEGER NOT NULL
          );
+         CREATE TABLE IF NOT EXISTS run_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+            event_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS run_events_after
+            ON run_events(run_id, id ASC);
          CREATE TABLE IF NOT EXISTS locks (
             repository_id TEXT PRIMARY KEY,
             run_id TEXT NOT NULL UNIQUE REFERENCES runs(run_id) ON DELETE CASCADE,
@@ -3416,6 +3484,40 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+fn backfill_run_events(connection: &mut Connection) -> Result<(), StoreError> {
+    let transaction = connection.transaction()?;
+    let legacy_runs = {
+        let mut statement = transaction.prepare(
+            "SELECT runs.state_json, runs.updated_at
+             FROM runs
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM run_events WHERE run_events.run_id = runs.run_id
+             )
+             ORDER BY runs.created_at ASC, runs.run_id ASC",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    for (state_json, updated_at) in legacy_runs {
+        let state = deserialize_state(&state_json)?;
+        let event = progress_event(None, &state, updated_at);
+        transaction.execute(
+            "INSERT INTO run_events (run_id, event_json, created_at) VALUES (?1, ?2, ?3)",
+            params![
+                state.facts.run_id.to_string(),
+                serde_json::to_string(&event)?,
+                updated_at
+            ],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
 fn table_has_column(
     connection: &Connection,
     table: &str,
@@ -3433,6 +3535,15 @@ fn update_run_row(
     run_id: &str,
     state: &RunState,
 ) -> Result<(), StoreError> {
+    let previous_json = transaction
+        .query_row(
+            "SELECT state_json FROM runs WHERE run_id = ?1",
+            [run_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| StoreError::RunNotFound(run_id.to_owned()))?;
+    let previous = deserialize_state(&previous_json)?;
     let state_json = serialize_state(state)?;
     let changed = transaction.execute(
         "UPDATE runs SET
@@ -3453,11 +3564,29 @@ fn update_run_row(
             run_id,
         ],
     )?;
-    if changed == 1 {
-        Ok(())
-    } else {
+    if changed != 1 {
         Err(StoreError::RunNotFound(run_id.to_owned()))
+    } else {
+        if previous != *state {
+            insert_run_event(transaction, Some(&previous), state)?;
+        }
+        Ok(())
     }
+}
+
+fn insert_run_event(
+    transaction: &Transaction<'_>,
+    previous: Option<&RunState>,
+    state: &RunState,
+) -> Result<i64, StoreError> {
+    let created_at = now_unix();
+    let event = progress_event(previous, state, created_at);
+    let event_json = serde_json::to_string(&event)?;
+    transaction.execute(
+        "INSERT INTO run_events (run_id, event_json, created_at) VALUES (?1, ?2, ?3)",
+        params![state.facts.run_id.to_string(), event_json, created_at],
+    )?;
+    Ok(transaction.last_insert_rowid())
 }
 
 fn serialize_state(state: &RunState) -> Result<String, StoreError> {
@@ -3578,6 +3707,19 @@ fn verification_command_item_id(message_hash: &str, command_index: u32) -> Strin
 
 fn ensure_run_exists(transaction: &Transaction<'_>, run_id: &str) -> Result<(), StoreError> {
     let exists = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runs WHERE run_id = ?1)",
+        [run_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if exists {
+        Ok(())
+    } else {
+        Err(StoreError::RunNotFound(run_id.to_owned()))
+    }
+}
+
+fn ensure_run_exists_connection(connection: &Connection, run_id: &str) -> Result<(), StoreError> {
+    let exists = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM runs WHERE run_id = ?1)",
         [run_id],
         |row| row.get::<_, bool>(0),

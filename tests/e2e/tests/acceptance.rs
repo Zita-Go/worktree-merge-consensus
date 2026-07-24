@@ -120,6 +120,29 @@ fn conflict_free() {
     );
     fixture.assert_no_participant_command_items();
     assert!(!fixture.events().contains("git push"));
+
+    let public_events = fixture.public_events(&run_id);
+    let kinds = public_events
+        .iter()
+        .filter_map(|event| event["kind"].as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "run_started",
+        "primary_contract_ready",
+        "reviewer_contract_ready",
+        "plan_proposed",
+        "plan_approved",
+        "integration_ready",
+        "verification_passed",
+        "result_approved",
+        "accepted",
+    ] {
+        assert!(kinds.contains(&expected), "missing {expected}: {kinds:?}");
+    }
+    let encoded_public_events = serde_json::to_string(&public_events).unwrap();
+    assert!(!encoded_public_events.contains("\"stdout\""));
+    assert!(!encoded_public_events.contains("\"stderr\""));
+    assert!(!encoded_public_events.contains("\"full_prompt\""));
 }
 
 #[test]
@@ -166,6 +189,19 @@ fn result_rejection_requires_a_new_sha() {
     assert_eq!(shas.len(), 2);
     assert_ne!(shas[0], shas[1]);
     assert_eq!(accepted["integration_sha"], shas[1]);
+    let public_events = fixture.public_events(&run_id);
+    assert_eq!(
+        public_events
+            .iter()
+            .filter(|event| event["kind"] == "integration_ready")
+            .count(),
+        2
+    );
+    assert!(
+        public_events
+            .iter()
+            .any(|event| event["kind"] == "result_changes_required")
+    );
 }
 
 #[test]
@@ -731,6 +767,40 @@ impl AcceptanceFixture {
 
     fn events(&self) -> String {
         fs::read_to_string(self.fake_state.join("events.log")).unwrap_or_default()
+    }
+
+    fn public_events(&self, run_id: &str) -> Vec<Value> {
+        let mut cursor = 0_i64;
+        let mut events = Vec::new();
+        loop {
+            let cursor_arg = cursor.to_string();
+            let batch = self.environment().cli_json(&[
+                "watch",
+                run_id,
+                "--after-cursor",
+                &cursor_arg,
+                "--timeout-ms",
+                "0",
+                "--once",
+                "--json",
+            ]);
+            events.extend(
+                batch["events"]
+                    .as_array()
+                    .expect("watch batch must contain events")
+                    .iter()
+                    .cloned(),
+            );
+            let next_cursor = batch["next_cursor"]
+                .as_i64()
+                .expect("watch batch must contain next_cursor");
+            assert!(next_cursor >= cursor);
+            cursor = next_cursor;
+            if batch["has_more"] == false {
+                break;
+            }
+        }
+        events
     }
 
     fn action_count(&self, action: &str) -> usize {

@@ -206,7 +206,7 @@ Before every Primary action, including contract, plan, integration, and
 verification, the coordinator resumes the Effective Primary and consumes every
 page of `mcpServerStatus/list` with `detail: "toolsAndAuthOnly"` before
 `turn/start`. The participant server must expose exactly
-`consensus_apply_patch`; the operator plugin's eight-tool visibility is not
+`consensus_apply_patch`; the operator plugin's nine-tool visibility is not
 participant evidence. Reviewer routing is unchanged. Both selected source task
 IDs, source refs, and source worktrees remain frozen. If an ephemeral mirror is
 lost, it may normally be recreated only between completed actions when no send
@@ -321,6 +321,15 @@ record. A 0.2.14 resume that failed with
 explicitly with matching 0.2.15 artifacts while the original exact 0.2.13
 blocker remains recorded.
 
+Version 0.3.0 makes the consensus process visible in the Codex task that
+launched it. Each durable Run transition records a bounded public event in the
+same SQLite transaction as its state change. The launcher follows those events
+with a resumable cursor and shows stage, round, contracts, plans, Reviewer
+feedback, integration identity, frozen test evidence, and final acceptance.
+The `after_cursor` input resumes observation after interruption. Unchanged
+long-poll heartbeats stay small, and the public stream excludes hidden reasoning,
+participant prompts, raw task history, and command stdout/stderr.
+
 Read [the v2 participant protocol](docs/protocol-v2.md), the
 [legacy v1 protocol](docs/protocol-v1.md),
 [compatibility policy](docs/compatibility.md), and [security policy](SECURITY.md)
@@ -349,8 +358,8 @@ well, then verify every downloaded asset before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf codex-consensus-v0.2.15-x86_64-unknown-linux-musl.tar.gz
-install -m 0755 codex-consensus-v0.2.15-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
+tar -xzf codex-consensus-v0.3.0-x86_64-unknown-linux-musl.tar.gz
+install -m 0755 codex-consensus-v0.3.0-x86_64-unknown-linux-musl/codex-consensus ~/.local/bin/codex-consensus
 ```
 
 The v0.1.0 GNU archives require GLIBC 2.39 and are superseded. Use v0.1.1 or
@@ -384,13 +393,13 @@ codex-consensus doctor
 If you downloaded the plugin archive, extract it and register the directory
 that contains `.agents/plugins/marketplace.json`. Restart Codex or open a new
 task after plugin installation or update. In a Codex task,
-invoke `$worktree-merge-consensus`; the plugin exposes eight MCP tools. Seven,
-including `consensus_list_worktrees`, launch and control the persistent
-coordinator. The eighth, `consensus_apply_patch`, is a participant-only,
-request-bound write capability described below. It does not relay review turns
-through a third agent.
+invoke `$worktree-merge-consensus`; the plugin exposes nine MCP tools. Eight,
+including `consensus_list_worktrees` and `consensus_wait`, launch, observe, and
+control the persistent coordinator. `consensus_apply_patch` is a
+participant-only, request-bound write capability described below. It does not
+relay review turns through a third agent.
 
-The operator plugin's eight tools are not the Primary participant's tool
+The operator plugin's nine tools are not the Primary participant's tool
 inventory. The coordinator injects and preflights the task-scoped participant
 server through the direct or ephemeral Effective Primary binding before every
 Primary action; plugin installation alone does not change a blocked Run.
@@ -455,6 +464,15 @@ codex-consensus status RUN_ID
 codex-consensus status --json
 ```
 
+Follow the durable public event stream until the Run finishes or pauses. Use
+`--after-cursor` to resume an interrupted observer; `--json` emits one event
+batch per JSON line.
+
+```bash
+codex-consensus watch RUN_ID
+codex-consensus watch RUN_ID --after-cursor CURSOR --json
+```
+
 If a run pauses for an explicit user action, resolve the displayed reason and
 resume the same durable run:
 
@@ -469,11 +487,13 @@ including any integration branch already created:
 codex-consensus cancel RUN_ID
 ```
 
-The eight public command groups are therefore `codex-consensus configure`,
+The nine public command groups are therefore `codex-consensus configure`,
 `codex-consensus doctor`, `codex-consensus threads`,
 `codex-consensus worktrees`, `codex-consensus run`, `codex-consensus status`,
-`codex-consensus resume`, and `codex-consensus cancel`. All support stable
-machine-readable JSON at their operational leaf where shown by `--help`.
+`codex-consensus watch`, `codex-consensus resume`, and
+`codex-consensus cancel`. All support stable machine-readable JSON at their
+operational leaf where shown by `--help`; `watch --json` is JSON Lines while it
+follows a Run.
 
 ## Statuses and recovery
 
