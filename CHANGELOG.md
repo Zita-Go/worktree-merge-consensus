@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.2
+
+- Accept a single Unicode letter-or-number commit token, plus `-`, `_`, `.`,
+  or `:`, under the existing 120-byte integration command limit. Continue to
+  reject whitespace, shell metacharacters, slashes, emoji, and multi-token
+  messages fail-closed.
+- Recover the same Run when a completed ephemeral Primary integration used
+  such a safe Unicode commit token and an older policy incorrectly classified
+  it as `FORBIDDEN_OPERATION`; re-audit the persisted command evidence without
+  repeating merge, patch, staging, or commit.
+- Define `ONE_SAFE_TOKEN` explicitly in the Primary prompt and add exact
+  policy plus production-shaped same-Run recovery regressions.
+
+- Rework the English and Simplified Chinese project landing pages around the
+  user problem, visible Codex workflow, quick installation, exact output, and
+  concise safety boundaries instead of duplicating release-by-release internals.
+- Add a reproducible two-worktree demo, dedicated safety and recovery guides,
+  contribution guidance, structured issue templates, and a GitHub-ready social
+  preview asset.
+- Keep deep participant-binding, compatibility, and same-Run recovery contracts
+  in canonical technical documents while adding documentation gates for README
+  length, quick-start placement, visual assets, and bilingual links.
+
 ## 0.3.1
 
 - Accept exactly `git branch --show-current`, directly or through one canonical

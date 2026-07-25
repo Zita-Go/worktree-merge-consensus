@@ -369,9 +369,9 @@ fn safe_read_only_git_arguments(arguments: &[&str]) -> bool {
 fn safe_commit_message(message: &str) -> bool {
     !message.is_empty()
         && message.len() <= 120
-        && message
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+        && message.chars().all(|character| {
+            character.is_alphanumeric() || matches!(character, '-' | '_' | '.' | ':')
+        })
 }
 
 #[cfg(test)]
@@ -453,6 +453,40 @@ mod tests {
             ),
             ApprovalDecision::Accept
         );
+    }
+
+    #[test]
+    fn integration_accepts_unicode_commit_tokens_but_rejects_shell_unsafe_messages() {
+        let state = integration_state();
+
+        for command in [
+            "git commit -m feat:会话变量",
+            "/bin/bash -lc 'git commit -m 修复_会话变量'",
+        ] {
+            assert_eq!(
+                decide_command_approval(
+                    &state,
+                    &json!({"cwd": "/repo/primary", "command": command})
+                ),
+                ApprovalDecision::Accept,
+                "{command} must be accepted as one safe commit token"
+            );
+        }
+
+        for command in [
+            "git commit -m 'two words'",
+            "git commit -m feat/variables",
+            "git commit -m feat🚀",
+        ] {
+            assert_eq!(
+                decide_command_approval(
+                    &state,
+                    &json!({"cwd": "/repo/primary", "command": command})
+                ),
+                ApprovalDecision::Cancel,
+                "{command} must fail closed"
+            );
+        }
     }
 
     #[test]

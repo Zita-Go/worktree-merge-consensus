@@ -1541,6 +1541,63 @@ async fn completed_integration_forbidden_read_only_nonzero_resumes_the_same_run(
     );
 }
 
+#[tokio::test]
+async fn completed_ephemeral_integration_with_unicode_commit_token_resumes_the_same_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let (coordinator, app, store, safety) =
+        seed_invalid_integration_recovery_with_preloaded_primary(
+            &path,
+            PARTICIPANT_MCP_SERVER,
+            true,
+        )
+        .await;
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    let thread_id = pending.thread_id.clone().unwrap();
+    let turn_id = pending.turn_id.clone().unwrap();
+    let binding = store.active_primary_binding(RUN_ID).unwrap().unwrap();
+    app.set_patch_plugin_id(&thread_id, &turn_id, Value::Null);
+    insert_completed_integration_command_evidence_with_commit_message(
+        &app,
+        &thread_id,
+        &turn_id,
+        "feat:会话变量",
+    );
+    replace_persisted_ephemeral_turn_evidence(&path, &store, &app, &thread_id, &turn_id);
+
+    let mut blocked = store.load_run(RUN_ID).unwrap().unwrap();
+    blocked.reason_code = Some("FORBIDDEN_OPERATION".into());
+    blocked.last_error = Some(RunDiagnostic {
+        code: "FORBIDDEN_OPERATION".into(),
+        detail: "integration command is outside the frozen execution policy".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some(thread_id.clone()),
+        source_thread_id: Some(binding.source_primary_thread_id.clone()),
+        effective_thread_id: Some(thread_id),
+        participant_binding_generation: Some(binding.generation),
+        participant_binding_mode: Some("EPHEMERAL_FORK".into()),
+        participant_server: Some(PARTICIPANT_MCP_SERVER.into()),
+    });
+    store.save_state(&blocked).unwrap();
+    safety
+        .integration_branch_active
+        .store(true, Ordering::SeqCst);
+
+    let accepted = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(accepted.status, RunStatus::Accepted);
+    assert_eq!(accepted.integration_sha.as_deref(), Some(INTEGRATION_SHA));
+    assert!(safety.in_progress_calls.load(Ordering::SeqCst) > 0);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    assert!(
+        store
+            .successful_patch_recorded(RUN_ID, &pending.message_hash)
+            .unwrap()
+    );
+}
+
 async fn assert_current_branch_confirmation_blocker_resumes_the_same_run(
     command: &str,
     confirmation_turn_id: &str,
@@ -1909,6 +1966,20 @@ fn insert_completed_integration_command_evidence(
     thread_id: &str,
     turn_id: &str,
 ) {
+    insert_completed_integration_command_evidence_with_commit_message(
+        app,
+        thread_id,
+        turn_id,
+        "compatibility_fixes",
+    );
+}
+
+fn insert_completed_integration_command_evidence_with_commit_message(
+    app: &FakeAppServer,
+    thread_id: &str,
+    turn_id: &str,
+    commit_message: &str,
+) {
     let command = |id: &str, value: &str, status: &str, exit_code: i64| {
         json!({
             "id": id,
@@ -1954,7 +2025,7 @@ fn insert_completed_integration_command_evidence(
         command("stage", "/bin/bash -lc 'git add -A'", "completed", 0),
         command(
             "commit",
-            "/bin/bash -lc 'git commit -m compatibility_fixes'",
+            &format!("/bin/bash -lc 'git commit -m {commit_message}'"),
             "completed",
             0,
         ),

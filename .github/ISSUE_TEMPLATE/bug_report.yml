@@ -1,0 +1,78 @@
+name: Bug report
+description: Report a reproducible problem without publishing private task data
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Redact task IDs, usernames, hostnames, home-directory paths, secrets, prompts, and private task history. Report security issues privately through the Security tab instead.
+  - type: input
+    id: consensus_version
+    attributes:
+      label: codex-consensus version
+      placeholder: codex-consensus 0.3.2
+    validations:
+      required: true
+  - type: input
+    id: codex_version
+    attributes:
+      label: Codex CLI and App Server versions
+      description: Include both when they differ.
+      placeholder: Codex CLI 0.145.0; App Server 0.145.0
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system and architecture
+      placeholder: Ubuntu 24.04, x86_64
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Interface
+      options:
+        - Codex plugin
+        - CLI
+        - Both
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Describe the smallest safe sequence that reproduces the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and reason code
+      description: Include bounded, redacted diagnostics. Do not attach state.db or raw task transcripts.
+    validations:
+      required: true
+  - type: textarea
+    id: git_state
+    attributes:
+      label: Retained Git state
+      description: State whether source refs changed, whether an integration branch exists, and whether the Run was resumed. Redact repository identity.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed credentials, private prompts, task IDs, usernames, hostnames, and absolute home paths.
+          required: true
+        - label: This is not a vulnerability report.
+          required: true

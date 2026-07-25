@@ -291,6 +291,15 @@ authoritative target all revalidate. Recovery never repeats patch, merge,
 staging, or commit. `no_progress_rounds` is the unchanged-review threshold;
 material plan changes create a new fingerprint streak.
 
+Release 0.3.2 defines `git commit -m ONE_SAFE_TOKEN` as one nonempty token of
+at most 120 UTF-8 bytes containing only Unicode letters or numbers plus `-`,
+`_`, `.`, or `:`. Whitespace, shell metacharacters, slashes, emoji, and every
+multi-token form remain denied. Explicit same-Run recovery re-audits a
+completed ephemeral integration that an older byte-oriented policy blocked
+only when its persisted command evidence, single patch provenance, frozen
+sources, clean target, ancestry, and authoritative result all still match; it
+never repeats merge, patch, staging, or commit.
+
 The same release contains one migration only for the exact legacy 0.2.4
 blocked-verification history: the same Run, Primary task, request, round,
 verification clone, integration branch and SHA, frozen refs, and three archived

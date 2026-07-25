@@ -12,12 +12,25 @@ fail() {
 required_files=(
   README.md
   README.zh-CN.md
+  CHANGELOG.md
+  CONTRIBUTING.md
   SECURITY.md
   LICENSE
+  docs/quick-demo.md
+  docs/quick-demo.zh-CN.md
+  docs/safety-model.md
+  docs/safety-model.zh-CN.md
+  docs/recovery.md
+  docs/recovery.zh-CN.md
+  docs/assets/social-preview.svg
+  docs/assets/social-preview.png
   docs/protocol-v1.md
   docs/protocol-v2.md
   docs/compatibility.md
   docs/real-codex-smoke-test.md
+  .github/ISSUE_TEMPLATE/bug_report.yml
+  .github/ISSUE_TEMPLATE/feature_request.yml
+  .github/ISSUE_TEMPLATE/config.yml
   schemas/app-server/supported-methods.json
   .github/workflows/ci.yml
   .github/workflows/release.yml
@@ -64,6 +77,33 @@ for readme in README.md README.zh-CN.md; do
   grep -Fq 'codex plugin add' "$readme" || fail "$readme is missing plugin installation"
 done
 
+for readme in README.md README.zh-CN.md; do
+  line_count="$(wc -l < "$readme")"
+  (( line_count <= 360 )) ||
+    fail "$readme is too long for a project landing page: $line_count lines"
+  grep -Fq 'docs/assets/social-preview.svg' "$readme" ||
+    fail "$readme is missing the visual overview"
+  grep -Fq 'CHANGELOG.md' "$readme" || fail "$readme does not link the changelog"
+  grep -Fq 'CONTRIBUTING.md' "$readme" || fail "$readme does not link contribution guidance"
+  grep -Fq '$worktree-merge-consensus:worktree-merge-consensus' "$readme" ||
+    fail "$readme is missing the canonical Codex invocation"
+done
+
+quick_start_line="$(grep -n '^## Quick start$' README.md | cut -d: -f1)"
+[[ -n "$quick_start_line" ]] || fail 'README.md is missing Quick start'
+(( quick_start_line <= 100 )) || fail 'README.md buries Quick start below the first 100 lines'
+
+quick_start_zh_line="$(grep -n '^## 快速开始$' README.zh-CN.md | cut -d: -f1)"
+[[ -n "$quick_start_zh_line" ]] || fail 'README.zh-CN.md is missing 快速开始'
+(( quick_start_zh_line <= 100 )) || fail 'README.zh-CN.md buries 快速开始 below the first 100 lines'
+
+if grep -Eq '^Version 0\.[0-9]' README.md; then
+  fail 'README.md duplicates version history instead of linking CHANGELOG.md'
+fi
+if grep -Eq '^0\.[0-9]+\.[0-9]+ ' README.zh-CN.md; then
+  fail 'README.zh-CN.md duplicates version history instead of linking CHANGELOG.md'
+fi
+
 for document in README.md docs/compatibility.md docs/protocol-v2.md plugin/skills/worktree-merge-consensus/SKILL.md; do
   for marker in consensus_wait after_cursor 'hidden reasoning'; do
     grep -Fq "$marker" "$document" ||
@@ -87,8 +127,8 @@ for method in thread/fork thread/goal/get turn/interrupt command/exec config/rea
 done
 
 binding_documents=(
-  README.md
-  README.zh-CN.md
+  docs/safety-model.md
+  docs/safety-model.zh-CN.md
   docs/compatibility.md
   docs/protocol-v2.md
   plugin/skills/worktree-merge-consensus/references/protocol.md
@@ -154,7 +194,7 @@ def recovery_window(path):
     return text[max(0, marker.start() - 500):marker.start() + 1400] if marker else ""
 
 binding_documents = [
-    "README.md",
+    "docs/safety-model.md",
     "docs/compatibility.md",
     "docs/protocol-v2.md",
     "plugin/skills/worktree-merge-consensus/references/protocol.md",
@@ -181,27 +221,26 @@ for path in binding_documents:
     forbid(path, "integration-only participant injection", r"only when resuming a Primary integration task")
     forbid(path, "obsolete resume variants", r"default, ordinary, and non-integration variant remains")
 
-require("README.zh-CN.md", "binding happens before the first Primary action", [
+require("docs/safety-model.zh-CN.md", "binding happens before the first Primary action", [
     r"第一个.{0,20}主修.{0,20}动作之前",
 ])
-require("README.zh-CN.md", "not-loaded Source Primary binds directly", [
+require("docs/safety-model.zh-CN.md", "not-loaded Source Primary binds directly", [
     r"notLoaded.{0,180}Source Primary.{0,180}直接|Source Primary.{0,180}notLoaded.{0,180}直接",
 ])
-require("README.zh-CN.md", "preloaded Source without the tool uses an ephemeral full-history mirror", [
+require("docs/safety-model.zh-CN.md", "preloaded Source without the tool uses an ephemeral full-history mirror", [
     r"已加载.{0,140}Source Primary.{0,160}(?:缺少|没有).{0,80}(?:工具|能力).{0,180}ephemeral.{0,100}(?:完整历史|全历史)",
 ])
-require("README.zh-CN.md", "mirror carries no active goal", [
+require("docs/safety-model.zh-CN.md", "mirror carries no active goal", [
     r"(?:不会|不).{0,80}(?:继承|携带).{0,40}(?:活动 )?goal",
 ])
-require("README.zh-CN.md", "Reviewer routing is unchanged", [
+require("docs/safety-model.zh-CN.md", "Reviewer routing is unchanged", [
     r"Reviewer.{0,80}路由.{0,40}不变",
 ])
-require("README.zh-CN.md", "uncertain turns are not reforked or resent", [
+require("docs/safety-model.zh-CN.md", "uncertain turns are not reforked or resent", [
     r"(?:pending|uncertain).{0,120}(?:不会|不得).{0,80}(?:重新 fork|refork).{0,100}(?:重发|resent)",
 ])
 
 semantic_documents = [
-    "README.md",
     "docs/compatibility.md",
     "docs/protocol-v1.md",
     "docs/protocol-v2.md",
@@ -282,7 +321,7 @@ for path in semantic_documents:
     for claim, patterns in recovery_claims:
         require_text(path, window, claim, patterns)
 
-chinese_recovery = recovery_window("README.zh-CN.md")
+chinese_recovery = text_for("docs/recovery.zh-CN.md")
 chinese_claims = [
     ("exact recovery blocker", [r"CONTROLLED_PATCH_TOOL_UNAVAILABLE"]),
     ("matching deployment and explicit resume", [r"部署匹配的 0\.2\.8.{0,80}显式调用.{0,80}consensus_resume"]),
@@ -296,7 +335,7 @@ chinese_claims = [
     ("installation alone does not mutate or recover", [r"仅安装或启用.{0,100}绝不会改变阻塞 Run"]),
 ]
 for claim, patterns in chinese_claims:
-    require_text("README.zh-CN.md", chinese_recovery, claim, patterns)
+    require_text("docs/recovery.zh-CN.md", chinese_recovery, claim, patterns)
 
 canonical_recovery = recovery_window("docs/compatibility.md")
 for claim, patterns in recovery_claims:
@@ -415,6 +454,28 @@ for document in markdown_files:
 if errors:
     print("\n".join(errors), file=sys.stderr)
     raise SystemExit(1)
+PY
+
+python3 - <<'PY'
+from pathlib import Path
+import struct
+
+png = Path("docs/assets/social-preview.png")
+data = png.read_bytes()
+if data[:8] != b"\x89PNG\r\n\x1a\n":
+    raise SystemExit("docs check failed: social-preview.png is not a PNG")
+width, height = struct.unpack(">II", data[16:24])
+if (width, height) != (1280, 640):
+    raise SystemExit(
+        f"docs check failed: social-preview.png must be 1280x640, got {width}x{height}"
+    )
+if len(data) >= 1_000_000:
+    raise SystemExit("docs check failed: social-preview.png must stay below 1 MB")
+
+svg = Path("docs/assets/social-preview.svg").read_text(encoding="utf-8")
+for marker in ('width="1280"', 'height="640"', 'Worktree Merge Consensus'):
+    if marker not in svg:
+        raise SystemExit(f"docs check failed: social-preview.svg is missing {marker}")
 PY
 
 printf 'documentation checks passed\n'
