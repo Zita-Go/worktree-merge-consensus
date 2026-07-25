@@ -1,111 +1,138 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
   <title id="title">Worktree Merge Consensus</title>
-  <desc id="desc">Two Codex tasks review each other before producing one tested local integration branch.</desc>
+  <desc id="desc">Two committed Codex tasks declare independent contracts, iterate on a reviewed plan, then integrate and verify one exact commit before producing a local-only accepted branch.</desc>
   <defs>
     <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0A1020"/>
-      <stop offset="0.55" stop-color="#11172B"/>
-      <stop offset="1" stop-color="#07161D"/>
+      <stop offset="0" stop-color="#091020"/>
+      <stop offset="0.56" stop-color="#11172B"/>
+      <stop offset="1" stop-color="#07171D"/>
     </linearGradient>
     <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
       <stop offset="0" stop-color="#8B7CFF"/>
       <stop offset="1" stop-color="#39D7C4"/>
     </linearGradient>
-    <linearGradient id="output" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#162B38"/>
-      <stop offset="1" stop-color="#11202B"/>
+    <linearGradient id="accepted" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#17343C"/>
+      <stop offset="1" stop-color="#10282F"/>
     </linearGradient>
     <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
-      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#B8C4E0" stroke-opacity="0.05" stroke-width="1"/>
+      <path d="M40 0H0V40" fill="none" stroke="#B8C4E0" stroke-opacity="0.045" stroke-width="1"/>
     </pattern>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#000000" flood-opacity="0.35"/>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#000000" flood-opacity="0.32"/>
     </filter>
-    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#70809F"/>
+    <marker id="arrow-neutral" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L10 5L0 10Z" fill="#70809F"/>
     </marker>
-    <marker id="arrow-output" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#39D7C4"/>
+    <marker id="arrow-success" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L10 5L0 10Z" fill="#39D7C4"/>
+    </marker>
+    <marker id="arrow-feedback" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L9 4.5L0 9Z" fill="#F7B955"/>
     </marker>
   </defs>
 
   <rect width="1280" height="640" rx="28" fill="url(#background)"/>
   <rect width="1280" height="640" rx="28" fill="url(#grid)"/>
-  <circle cx="1090" cy="-40" r="310" fill="#39D7C4" fill-opacity="0.06"/>
-  <circle cx="180" cy="680" r="330" fill="#8B7CFF" fill-opacity="0.07"/>
+  <circle cx="1110" cy="-45" r="300" fill="#39D7C4" fill-opacity="0.055"/>
+  <circle cx="140" cy="690" r="300" fill="#8B7CFF" fill-opacity="0.065"/>
 
-  <g transform="translate(64 54)">
-    <rect x="0" y="0" width="44" height="44" rx="12" fill="url(#accent)"/>
-    <path d="M13 14h18v5H13zm0 11h18v5H13z" fill="#07111B"/>
+  <g transform="translate(64 50)">
+    <rect width="44" height="44" rx="12" fill="url(#accent)"/>
+    <path d="M13 14H31V19H13ZM13 25H31V30H13Z" fill="#07111B"/>
     <circle cx="16" cy="16.5" r="2" fill="#EAFBF8"/>
     <circle cx="28" cy="27.5" r="2" fill="#EAFBF8"/>
-    <text x="62" y="17" fill="#A9B7D4" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="700" letter-spacing="2.6">COMMUNITY-BUILT CODEX TOOL</text>
-    <text x="62" y="50" fill="#F4F7FF" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="34" font-weight="760">Worktree Merge Consensus</text>
-    <text x="0" y="96" fill="#C5CEE2" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="22" font-weight="450">Two Codex tasks. One reviewed integration.</text>
+    <text x="62" y="32" fill="#F4F7FF" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="34" font-weight="760">Worktree Merge Consensus</text>
+    <text x="0" y="88" fill="#C5CEE2" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="22" font-weight="450">Two Codex tasks reconcile intent before code is integrated.</text>
   </g>
 
-  <g filter="url(#shadow)">
-    <rect x="64" y="212" width="300" height="112" rx="18" fill="#151D33" stroke="#8B7CFF" stroke-opacity="0.55"/>
-    <circle cx="96" cy="246" r="13" fill="#8B7CFF"/>
-    <path d="M90 246h12M96 240v12" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/>
-    <text x="122" y="242" fill="#AFA5FF" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="750" letter-spacing="1.5">PRIMARY TASK</text>
-    <text x="88" y="282" fill="#F1F4FC" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="19" font-weight="650">Proposes and integrates</text>
-    <text x="88" y="306" fill="#9EABC4" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14">Committed worktree A</text>
+  <text x="64" y="206" fill="#98A6C1" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="750" letter-spacing="1.6">TWO COMMITTED TASKS · SAME REPOSITORY</text>
 
-    <rect x="64" y="348" width="300" height="112" rx="18" fill="#151D33" stroke="#4EC8DA" stroke-opacity="0.55"/>
-    <circle cx="96" cy="382" r="13" fill="#4EC8DA"/>
-    <path d="M89 382l5 5 9-11" fill="none" stroke="#07111B" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-    <text x="122" y="378" fill="#75DCE8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="750" letter-spacing="1.5">REVIEWER TASK</text>
-    <text x="88" y="418" fill="#F1F4FC" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="19" font-weight="650">Protects intent and details</text>
-    <text x="88" y="442" fill="#9EABC4" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14">Committed worktree B</text>
+  <g filter="url(#shadow)">
+    <rect x="64" y="226" width="260" height="96" rx="17" fill="#151D33" stroke="#8B7CFF" stroke-opacity="0.58"/>
+    <circle cx="92" cy="254" r="13" fill="#8B7CFF"/>
+    <text x="92" y="259" text-anchor="middle" fill="#FFFFFF" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="800">P</text>
+    <text x="116" y="250" fill="#B7AEFF" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="750" letter-spacing="1.35">PRIMARY TASK</text>
+    <text x="84" y="286" fill="#F1F4FC" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="17" font-weight="650">Proposes and integrates</text>
+    <text x="84" y="309" fill="#9EABC4" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13">Committed worktree A</text>
+
+    <rect x="64" y="344" width="260" height="96" rx="17" fill="#151D33" stroke="#4EC8DA" stroke-opacity="0.58"/>
+    <circle cx="92" cy="372" r="13" fill="#4EC8DA"/>
+    <text x="92" y="377" text-anchor="middle" fill="#07111B" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="800">R</text>
+    <text x="116" y="368" fill="#75DCE8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="750" letter-spacing="1.35">REVIEWER TASK</text>
+    <text x="84" y="404" fill="#F1F4FC" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="650">Protects intent and details</text>
+    <text x="84" y="427" fill="#9EABC4" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13">Committed worktree B</text>
   </g>
 
-  <path d="M364 268 C430 268 440 306 482 306" fill="none" stroke="#70809F" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <path d="M364 404 C430 404 440 366 482 366" fill="none" stroke="#70809F" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <path d="M324 274C347 274 347 306 370 306" fill="none" stroke="#70809F" stroke-width="2.25" marker-end="url(#arrow-neutral)"/>
+  <path d="M324 392C347 392 347 360 370 360" fill="none" stroke="#70809F" stroke-width="2.25" marker-end="url(#arrow-neutral)"/>
 
   <g filter="url(#shadow)">
-    <rect x="486" y="248" width="300" height="172" rx="24" fill="#171F34" stroke="url(#accent)" stroke-width="2"/>
-    <text x="636" y="286" text-anchor="middle" fill="#CFD7EA" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="750" letter-spacing="1.8">CONSENSUS LOOP</text>
-    <rect x="720" y="269" width="54" height="24" rx="12" fill="#F7C66C" fill-opacity="0.14" stroke="#F7C66C" stroke-opacity="0.75"/>
-    <circle cx="732" cy="281" r="4" fill="#F7C66C"/>
-    <text x="742" y="285" fill="#FFD98D" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" font-weight="800" letter-spacing="1.2">LIVE</text>
-    <g font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="15" font-weight="600">
-      <rect x="514" y="306" width="74" height="36" rx="10" fill="#252D49"/>
-      <text x="551" y="329" text-anchor="middle" fill="#DCD7FF">Plan</text>
-      <path d="M592 324h34" stroke="#70809F" stroke-width="2" marker-end="url(#arrow)"/>
-      <rect x="632" y="306" width="126" height="36" rx="10" fill="#1D3542"/>
-      <text x="695" y="329" text-anchor="middle" fill="#BCEFEB">Review</text>
-      <path d="M695 348 C695 380 551 380 551 348" fill="none" stroke="#8B7CFF" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="370" y="266" width="178" height="142" rx="20" fill="#171F34" stroke="#52617E" stroke-width="1.3"/>
+    <g transform="translate(430 286)">
+      <path d="M0 2H24L31 9V39H0Z" fill="#8B7CFF" fill-opacity="0.13" stroke="#8B7CFF" stroke-opacity="0.8"/>
+      <path d="M24 2V9H31" fill="none" stroke="#8B7CFF" stroke-opacity="0.8"/>
+      <path d="M7 18H24M7 25H24M7 32H19" stroke="#B8B0FF" stroke-width="1.5" stroke-linecap="round"/>
+      <path d="M17 -5H41L48 2V32" fill="none" stroke="#4EC8DA" stroke-opacity="0.75"/>
     </g>
-    <text x="636" y="402" text-anchor="middle" fill="#8F9BB4" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13">Iterate until the exact plan is approved</text>
+    <text x="459" y="342" text-anchor="middle" fill="#D6DDEE" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11.5" font-weight="750" letter-spacing="1.3">INDEPENDENT</text>
+    <text x="459" y="358" text-anchor="middle" fill="#D6DDEE" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11.5" font-weight="750" letter-spacing="1.3">CONTRACTS</text>
+    <text x="459" y="382" text-anchor="middle" fill="#9EABC4" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12.5">Behavior · constraints</text>
+    <text x="459" y="400" text-anchor="middle" fill="#9EABC4" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12.5">Tests to preserve</text>
   </g>
 
-  <path d="M786 334 H871" fill="none" stroke="#39D7C4" stroke-width="3" stroke-linecap="round" marker-end="url(#arrow-output)"/>
+  <path d="M548 337H590" fill="none" stroke="#70809F" stroke-width="2.5" marker-end="url(#arrow-neutral)"/>
 
   <g filter="url(#shadow)">
-    <rect x="868" y="230" width="348" height="208" rx="24" fill="url(#output)" stroke="#39D7C4" stroke-opacity="0.75"/>
-    <circle cx="912" cy="274" r="20" fill="#39D7C4" fill-opacity="0.16" stroke="#39D7C4"/>
-    <path d="M902 274l7 7 14-17" fill="none" stroke="#68E6D7" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    <text x="946" y="269" fill="#75E6D8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="750" letter-spacing="1.5">ACCEPTED</text>
-    <text x="946" y="294" fill="#F4F8FB" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="19" font-weight="700">New local branch</text>
-    <line x1="900" y1="320" x2="1184" y2="320" stroke="#8BA3B1" stroke-opacity="0.22"/>
-    <text x="900" y="352" fill="#C8D6DF" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14">consensus/&lt;run-id&gt;</text>
-    <text x="900" y="382" fill="#92A7B5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14">✓ exact SHA tested</text>
-    <text x="900" y="408" fill="#92A7B5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14">✓ Reviewer approved</text>
+    <rect x="590" y="220" width="270" height="234" rx="23" fill="#171F34" stroke="url(#accent)" stroke-width="2"/>
+    <text x="725" y="257" text-anchor="middle" fill="#CFD7EA" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="750" letter-spacing="1.7">CONSENSUS LOOP</text>
+
+    <rect x="612" y="292" width="99" height="42" rx="11" fill="#292F4E"/>
+    <text x="661.5" y="318" text-anchor="middle" fill="#E0DCFF" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="650">Primary plan</text>
+
+    <path d="M711 313H738" fill="none" stroke="#70809F" stroke-width="2" marker-end="url(#arrow-neutral)"/>
+
+    <rect x="738" y="292" width="100" height="42" rx="11" fill="#1D3542"/>
+    <text x="788" y="318" text-anchor="middle" fill="#BCEFEB" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="650">Reviewer</text>
+
+    <path d="M788 334C788 380 662 380 662 334" fill="none" stroke="#F7B955" stroke-width="2.2" marker-end="url(#arrow-feedback)"/>
+    <text x="725" y="397" text-anchor="middle" fill="#F7CA7A" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="650">Changes requested</text>
+    <text x="725" y="429" text-anchor="middle" fill="#8F9BB4" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13">Iterate until approved</text>
   </g>
 
-  <g transform="translate(64 536)" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="650">
-    <rect x="0" y="0" width="214" height="42" rx="21" fill="#171F34" stroke="#39445F"/>
-    <circle cx="24" cy="21" r="5" fill="#8B7CFF"/>
-    <text x="40" y="26" fill="#C8D0E3">Source refs untouched</text>
-    <rect x="294" y="0" width="142" height="42" rx="21" fill="#171F34" stroke="#39445F"/>
-    <circle cx="318" cy="21" r="5" fill="#4EC8DA"/>
-    <text x="334" y="26" fill="#C8D0E3">No push</text>
-    <rect x="452" y="0" width="170" height="42" rx="21" fill="#171F34" stroke="#39445F"/>
-    <circle cx="476" cy="21" r="5" fill="#39D7C4"/>
-    <text x="492" y="26" fill="#C8D0E3">Isolated tests</text>
-    <rect x="638" y="0" width="184" height="42" rx="21" fill="#2B251B" stroke="#F7C66C" stroke-opacity="0.85"/>
-    <circle cx="662" cy="21" r="5" fill="#F7C66C"/>
-    <text x="678" y="26" fill="#C8D0E3">Visible progress</text>
+  <path d="M860 337H900" fill="none" stroke="#39D7C4" stroke-width="3" stroke-linecap="round" marker-end="url(#arrow-success)"/>
+
+  <g filter="url(#shadow)">
+    <rect x="900" y="195" width="316" height="340" rx="24" fill="#152330" stroke="#39D7C4" stroke-opacity="0.72"/>
+    <text x="930" y="232" fill="#72DFD3" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="750" letter-spacing="1.55">AFTER APPROVAL</text>
+
+    <circle cx="932" cy="270" r="13" fill="#8B7CFF" fill-opacity="0.18" stroke="#8B7CFF" stroke-opacity="0.8"/>
+    <path d="M927 274V266M927 266L932 261M927 266L937 270" fill="none" stroke="#BDB5FF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="958" y="267" fill="#F1F5FB" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="650">Primary integrates</text>
+    <text x="958" y="287" fill="#91A1B9" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12.5">on a new local branch</text>
+
+    <line x1="930" y1="307" x2="1186" y2="307" stroke="#8BA3B1" stroke-opacity="0.18"/>
+
+    <circle cx="932" cy="337" r="13" fill="#4EC8DA" fill-opacity="0.16" stroke="#4EC8DA" stroke-opacity="0.8"/>
+    <path d="M927 332H937M929 337H935M931 342H933" stroke="#8BE7F0" stroke-width="1.8" stroke-linecap="round"/>
+    <text x="958" y="334" fill="#F1F5FB" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="650">Isolated exact-SHA tests</text>
+    <text x="958" y="354" fill="#91A1B9" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12.5">verify the exact integration commit</text>
+
+    <line x1="930" y1="374" x2="1186" y2="374" stroke="#8BA3B1" stroke-opacity="0.18"/>
+
+    <circle cx="932" cy="404" r="13" fill="#39D7C4" fill-opacity="0.16" stroke="#39D7C4" stroke-opacity="0.8"/>
+    <path d="M926 404L930 408L938 399" fill="none" stroke="#6DE5D7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="958" y="401" fill="#F1F5FB" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="650">Reviewer final approval</text>
+    <text x="958" y="421" fill="#91A1B9" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12.5">for the tested commit</text>
+
+    <rect x="920" y="447" width="276" height="54" rx="14" fill="url(#accepted)" stroke="#39D7C4" stroke-opacity="0.72"/>
+    <circle cx="944" cy="474" r="12" fill="#39D7C4" fill-opacity="0.18"/>
+    <path d="M938 474L942 478L950 469" fill="none" stroke="#6DE5D7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="966" y="470" fill="#75E6D8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="800" letter-spacing="1.3">ACCEPTED</text>
+    <text x="966" y="488" fill="#F4F8FB" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="650">New local branch only</text>
+
+    <text x="1058" y="522" text-anchor="middle" fill="#A2B4C0" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12.5">Source refs unchanged · No push</text>
   </g>
+
+  <text x="64" y="573" fill="#9CA9BF" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="500">Agree first. Integrate second. Verify the exact result.</text>
 </svg>
