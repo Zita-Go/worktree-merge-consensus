@@ -318,6 +318,11 @@ command trace, single successful patch provenance, clean target branch,
 ancestry, and frozen source refs. The unavailable confirmation is retained as
 an audited attempt, and no integration write is repeated.
 
+Release 0.3.5 reconstructs that archived turn from its durable completed item
+events before auditing it. This is required when the App Server's canonical
+completion envelope contains `items: []` and `itemsView: "notLoaded"`; the
+separately persisted item events remain the complete, request-bound trace.
+
 The same release contains one migration only for the exact legacy 0.2.4
 blocked-verification history: the same Run, Primary task, request, round,
 verification clone, integration branch and SHA, frozen refs, and three archived

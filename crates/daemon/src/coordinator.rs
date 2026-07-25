@@ -1451,15 +1451,13 @@ where
             return Ok(false);
         };
         let archived_turn = self
-            .store
-            .turn_event_evidence(&run_id, &archived.thread_id, &archived.turn_id)?
+            .completed_turn_from_event_evidence(state, &archived.thread_id, &archived.turn_id)?
             .ok_or_else(|| {
                 CoordinatorError::operational(
                     "HISTORY_UNAVAILABLE",
                     "archived integration attempt lost its durable completion evidence",
                 )
-            })?
-            .completed_turn;
+            })?;
         if archived_turn.get("status").and_then(Value::as_str) != Some("completed")
             || !turn_contains_request_hash(&archived_turn, &pending.message_hash)
         {

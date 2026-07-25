@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.5
+
+- Reconstruct archived ephemeral turns from their durable item-event rows before
+  validating request markers and command evidence. Real App Server
+  `turn/completed` notifications may contain `items: []` with
+  `itemsView: "notLoaded"`; the item events remain the canonical full trace.
+- Exercise every persisted ephemeral integration recovery fixture with that
+  production completion shape so offline replay cannot accidentally audit only
+  the summary envelope.
+
 ## 0.3.4
 
 - Preserve completed ephemeral turn payloads and command-item evidence when a

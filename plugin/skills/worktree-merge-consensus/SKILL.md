@@ -283,7 +283,9 @@ integration, verification, final approval, recovery, and fail-closed pauses.
   emitting any durable event, it may replay the archived completed integration
   only after re-auditing the exact request, command policy, patch provenance,
   clean target, ancestry, and frozen source refs; it never repeats a merge,
-  patch, stage, or commit. Version 0.1.20 marks coordinator-authored Primary and Reviewer
+  patch, stage, or commit. Version 0.3.5 reconstructs the full turn from the
+  durable item-event trace when the App Server completion envelope reports
+  `itemsView: "notLoaded"`. Version 0.1.20 marks coordinator-authored Primary and Reviewer
   prompts as internal participant turns for which this launcher is inapplicable.
   Recovery may discard the exact denied legacy `sed -n 1,240p` read of this
   plugin's semver-versioned `SKILL.md`; that read never enters the live command

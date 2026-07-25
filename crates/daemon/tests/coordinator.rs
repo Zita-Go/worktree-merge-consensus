@@ -2184,8 +2184,11 @@ fn replace_persisted_ephemeral_turn_evidence(
             .record_turn_item_event(RUN_ID, thread_id, turn_id, "item/completed", item)
             .unwrap();
     }
+    let mut completion = turn;
+    completion["items"] = json!([]);
+    completion["itemsView"] = json!("notLoaded");
     store
-        .record_turn_completed_event(RUN_ID, thread_id, turn_id, &turn)
+        .record_turn_completed_event(RUN_ID, thread_id, turn_id, &completion)
         .unwrap();
 }
 
