@@ -2688,6 +2688,73 @@ async fn corrective_patch_tool_blocker_reactivates_the_exact_same_run_and_correc
 }
 
 #[tokio::test]
+async fn result_review_patch_rejection_reactivates_the_exact_modern_primary_request() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let mut replies = result_revision_replies();
+    let retry_integration = replies[6].clone();
+    replies[6] = json!(
+        "<consensus-result>BLOCKED:PATCH_NOT_AUTHORIZED</consensus-result>\n\nThe controlled patch was rejected before any write."
+    );
+    replies.insert(7, retry_integration);
+    let app = Arc::new(FakeAppServer::new(replies).without_primary_participant());
+    let safety = Arc::new(ResultReviewPatchSafety::default());
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::clone(&safety),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let blocked = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(blocked.status, RunStatus::Blocked);
+    assert_eq!(blocked.reason_code.as_deref(), Some("PATCH_NOT_AUTHORIZED"));
+    assert_eq!(blocked.phase, Phase::Blocked);
+    assert_eq!(blocked.round, 2);
+    assert_eq!(blocked.integration_sha.as_deref(), Some(INTEGRATION_SHA));
+    assert!(
+        blocked
+            .test_evidence
+            .iter()
+            .all(|evidence| evidence.exit_code == 0)
+    );
+    let accepted = store.latest_accepted_turn(RUN_ID).unwrap().unwrap();
+    assert_eq!(accepted.thread_id, "primary-consensus-mirror-1");
+    assert_eq!(accepted.participant_binding_generation, Some(1));
+
+    let resumed = coordinator.prepare_resume(RUN_ID).await.unwrap();
+
+    assert_eq!(resumed.facts.run_id.to_string(), RUN_ID);
+    assert_eq!(resumed.status, RunStatus::Running);
+    assert_eq!(resumed.phase, Phase::Integrate);
+    assert_eq!(resumed.next_action, NextAction::RequestPrimaryIntegration);
+    assert_eq!(resumed.round, blocked.round);
+    assert_eq!(resumed.integration_sha, blocked.integration_sha);
+    assert_eq!(resumed.test_evidence, blocked.test_evidence);
+    assert_eq!(resumed.last_result_feedback, blocked.last_result_feedback);
+    assert!(resumed.reason_code.is_none());
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    assert_eq!(pending.message_hash, accepted.message_hash);
+    assert!(pending.thread_id.is_none());
+    assert!(pending.turn_id.is_none());
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    assert_eq!(
+        store
+            .archived_turn_ids(RUN_ID, &accepted.message_hash)
+            .unwrap(),
+        vec![accepted.turn_id.clone()]
+    );
+
+    let repeat = coordinator.prepare_resume(RUN_ID).await.unwrap_err();
+    assert_eq!(repeat.code(), "NOT_PAUSED");
+    coordinator.cancel(RUN_ID).await.unwrap();
+}
+
+#[tokio::test]
 async fn corrective_patch_tool_retry_allows_exactly_one_request_bound_patch() {
     let safety = Arc::new(CorrectiveRecoverySafety::default());
     let (_temp, coordinator, _app, store, blocked) =
@@ -4857,6 +4924,73 @@ async fn controlled_patch_requires_the_exact_active_request_and_succeeds_only_on
 }
 
 #[tokio::test]
+async fn controlled_patch_is_authorized_after_result_review_requests_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(FakeAppServer::deferred(
+        result_revision_replies(),
+        8,
+        DeferMode::Hold,
+    ));
+    let safety = Arc::new(ResultReviewPatchSafety::default());
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::clone(&safety),
+        CoordinatorOptions {
+            wait_timeout: Duration::from_secs(10),
+            poll_interval: Duration::from_millis(1),
+            communication_attempts: 1,
+            participant_mcp_executable: participant_mcp_executable(),
+        },
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let driver = {
+        let coordinator = coordinator.clone();
+        tokio::spawn(async move { coordinator.drive(RUN_ID).await })
+    };
+    wait_for_request_count(&app, 8).await;
+    let pending = wait_for_bound_pending_send(&store).await;
+    let state = store.load_run(RUN_ID).unwrap().unwrap();
+    assert_eq!(state.phase, Phase::Integrate);
+    assert_eq!(state.round, 2);
+    assert_eq!(state.integration_sha.as_deref(), Some(INTEGRATION_SHA));
+    assert!(
+        state
+            .test_evidence
+            .iter()
+            .all(|evidence| evidence.exit_code == 0)
+    );
+    assert!(state.last_result_feedback.is_some());
+
+    let applied = coordinator
+        .apply_patch(
+            RUN_ID,
+            &pending.message_hash,
+            "diff --git a/src/lib.rs b/src/lib.rs",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(applied.base_sha, INTEGRATION_SHA);
+    assert_eq!(
+        applied.changed_files,
+        vec![PathBuf::from("reviewer-regressions.rs")]
+    );
+    assert_eq!(safety.patch_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        safety.corrective_bases.lock().unwrap().as_slice(),
+        [INTEGRATION_SHA]
+    );
+
+    coordinator.cancel(RUN_ID).await.unwrap();
+    assert_eq!(driver.await.unwrap().unwrap().status, RunStatus::Cancelled);
+}
+
+#[tokio::test]
 async fn controlled_patch_on_mirror_records_exact_binding_provenance() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -5650,6 +5784,78 @@ struct FailAfterStartSafety {
 #[derive(Default)]
 struct PatchSafety {
     patch_calls: AtomicUsize,
+}
+
+#[derive(Default)]
+struct ResultReviewPatchSafety {
+    patch_calls: AtomicUsize,
+    corrective_bases: Mutex<Vec<String>>,
+}
+
+impl RepositorySafety for ResultReviewPatchSafety {
+    fn verify_frozen(&self, _facts: &RunFacts) -> Result<(), SafetyError> {
+        Ok(())
+    }
+
+    fn verify_branch_absent(&self, _facts: &RunFacts, _branch: &str) -> Result<(), SafetyError> {
+        Ok(())
+    }
+
+    fn verify_integration_in_progress(
+        &self,
+        _facts: &RunFacts,
+        _target_branch: &str,
+    ) -> Result<(), SafetyError> {
+        Ok(())
+    }
+
+    fn apply_corrective_integration_patch(
+        &self,
+        _facts: &RunFacts,
+        _target_branch: &str,
+        expected_base_sha: &str,
+        _patch: &str,
+    ) -> Result<(String, Vec<PathBuf>), SafetyError> {
+        self.patch_calls.fetch_add(1, Ordering::SeqCst);
+        self.corrective_bases
+            .lock()
+            .unwrap()
+            .push(expected_base_sha.to_owned());
+        Ok((
+            expected_base_sha.to_owned(),
+            vec![PathBuf::from("reviewer-regressions.rs")],
+        ))
+    }
+
+    fn verify_integration(
+        &self,
+        _facts: &RunFacts,
+        _branch: &str,
+        _sha: &str,
+        _changed_files: &[PathBuf],
+    ) -> Result<(), SafetyError> {
+        Ok(())
+    }
+
+    fn authoritative_integration_result(
+        &self,
+        _facts: &RunFacts,
+        _target_branch: &str,
+    ) -> Result<(String, Vec<PathBuf>), SafetyError> {
+        Ok((
+            INTEGRATION_SHA.to_owned(),
+            vec![PathBuf::from("combined.txt")],
+        ))
+    }
+
+    fn prepare_verification_workspace(
+        &self,
+        _facts: &RunFacts,
+        _integration_sha: &str,
+        destination: &Path,
+    ) -> Result<PathBuf, SafetyError> {
+        Ok(destination.to_path_buf())
+    }
 }
 
 impl RepositorySafety for PatchSafety {
@@ -6692,6 +6898,10 @@ impl AppServer for FakeAppServer {
             .deferred
             .filter(|(number, _)| *number == request_number)
             .map(|(_, mode)| mode);
+        let inject_patch_not_authorized_calls = action == "REQUEST_PRIMARY_INTEGRATION"
+            && reply.as_str().is_some_and(|text| {
+                text.contains("<consensus-result>BLOCKED:PATCH_NOT_AUTHORIZED</consensus-result>")
+            });
         let mut turn = match deferred_mode {
             Some(DeferMode::Interrupted | DeferMode::InterruptedCommand) => json!({
                 "id": turn_id,
@@ -6719,6 +6929,49 @@ impl AppServer for FakeAppServer {
             }
             None => completed_turn(&turn_id, prompt, &reply),
         };
+        if inject_patch_not_authorized_calls
+            && turn.get("status").and_then(Value::as_str) == Some("completed")
+        {
+            let metadata = prompt_json_block(prompt, "Authoritative turn metadata:");
+            let delivery =
+                prompt_json_block(prompt, "Coordinator delivery identity for crash recovery:");
+            let patch =
+                "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n";
+            let items = turn["items"].as_array_mut().unwrap();
+            let agent = items.pop().unwrap();
+            for (server, plugin_id) in [
+                (PARTICIPANT_MCP_SERVER, Value::Null),
+                (
+                    "worktreeMergeConsensus",
+                    json!("worktree-merge-consensus@worktree-merge-consensus"),
+                ),
+            ] {
+                items.push(json!({
+                    "id": format!("failed-patch-{server}-{turn_id}"),
+                    "type": "mcpToolCall",
+                    "pluginId": plugin_id,
+                    "server": server,
+                    "tool": PARTICIPANT_PATCH_TOOL,
+                    "arguments": {
+                        "run_id": metadata["run_id"],
+                        "request_hash": delivery["request_hash"],
+                        "patch": patch,
+                    },
+                    "status": "failed",
+                    "appContext": null,
+                    "result": {
+                        "structuredContent": {
+                            "ok": false,
+                            "error": {
+                                "code": "PATCH_NOT_AUTHORIZED",
+                                "message": "controlled patch is not authorized"
+                            }
+                        }
+                    }
+                }));
+            }
+            items.push(agent);
+        }
         if deferred_mode == Some(DeferMode::InterruptedCommand) {
             turn["items"].as_array_mut().unwrap().push(json!({
                 "id": format!("command-{turn_id}"),

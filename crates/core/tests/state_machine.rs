@@ -542,6 +542,62 @@ fn corrective_patch_tool_blocker_restores_the_same_post_verification_round() {
 }
 
 #[test]
+fn result_review_patch_rejection_restores_the_same_verified_correction_round() {
+    let mut state = blocked_result_review_patch_not_authorized_state();
+    let blocked = state.clone();
+
+    let action = state
+        .retry_blocked_result_review_patch_not_authorized()
+        .unwrap();
+
+    assert_eq!(action, NextAction::RequestPrimaryIntegration);
+    assert_eq!(state.status, RunStatus::Running);
+    assert_eq!(state.phase, Phase::Integrate);
+    assert_eq!(state.next_action, NextAction::RequestPrimaryIntegration);
+    assert_eq!(state.round, blocked.round);
+    assert_eq!(state.integration_branch, blocked.integration_branch);
+    assert_eq!(state.integration_sha, blocked.integration_sha);
+    assert_eq!(
+        state.current_integration_payload,
+        blocked.current_integration_payload
+    );
+    assert_eq!(state.test_evidence, blocked.test_evidence);
+    assert_eq!(state.last_result_feedback, blocked.last_result_feedback);
+    assert_eq!(state.verification_worktree, blocked.verification_worktree);
+    assert!(state.reason_code.is_none());
+    assert!(state.accepted_result.is_none());
+}
+
+#[test]
+fn result_review_patch_rejection_retry_requires_exact_successful_review_evidence() {
+    let mut failed_test = blocked_result_review_patch_not_authorized_state();
+    failed_test.test_evidence[0].exit_code = 1;
+    failed_test.current_integration_payload.as_mut().unwrap()["test_evidence"][0]["exit_code"] =
+        json!(1);
+
+    let mut missing_feedback = blocked_result_review_patch_not_authorized_state();
+    missing_feedback.last_result_feedback = None;
+
+    let mut wrong_feedback = blocked_result_review_patch_not_authorized_state();
+    wrong_feedback.last_result_feedback.as_mut().unwrap()["format"] = json!("machine_verification");
+
+    let mut missing_worktree = blocked_result_review_patch_not_authorized_state();
+    missing_worktree.verification_worktree = None;
+
+    for mut state in [
+        failed_test,
+        missing_feedback,
+        wrong_feedback,
+        missing_worktree,
+    ] {
+        let error = state
+            .retry_blocked_result_review_patch_not_authorized()
+            .unwrap_err();
+        assert_eq!(error.code(), "NOT_RETRYABLE");
+    }
+}
+
+#[test]
 fn corrective_patch_tool_retry_rejects_missing_failed_verification() {
     let mut state = blocked_corrective_patch_tool_state();
     state.test_evidence[0].exit_code = 0;
@@ -1192,6 +1248,31 @@ fn blocked_corrective_patch_tool_state() -> RunState {
     state.verification_worktree = Some(PathBuf::from("/state/verification/run"));
     state.apply_message(verification).unwrap();
     state.block("CONTROLLED_PATCH_TOOL_UNAVAILABLE");
+    state
+}
+
+fn blocked_result_review_patch_not_authorized_state() -> RunState {
+    let integration_sha = "cccccccccccccccccccccccccccccccccccccccc";
+    let mut state = fixture_result_state(integration_sha);
+    state.verification_worktree = Some(PathBuf::from("/state/verification/run"));
+    state
+        .apply_message(message(json!({
+            "message_type": "CHANGES_REQUIRED",
+            "phase": "RESULT_REVIEW",
+            "round": 1,
+            "plan_revision": 1,
+            "integration_branch": "consensus/test-run",
+            "integration_sha": integration_sha,
+            "reason_code": "REVIEW_CHANGES_REQUIRED",
+            "payload": {
+                "format": "markdown",
+                "feedback": "add the missing transactional regression tests"
+            }
+        })))
+        .unwrap();
+    assert_eq!(state.phase, Phase::Integrate);
+    assert_eq!(state.round, 2);
+    state.block("PATCH_NOT_AUTHORIZED");
     state
 }
 

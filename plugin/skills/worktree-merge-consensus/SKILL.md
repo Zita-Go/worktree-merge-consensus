@@ -285,7 +285,14 @@ integration, verification, final approval, recovery, and fail-closed pauses.
   clean target, ancestry, and frozen source refs; it never repeats a merge,
   patch, stage, or commit. Version 0.3.5 reconstructs the full turn from the
   durable item-event trace when the App Server completion envelope reports
-  `itemsView: "notLoaded"`. Version 0.1.20 marks coordinator-authored Primary and Reviewer
+  `itemsView: "notLoaded"`. Version 0.3.6 also recognizes an exact
+  `PATCH_NOT_AUTHORIZED` blocker produced after successful frozen verification
+  and Reviewer result feedback. It may retry only that request on the same Run
+  when every failed controlled-patch call carries the same request and patch,
+  no patch succeeded, the verified integration SHA is still clean and frozen,
+  and the completed response and modern Primary binding match durable history.
+  The prior integration commit is retained; verification and Reviewer approval
+  still run again after the correction. Version 0.1.20 marks coordinator-authored Primary and Reviewer
   prompts as internal participant turns for which this launcher is inapplicable.
   Recovery may discard the exact denied legacy `sed -n 1,240p` read of this
   plugin's semver-versioned `SKILL.md`; that read never enters the live command

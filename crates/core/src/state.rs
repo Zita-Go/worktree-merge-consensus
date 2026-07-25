@@ -995,6 +995,122 @@ impl RunState {
         Ok(self.next_action)
     }
 
+    pub fn retry_blocked_result_review_patch_not_authorized(
+        &mut self,
+    ) -> Result<NextAction, StateError> {
+        if self.status != RunStatus::Blocked
+            || self.phase != Phase::Blocked
+            || self.next_action != NextAction::Stop
+            || self.reason_code.as_deref() != Some("PATCH_NOT_AUTHORIZED")
+            || self.last_error.is_some()
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "only the exact terminal result-review controlled-patch rejection can be retried",
+            ));
+        }
+        if !self.plan_approved
+            || self.current_plan_payload.is_none()
+            || self.plan_approval_payload.is_none()
+            || self.target_integration_branch.is_none()
+            || self.integration_branch.is_none()
+            || self.integration_sha.is_none()
+            || self.current_integration_payload.is_none()
+            || self.verification_worktree.is_none()
+            || self.required_test_commands.is_empty()
+            || self.test_evidence.is_empty()
+            || self.accepted_result.is_some()
+            || self.result_approved_sha.is_some()
+            || self.round <= 1
+            || self.integration_branch.as_deref() != self.target_integration_branch.as_deref()
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "result-review controlled-patch recovery requires an unaccepted verified integration",
+            ));
+        }
+        self.validate_complete_test_evidence(&self.test_evidence)
+            .map_err(|_| {
+                state_error(
+                    "NOT_RETRYABLE",
+                    "result-review controlled-patch recovery requires complete frozen test evidence",
+                )
+            })?;
+        if self
+            .test_evidence
+            .iter()
+            .any(|evidence| evidence.exit_code != 0)
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "result-review controlled-patch recovery requires the previously verified result",
+            ));
+        }
+        let verification_worktree = self.verification_worktree.as_ref().ok_or_else(|| {
+            state_error(
+                "NOT_RETRYABLE",
+                "result-review controlled-patch recovery requires a persisted verification worktree",
+            )
+        })?;
+        if self
+            .test_evidence
+            .iter()
+            .any(|evidence| &evidence.cwd != verification_worktree)
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "result-review controlled-patch recovery evidence must come from the persisted verification worktree",
+            ));
+        }
+        let integration_payload = self.current_integration_payload.as_ref().ok_or_else(|| {
+            state_error(
+                "NOT_RETRYABLE",
+                "result-review controlled-patch recovery requires retained integration evidence",
+            )
+        })?;
+        let payload_evidence = test_evidence(integration_payload).map_err(|_| {
+            state_error(
+                "NOT_RETRYABLE",
+                "result-review controlled-patch recovery requires matching persisted test evidence",
+            )
+        })?;
+        if payload_evidence != self.test_evidence {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "result-review controlled-patch recovery test evidence fields disagree",
+            ));
+        }
+        let feedback = self.last_result_feedback.as_ref().ok_or_else(|| {
+            state_error(
+                "NOT_RETRYABLE",
+                "result-review controlled-patch recovery requires retained Reviewer feedback",
+            )
+        })?;
+        let feedback_object = feedback.as_object().filter(|object| !object.is_empty());
+        let malformed_markdown = feedback.get("format").and_then(Value::as_str) == Some("markdown")
+            && feedback
+                .get("feedback")
+                .and_then(Value::as_str)
+                .is_none_or(|value| value.trim().is_empty());
+        if feedback_object.is_none()
+            || feedback.get("format").and_then(Value::as_str) == Some("machine_verification")
+            || malformed_markdown
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "result-review controlled-patch recovery requires nonempty Reviewer feedback distinct from machine verification",
+            ));
+        }
+
+        self.status = RunStatus::Running;
+        self.phase = Phase::Integrate;
+        self.next_action = NextAction::RequestPrimaryIntegration;
+        self.reason_code = None;
+        self.last_error = None;
+        self.validate_persisted()?;
+        Ok(self.next_action)
+    }
+
     pub fn retry_blocked_preintegration_forbidden_operation(
         &mut self,
     ) -> Result<NextAction, StateError> {

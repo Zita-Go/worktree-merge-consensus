@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.6
+
+- Authorize the request-bound controlled patch after a successful frozen
+  verification when Reviewer result feedback advances the same Run to a new
+  correction round. Previously this legitimate post-review state was mistaken
+  for an inactive patch request and failed with `PATCH_NOT_AUTHORIZED`.
+- Recover that exact accepted blocker once for both direct and ephemeral
+  Primary bindings. Recovery requires durable completed-turn evidence, the
+  original request marker and response hash, identical failed patch payloads,
+  exact `PATCH_NOT_AUTHORIZED` results, no successful patch record, a clean
+  unchanged integration SHA, complete successful frozen tests, and retained
+  Reviewer feedback.
+- Preserve the existing integration commit and retry only the rejected
+  correction request. The recovered Run must still create a new SHA, rerun all
+  frozen verification commands, and return to Reviewer result approval.
+
 ## 0.3.5
 
 - Reconstruct archived ephemeral turns from their durable item-event rows before

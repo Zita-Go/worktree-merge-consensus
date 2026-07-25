@@ -24,6 +24,9 @@
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#70809F"/>
     </marker>
+    <marker id="arrow-output" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#39D7C4"/>
+    </marker>
   </defs>
 
   <rect width="1280" height="640" rx="28" fill="url(#background)"/>
@@ -63,8 +66,9 @@
   <g filter="url(#shadow)">
     <rect x="486" y="248" width="300" height="172" rx="24" fill="#171F34" stroke="url(#accent)" stroke-width="2"/>
     <text x="636" y="286" text-anchor="middle" fill="#CFD7EA" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="750" letter-spacing="1.8">CONSENSUS LOOP</text>
-    <circle cx="741" cy="282" r="4" fill="#F7C66C"/>
-    <text x="752" y="286" fill="#F7C66C" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" font-weight="800" letter-spacing="1.2">LIVE</text>
+    <rect x="720" y="269" width="54" height="24" rx="12" fill="#F7C66C" fill-opacity="0.14" stroke="#F7C66C" stroke-opacity="0.75"/>
+    <circle cx="732" cy="281" r="4" fill="#F7C66C"/>
+    <text x="742" y="285" fill="#FFD98D" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" font-weight="800" letter-spacing="1.2">LIVE</text>
     <g font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="15" font-weight="600">
       <rect x="514" y="306" width="74" height="36" rx="10" fill="#252D49"/>
       <text x="551" y="329" text-anchor="middle" fill="#DCD7FF">Plan</text>
@@ -76,7 +80,7 @@
     <text x="636" y="402" text-anchor="middle" fill="#8F9BB4" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13">Iterate until the exact plan is approved</text>
   </g>
 
-  <path d="M786 334h74" fill="none" stroke="#39D7C4" stroke-width="3" stroke-linecap="round" marker-end="url(#arrow)"/>
+  <path d="M786 334 H871" fill="none" stroke="#39D7C4" stroke-width="3" stroke-linecap="round" marker-end="url(#arrow-output)"/>
 
   <g filter="url(#shadow)">
     <rect x="868" y="230" width="348" height="208" rx="24" fill="url(#output)" stroke="#39D7C4" stroke-opacity="0.75"/>
@@ -100,7 +104,7 @@
     <rect x="452" y="0" width="170" height="42" rx="21" fill="#171F34" stroke="#39445F"/>
     <circle cx="476" cy="21" r="5" fill="#39D7C4"/>
     <text x="492" y="26" fill="#C8D0E3">Isolated tests</text>
-    <rect x="638" y="0" width="184" height="42" rx="21" fill="#171F34" stroke="#39445F"/>
+    <rect x="638" y="0" width="184" height="42" rx="21" fill="#2B251B" stroke="#F7C66C" stroke-opacity="0.85"/>
     <circle cx="662" cy="21" r="5" fill="#F7C66C"/>
     <text x="678" y="26" fill="#C8D0E3">Visible progress</text>
   </g>

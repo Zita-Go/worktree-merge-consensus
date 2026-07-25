@@ -1072,7 +1072,20 @@ where
                 .inspect_completed_corrective_patch_tool_unavailable_retry(&state, action)
                 .await?;
             let blocked_state = state.clone();
-            let restored_action = state.retry_blocked_corrective_patch_tool_unavailable()?;
+            let restored_action = match blocked_state.reason_code.as_deref() {
+                Some("CONTROLLED_PATCH_TOOL_UNAVAILABLE") => {
+                    state.retry_blocked_corrective_patch_tool_unavailable()?
+                }
+                Some("PATCH_NOT_AUTHORIZED") => {
+                    state.retry_blocked_result_review_patch_not_authorized()?
+                }
+                _ => {
+                    return Err(CoordinatorError::operational(
+                        "INCOMPATIBLE_STATE",
+                        "corrective patch recovery reason changed after inspection",
+                    ));
+                }
+            };
             if restored_action != action {
                 return Err(CoordinatorError::operational(
                     "INCOMPATIBLE_STATE",
@@ -2763,6 +2776,8 @@ where
                 "corrective patch-tool recovery is limited to the primary correction action",
             ));
         }
+        let post_review_patch_rejection =
+            state.reason_code.as_deref() == Some("PATCH_NOT_AUTHORIZED");
         let run_id = state.facts.run_id.to_string();
         let accepted = self.store.latest_accepted_turn(&run_id)?.ok_or_else(|| {
             CoordinatorError::operational(
@@ -2779,12 +2794,21 @@ where
                 "accepted corrective patch-tool blocker does not match the frozen correction request",
             ));
         }
-        self.validate_legacy_source_primary_thread(
-            state,
-            &accepted.thread_id,
-            accepted.capability_generation.as_deref(),
-            accepted.participant_binding_generation,
-        )?;
+        if post_review_patch_rejection {
+            self.validate_recorded_role_thread(
+                state,
+                Role::Primary,
+                &accepted.thread_id,
+                accepted.participant_binding_generation,
+            )?;
+        } else {
+            self.validate_legacy_source_primary_thread(
+                state,
+                &accepted.thread_id,
+                accepted.capability_generation.as_deref(),
+                accepted.participant_binding_generation,
+            )?;
+        }
         if self
             .store
             .successful_patch_recorded(&run_id, &accepted.message_hash)?
@@ -2795,20 +2819,32 @@ where
             ));
         }
 
-        let detail = self.read_thread_with_retry(&accepted.thread_id).await?;
-        verify_requested_thread_identity(&accepted.thread_id, &detail)?;
-        let persisted_turn = find_turn(&detail, &accepted.turn_id).ok_or_else(|| {
-            CoordinatorError::operational(
-                "HISTORY_UNAVAILABLE",
-                "accepted corrective patch-tool blocker is absent from canonical task history",
+        let turn = if post_review_patch_rejection {
+            self.recorded_completed_turn(
+                state,
+                Role::Primary,
+                &accepted.thread_id,
+                &accepted.turn_id,
+                accepted.participant_binding_generation,
+                "accepted result-review controlled-patch rejection",
             )
-        })?;
-        let turn = self.completed_turn_with_event_evidence(
-            state,
-            &accepted.thread_id,
-            &accepted.turn_id,
-            persisted_turn,
-        )?;
+            .await?
+        } else {
+            let detail = self.read_thread_with_retry(&accepted.thread_id).await?;
+            verify_requested_thread_identity(&accepted.thread_id, &detail)?;
+            let persisted_turn = find_turn(&detail, &accepted.turn_id).ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "accepted corrective patch-tool blocker is absent from canonical task history",
+                )
+            })?;
+            self.completed_turn_with_event_evidence(
+                state,
+                &accepted.thread_id,
+                &accepted.turn_id,
+                persisted_turn,
+            )?
+        };
         let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
             CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
@@ -2827,7 +2863,12 @@ where
                 "accepted corrective patch-tool blocker lacks its deterministic request marker",
             ));
         }
-        if let Some(blocker) = terminal_turn_retry_blocker(&turn) {
+        let blocker = if post_review_patch_rejection {
+            failed_patch_not_authorized_turn_blocker(state, &turn, &accepted.message_hash)
+        } else {
+            terminal_turn_retry_blocker(&turn)
+        };
+        if let Some(blocker) = blocker {
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
                 format!("corrective patch-tool blocker cannot be retried: {blocker}"),
@@ -2839,16 +2880,25 @@ where
             allowed_participant_signals(NextAction::RequestPrimaryIntegration),
         )
         .map_err(|error| CoordinatorError::operational("INVALID_RESPONSE", error.to_string()))?;
+        let expected_reason = if post_review_patch_rejection {
+            "PATCH_NOT_AUTHORIZED"
+        } else {
+            "CONTROLLED_PATCH_TOOL_UNAVAILABLE"
+        };
         if parsed.signal != ParticipantSignal::Blocked
-            || parsed.blocked_reason.as_deref() != Some("CONTROLLED_PATCH_TOOL_UNAVAILABLE")
+            || parsed.blocked_reason.as_deref() != Some(expected_reason)
         {
             return Err(CoordinatorError::operational(
                 "MODEL_RESPONSE_RETRY_UNSAFE",
-                "accepted correction blocker is not exactly CONTROLLED_PATCH_TOOL_UNAVAILABLE",
+                format!("accepted correction blocker is not exactly {expected_reason}"),
             ));
         }
         let mut response_state = state.clone();
-        response_state.retry_blocked_corrective_patch_tool_unavailable()?;
+        if post_review_patch_rejection {
+            response_state.retry_blocked_result_review_patch_not_authorized()?;
+        } else {
+            response_state.retry_blocked_corrective_patch_tool_unavailable()?;
+        }
         let normalized = self.normalized_marker_message(
             &response_state,
             NextAction::RequestPrimaryIntegration,
@@ -5674,6 +5724,116 @@ fn pending_controlled_patch_approval_blocker(
     None
 }
 
+fn failed_patch_not_authorized_turn_blocker(
+    state: &RunState,
+    turn: &Value,
+    request_hash: &str,
+) -> Option<String> {
+    let Some(items) = turn.get("items").and_then(Value::as_array) else {
+        return Some("canonical items are unavailable".into());
+    };
+    if items.is_empty() {
+        return Some("canonical items are empty".into());
+    }
+
+    let mut patch_calls = 0usize;
+    let mut patch_hash = None;
+    let mut patch_surfaces = HashSet::new();
+    let mut final_agent_seen = false;
+    for item in items {
+        let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+            return Some("canonical item has no type".into());
+        };
+        match item_type {
+            "userMessage" | "reasoning" => {}
+            "agentMessage" => final_agent_seen = true,
+            "contextCompaction" => {
+                if let Some(blocker) = context_compaction_retry_blocker(item) {
+                    return Some(blocker);
+                }
+            }
+            "commandExecution" => {
+                if final_agent_seen {
+                    return Some(
+                        "integration command appears after the final agent response".into(),
+                    );
+                }
+                if let Some(blocker) = integration_command_blocker(state, item) {
+                    return Some(blocker);
+                }
+            }
+            "mcpToolCall" => {
+                if final_agent_seen {
+                    return Some(
+                        "controlled patch call appears after the final agent response".into(),
+                    );
+                }
+                if let Some(blocker) =
+                    recoverable_controlled_patch_mcp_identity_blocker(state, item, request_hash)
+                {
+                    return Some(blocker);
+                }
+                if item.get("status").and_then(Value::as_str) != Some("failed")
+                    || item
+                        .pointer("/result/structuredContent/ok")
+                        .and_then(Value::as_bool)
+                        != Some(false)
+                    || item
+                        .pointer("/result/structuredContent/error/code")
+                        .and_then(Value::as_str)
+                        != Some("PATCH_NOT_AUTHORIZED")
+                {
+                    return Some(
+                        "controlled patch rejection lacks the exact PATCH_NOT_AUTHORIZED failure result"
+                            .into(),
+                    );
+                }
+                let patch = item
+                    .get("arguments")
+                    .and_then(|arguments| arguments.get("patch"))
+                    .and_then(Value::as_str)
+                    .expect("controlled patch identity validation requires a patch string");
+                let current_patch_hash = canonical_json_hash(&json!({"patch": patch}));
+                if patch_hash
+                    .as_deref()
+                    .is_some_and(|expected| expected != current_patch_hash)
+                {
+                    return Some(
+                        "controlled patch rejection contains different patch payloads".into(),
+                    );
+                }
+                patch_hash = Some(current_patch_hash);
+                let server = item
+                    .get("server")
+                    .and_then(Value::as_str)
+                    .expect("controlled patch identity validation requires a server");
+                if !patch_surfaces.insert(server.to_owned()) {
+                    return Some("controlled patch rejection repeats the same MCP surface".into());
+                }
+                patch_calls += 1;
+                if patch_calls > 2 {
+                    return Some(
+                        "controlled patch rejection contains more than two failed compatibility calls"
+                            .into(),
+                    );
+                }
+            }
+            _ => {
+                return Some(format!(
+                    "canonical item type {item_type} may have side effects"
+                ));
+            }
+        }
+    }
+    if patch_calls == 0 {
+        return Some("controlled patch rejection contains no failed controlled patch call".into());
+    }
+    if !final_agent_seen {
+        return Some("controlled patch rejection has no final agent response".into());
+    }
+    None
+}
+
 fn recoverable_integration_turn_blocker(
     state: &RunState,
     turn: &Value,
@@ -6627,18 +6787,26 @@ fn execution_tool_unavailable_retry_action(
 fn corrective_patch_tool_unavailable_retry_action(
     state: &RunState,
 ) -> Result<Option<NextAction>, CoordinatorError> {
-    if state.reason_code.as_deref() != Some("CONTROLLED_PATCH_TOOL_UNAVAILABLE") {
-        return Ok(None);
-    }
     let mut candidate = state.clone();
-    candidate
-        .retry_blocked_corrective_patch_tool_unavailable()
-        .map_err(|error| {
-            CoordinatorError::operational(
-                "MODEL_RESPONSE_RETRY_UNSAFE",
-                format!("corrective patch-tool blocker is not retryable: {error}"),
-            )
-        })?;
+    match state.reason_code.as_deref() {
+        Some("CONTROLLED_PATCH_TOOL_UNAVAILABLE") => candidate
+            .retry_blocked_corrective_patch_tool_unavailable()
+            .map_err(|error| {
+                CoordinatorError::operational(
+                    "MODEL_RESPONSE_RETRY_UNSAFE",
+                    format!("corrective patch-tool blocker is not retryable: {error}"),
+                )
+            })?,
+        Some("PATCH_NOT_AUTHORIZED") => candidate
+            .retry_blocked_result_review_patch_not_authorized()
+            .map_err(|error| {
+                CoordinatorError::operational(
+                    "MODEL_RESPONSE_RETRY_UNSAFE",
+                    format!("result-review patch rejection is not retryable: {error}"),
+                )
+            })?,
+        _ => return Ok(None),
+    };
     Ok(Some(NextAction::RequestPrimaryIntegration))
 }
 
@@ -6677,8 +6845,16 @@ fn active_corrective_patch_request(state: &RunState) -> bool {
     }
     let mut blocked = state.clone();
     blocked.block("CONTROLLED_PATCH_TOOL_UNAVAILABLE");
-    blocked
+    if blocked
         .retry_blocked_corrective_patch_tool_unavailable()
+        .is_ok()
+    {
+        return true;
+    }
+    let mut blocked = state.clone();
+    blocked.block("PATCH_NOT_AUTHORIZED");
+    blocked
+        .retry_blocked_result_review_patch_not_authorized()
         .is_ok()
 }
 

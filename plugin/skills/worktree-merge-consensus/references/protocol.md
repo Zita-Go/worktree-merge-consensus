@@ -323,6 +323,18 @@ events before auditing it. This is required when the App Server's canonical
 completion envelope contains `items: []` and `itemsView: "notLoaded"`; the
 separately persisted item events remain the complete, request-bound trace.
 
+Release 0.3.6 treats the Primary integration request after Reviewer result
+feedback as an active corrective patch request even when every previous frozen
+verification command passed. An exact accepted `PATCH_NOT_AUTHORIZED` blocker
+may be retried once on the same Run only when the modern Primary binding,
+completed request marker, normalized response hash, clean persisted integration
+SHA, successful frozen evidence, and retained Reviewer feedback all match. The
+turn may contain one participant patch call, or the two known compatibility
+surfaces, only when every call failed with the same patch payload and exact
+`PATCH_NOT_AUTHORIZED` result and SQLite records no successful patch. Recovery
+archives that failed turn and resends the same deterministic request; it does
+not repeat the previous patch or skip the new verification and result review.
+
 The same release contains one migration only for the exact legacy 0.2.4
 blocked-verification history: the same Run, Primary task, request, round,
 verification clone, integration branch and SHA, frozen refs, and three archived

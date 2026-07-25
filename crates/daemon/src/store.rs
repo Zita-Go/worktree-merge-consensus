@@ -2289,13 +2289,27 @@ impl SqliteRunStore {
         observed_status: &str,
     ) -> Result<(), StoreError> {
         let mut expected_resumed = blocked_state.clone();
-        expected_resumed
-            .retry_blocked_corrective_patch_tool_unavailable()
-            .map_err(|error| {
-                StoreError::TerminalTurnNotRetryable(format!(
-                    "corrective patch-tool state is not retryable: {error}"
-                ))
-            })?;
+        match blocked_state.reason_code.as_deref() {
+            Some("CONTROLLED_PATCH_TOOL_UNAVAILABLE") => expected_resumed
+                .retry_blocked_corrective_patch_tool_unavailable()
+                .map_err(|error| {
+                    StoreError::TerminalTurnNotRetryable(format!(
+                        "corrective patch-tool state is not retryable: {error}"
+                    ))
+                })?,
+            Some("PATCH_NOT_AUTHORIZED") => expected_resumed
+                .retry_blocked_result_review_patch_not_authorized()
+                .map_err(|error| {
+                    StoreError::TerminalTurnNotRetryable(format!(
+                        "result-review patch rejection is not retryable: {error}"
+                    ))
+                })?,
+            _ => {
+                return Err(StoreError::TerminalTurnNotRetryable(
+                    "corrective patch retry has an unsupported blocked reason".into(),
+                ));
+            }
+        };
         if *resumed_state != expected_resumed || observed_status != "completed" {
             return Err(StoreError::TerminalTurnNotRetryable(
                 "corrective patch-tool retry state or terminal status is invalid".into(),
@@ -2307,13 +2321,9 @@ impl SqliteRunStore {
             || accepted.role != "PRIMARY"
             || accepted.phase != "INTEGRATE"
             || accepted.round != blocked_state.round
-            || accepted.thread_id != blocked_state.facts.primary_thread_id
             || accepted.message_hash.is_empty()
             || accepted.response_hash.is_empty()
             || accepted.turn_id.is_empty()
-            || accepted.participant_binding_generation.is_some()
-            || accepted.capability_generation.as_deref()
-                != Some(LEGACY_PARTICIPANT_CAPABILITY_GENERATION)
         {
             return Err(StoreError::TerminalTurnNotRetryable(
                 "accepted corrective patch-tool blocker does not match the frozen correction request"
@@ -2336,6 +2346,30 @@ impl SqliteRunStore {
             return Err(StoreError::TerminalTurnNotRetryable(format!(
                 "run {run_id} changed while preparing corrective patch-tool recovery"
             )));
+        }
+        let legacy_primary_matches = accepted.thread_id == blocked_state.facts.primary_thread_id
+            && accepted.participant_binding_generation.is_none()
+            && accepted.capability_generation.as_deref()
+                == Some(LEGACY_PARTICIPANT_CAPABILITY_GENERATION);
+        let bound_primary_matches = recorded_primary_thread_matches(
+            &transaction,
+            &run_id,
+            &blocked_state.facts.primary_thread_id,
+            &accepted.thread_id,
+            accepted.participant_binding_generation,
+        )?;
+        let primary_identity_matches = match blocked_state.reason_code.as_deref() {
+            Some("PATCH_NOT_AUTHORIZED") => bound_primary_matches,
+            Some("CONTROLLED_PATCH_TOOL_UNAVAILABLE") => {
+                legacy_primary_matches || bound_primary_matches
+            }
+            _ => false,
+        };
+        if !primary_identity_matches {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "accepted corrective patch-tool blocker does not match its historical Primary binding"
+                    .into(),
+            ));
         }
         let latest_accepted = transaction
             .query_row(
