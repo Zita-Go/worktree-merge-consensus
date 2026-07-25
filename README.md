@@ -14,12 +14,9 @@ integration branch**. Neither source branch is modified, and nothing is pushed.
 
 ![Two Codex tasks converge on one reviewed local integration branch](docs/assets/social-preview.svg)
 
-**Real Codex run — all six public stages:**
+**Real Codex acceptance demo:**
 
-![Real Codex run showing SOURCE_FREEZE through RESULT_REVIEW and ACCEPTED](docs/assets/real-consensus-run.png)
-
-This is assembled only from crops of one real run. The task sidebar and
-environment panel were removed; the Codex UI was not recreated.
+https://github.com/user-attachments/assets/c91f1da6-f2b2-484b-ae73-2864895233ff
 
 **Input:** two existing Codex tasks and two clean, committed worktrees in one
 repository.

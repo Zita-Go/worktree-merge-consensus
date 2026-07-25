@@ -14,12 +14,9 @@
 
 ![两个 Codex 任务最终形成一个经过复核的本地集成分支](docs/assets/social-preview.svg)
 
-**真实 Codex 运行——完整六阶段：**
+**真实 Codex 验收演示：**
 
-![真实 Codex 运行，展示 SOURCE_FREEZE 到 RESULT_REVIEW 及 ACCEPTED](docs/assets/real-consensus-run.png)
-
-图片仅由同一次真实运行的界面取帧、裁剪和拼接而成；去掉了任务侧栏与环境面板，
-没有重绘 Codex UI。
+https://github.com/user-attachments/assets/c91f1da6-f2b2-484b-ae73-2864895233ff
 
 **输入：** 同一仓库中的两个已有 Codex 任务，以及两个干净、已经提交的 worktree。
 
