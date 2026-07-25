@@ -292,8 +292,15 @@ integration, verification, final approval, recovery, and fail-closed pauses.
   no patch succeeded, the verified integration SHA is still clean and frozen,
   and the completed response and modern Primary binding match durable history.
   The prior integration commit is retained; verification and Reviewer approval
-  still run again after the correction. Version 0.1.20 marks coordinator-authored Primary and Reviewer
-  prompts as internal participant turns for which this launcher is inapplicable.
+  still run again after the correction. Version 0.3.7 handles one narrower
+  post-patch transport loss: when the exact ephemeral Primary is idle, the
+  request-bound patch succeeded, its target is clean and fully integrated, and
+  SQLite received zero item or completion events, the coordinator refreshes
+  the App Server connection and retries only the final read-only confirmation.
+  This path is allowed once per request; partial histories, drift, a dirty
+  target, or a second eventless confirmation remain terminal. Version 0.1.20
+  marks coordinator-authored Primary and Reviewer prompts as internal
+  participant turns for which this launcher is inapplicable.
   Recovery may discard the exact denied legacy `sed -n 1,240p` read of this
   plugin's semver-versioned `SKILL.md`; that read never enters the live command
   allowlist. Version 0.1.21 treats App Server's internal `contextCompaction`

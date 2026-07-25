@@ -900,6 +900,60 @@ fn terminal_turn_retry_is_archived_and_reset_atomically() {
 }
 
 #[test]
+fn eventless_successful_patch_retry_is_atomic_and_limited_to_one_attempt() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+    store
+        .record_pending_send(RUN_ID, "PRIMARY", "INTEGRATE", 1, "request-hash")
+        .unwrap();
+    store
+        .record_turn_started(RUN_ID, "request-hash", "primary-thread", "lost-turn")
+        .unwrap();
+    store
+        .record_successful_patch(RUN_ID, "request-hash", "patch-hash")
+        .unwrap();
+
+    store
+        .reset_eventless_successful_patch_turn_for_retry(
+            RUN_ID,
+            "request-hash",
+            "primary-thread",
+            "lost-turn",
+        )
+        .unwrap();
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    assert!(pending.thread_id.is_none());
+    assert!(pending.turn_id.is_none());
+    assert_eq!(
+        store
+            .archived_turn_attempts(RUN_ID, "request-hash")
+            .unwrap()[0]
+            .terminal_status,
+        "completed-event-evidence-unavailable-after-patch"
+    );
+
+    store
+        .record_turn_started(RUN_ID, "request-hash", "primary-thread", "second-lost-turn")
+        .unwrap();
+    let error = store
+        .reset_eventless_successful_patch_turn_for_retry(
+            RUN_ID,
+            "request-hash",
+            "primary-thread",
+            "second-lost-turn",
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "TERMINAL_TURN_NOT_RETRYABLE");
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    assert_eq!(pending.turn_id.as_deref(), Some("second-lost-turn"));
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+}
+
+#[test]
 fn terminal_turn_retry_rejects_wrong_identity_or_status_without_mutation() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();

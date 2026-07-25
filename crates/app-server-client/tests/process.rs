@@ -211,6 +211,34 @@ async fn reconnecting_client_replaces_a_proxy_closed_by_an_app_server_restart() 
 }
 
 #[tokio::test]
+async fn reconnecting_client_can_force_a_fresh_event_stream() {
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("calls.log");
+    let binary = fake_codex(temp.path(), &log, "0.144.5");
+
+    let client = ReconnectingCodexAppServer::connect(ConnectOptions {
+        codex_binary: binary,
+        control_socket: None,
+        start_daemon: true,
+    })
+    .await
+    .unwrap();
+
+    client.refresh_connection().await.unwrap();
+    let page = client.list_threads(None, 1).await.unwrap();
+
+    assert!(page.data.is_empty());
+    let calls = fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| *line == "app-server proxy")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn reconnecting_client_preserves_participant_resume_policy() {
     let temp = tempfile::tempdir().unwrap();
     let log = temp.path().join("calls.log");

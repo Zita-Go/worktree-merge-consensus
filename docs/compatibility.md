@@ -399,6 +399,13 @@ remain terminal. `no_progress_rounds` is the configured consecutive unchanged
 review-fingerprint threshold rather than a live progress counter; a materially
 different plan hash starts a new streak.
 
+Release 0.3.7 also repairs one exact ephemeral post-patch event-stream loss.
+When a request-bound patch and clean commit succeeded, the task is idle, and no
+item or completion event was persisted, the coordinator revalidates the target
+and frozen refs, refreshes its App Server proxy, and retries only the final
+read-only confirmation. The retry is bounded to one per request; any partial
+history, repository drift, dirty target, or repeated loss remains fail-closed.
+
 `doctor` validates a fresh App Server protocol connection and asks the
 coordinator daemon to probe its own connection, but deliberately does not spend
 a model turn. If the managed App Server restarts after the coordinator daemon,

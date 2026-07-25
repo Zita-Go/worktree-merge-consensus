@@ -335,6 +335,16 @@ surfaces, only when every call failed with the same patch payload and exact
 archives that failed turn and resends the same deterministic request; it does
 not repeat the previous patch or skip the new verification and result review.
 
+Release 0.3.7 adds a one-attempt recovery for an ephemeral Primary turn whose
+exact request-bound patch and final clean commit succeeded but whose App Server
+connection persisted no item or completion event. After a short completion
+grace, the task must be idle, the event trace must be completely empty, patch
+provenance and binding lineage must match, and the authorized integration
+target, ancestry, and frozen refs must revalidate. The coordinator then opens a
+fresh App Server event stream, atomically archives the eventless attempt, and
+reissues only the read-only `INTEGRATION_READY` confirmation. It never reapplies
+the patch; partial traces or a second eventless confirmation fail closed.
+
 The same release contains one migration only for the exact legacy 0.2.4
 blocked-verification history: the same Run, Primary task, request, round,
 verification clone, integration branch and SHA, frozen refs, and three archived

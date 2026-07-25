@@ -117,6 +117,11 @@ pub trait AppServer: Send + Sync {
     async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), AppServerError>;
     async fn controlled_patch_approval_mode(&self) -> Result<Option<String>, AppServerError>;
     async fn respond_to_request(&self, id: Value, result: Value) -> Result<(), AppServerError>;
+    async fn refresh_connection(&self) -> Result<(), AppServerError> {
+        Err(AppServerError::InvalidRequest(
+            "App Server connection refresh is not implemented".to_owned(),
+        ))
+    }
     async fn next_event(&self) -> Option<AppEvent>;
 }
 
@@ -682,6 +687,14 @@ impl AppServer for ReconnectingCodexAppServer {
 
     async fn respond_to_request(&self, id: Value, result: Value) -> Result<(), AppServerError> {
         self.inner.lock().await.respond_to_request(id, result).await
+    }
+
+    async fn refresh_connection(&self) -> Result<(), AppServerError> {
+        let mut client = self.inner.lock().await;
+        let replacement = CodexAppServer::connect(self.options.clone()).await?;
+        client.shutdown_proxy().await;
+        *client = replacement;
+        Ok(())
     }
 
     async fn next_event(&self) -> Option<AppEvent> {

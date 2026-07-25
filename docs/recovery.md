@@ -118,6 +118,13 @@ non-idempotent `turn/start` response is not blindly resent. Completed
 coordinator-owned verification commands are reused from their exact journal;
 STARTED commands without proven completion fail closed.
 
+Version 0.3.7 recognizes one additional exact boundary: an ephemeral Primary
+is idle after its request-bound patch and clean commit succeeded, while the
+coordinator persisted zero events for that turn. It revalidates patch
+provenance, target ancestry, cleanliness, and frozen refs, refreshes the App
+Server connection, and retries only the read-only result marker once. It does
+not infer success from a partial event trace and never repeats the patch.
+
 If the managed App Server restarts while the daemon is alive, `doctor` probes
 both a fresh direct connection and the daemon-owned proxy. It repairs a closed
 proxy before an idempotent task read. If repair fails, preserve the Run and fix

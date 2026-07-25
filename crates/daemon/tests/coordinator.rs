@@ -4991,6 +4991,87 @@ async fn controlled_patch_is_authorized_after_result_review_requests_changes() {
 }
 
 #[tokio::test]
+async fn eventless_ephemeral_corrective_patch_retries_only_the_final_confirmation() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let mut replies = result_revision_replies();
+    let confirmation_reply = replies[6].clone();
+    replies.insert(7, confirmation_reply);
+    let app = Arc::new(
+        FakeAppServer::deferred(replies, 8, DeferMode::Hold).without_primary_participant(),
+    );
+    let safety = Arc::new(ResultReviewPatchSafety::default());
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::clone(&safety),
+        CoordinatorOptions {
+            wait_timeout: Duration::from_millis(250),
+            poll_interval: Duration::from_millis(1),
+            communication_attempts: 1,
+            participant_mcp_executable: participant_mcp_executable(),
+        },
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let driver = {
+        let coordinator = coordinator.clone();
+        tokio::spawn(async move { coordinator.drive(RUN_ID).await })
+    };
+    wait_for_request_count(&app, 8).await;
+    let pending = wait_for_bound_pending_send(&store).await;
+    let lost_turn_id = pending.turn_id.clone().unwrap();
+
+    coordinator
+        .apply_patch(
+            RUN_ID,
+            &pending.message_hash,
+            "diff --git a/src/lib.rs b/src/lib.rs",
+        )
+        .await
+        .unwrap();
+    app.complete_deferred_turns();
+
+    let result = driver.await.unwrap().unwrap();
+
+    assert_eq!(
+        result.status,
+        RunStatus::Accepted,
+        "{:?}",
+        result.last_error
+    );
+    assert_eq!(
+        result.integration_sha.as_deref(),
+        Some(CORRECTED_INTEGRATION_SHA)
+    );
+    assert_eq!(safety.patch_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(app.connection_refresh_count(), 1);
+    assert_eq!(
+        app.request_order()
+            .iter()
+            .filter(|request| request.ends_with("REQUEST_PRIMARY_INTEGRATION"))
+            .count(),
+        3
+    );
+    let attempts = store
+        .archived_turn_attempts(RUN_ID, &pending.message_hash)
+        .unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].turn_id, lost_turn_id);
+    assert_eq!(
+        attempts[0].terminal_status,
+        "completed-event-evidence-unavailable-after-patch"
+    );
+    assert!(
+        app.prompts()
+            .iter()
+            .any(|prompt| prompt.contains("Coordinator recovery override"))
+    );
+}
+
+#[tokio::test]
 async fn controlled_patch_on_mirror_records_exact_binding_provenance() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -5809,6 +5890,20 @@ impl RepositorySafety for ResultReviewPatchSafety {
         Ok(())
     }
 
+    fn verify_integration_patch_ready(
+        &self,
+        _facts: &RunFacts,
+        _target_branch: &str,
+    ) -> Result<String, SafetyError> {
+        if self.patch_calls.load(Ordering::SeqCst) == 0 {
+            return Err(SafetyError::new(
+                "PATCH_UNAVAILABLE",
+                "corrective patch has not completed",
+            ));
+        }
+        Ok(CORRECTED_INTEGRATION_SHA.to_owned())
+    }
+
     fn apply_corrective_integration_patch(
         &self,
         _facts: &RunFacts,
@@ -5842,10 +5937,12 @@ impl RepositorySafety for ResultReviewPatchSafety {
         _facts: &RunFacts,
         _target_branch: &str,
     ) -> Result<(String, Vec<PathBuf>), SafetyError> {
-        Ok((
-            INTEGRATION_SHA.to_owned(),
-            vec![PathBuf::from("combined.txt")],
-        ))
+        let sha = if self.patch_calls.load(Ordering::SeqCst) == 0 {
+            INTEGRATION_SHA
+        } else {
+            CORRECTED_INTEGRATION_SHA
+        };
+        Ok((sha.to_owned(), vec![PathBuf::from("combined.txt")]))
     }
 
     fn prepare_verification_workspace(
@@ -5960,6 +6057,7 @@ struct FakeAppServer {
     policies: Mutex<Vec<TurnExecutionPolicy>>,
     responses: Mutex<Vec<Value>>,
     interrupts: Mutex<Vec<(String, String)>>,
+    connection_refreshes: AtomicUsize,
     approval_mode: Mutex<Option<String>>,
     approval_mode_requests: AtomicUsize,
     deferred: Option<(usize, DeferMode)>,
@@ -6067,6 +6165,7 @@ impl FakeAppServer {
             policies: Mutex::new(Vec::new()),
             responses: Mutex::new(Vec::new()),
             interrupts: Mutex::new(Vec::new()),
+            connection_refreshes: AtomicUsize::new(0),
             approval_mode: Mutex::new(Some("approve".into())),
             approval_mode_requests: AtomicUsize::new(0),
             deferred: None,
@@ -6243,6 +6342,10 @@ impl FakeAppServer {
 
     fn interrupts(&self) -> Vec<(String, String)> {
         self.interrupts.lock().unwrap().clone()
+    }
+
+    fn connection_refresh_count(&self) -> usize {
+        self.connection_refreshes.load(Ordering::SeqCst)
     }
 
     fn request_count(&self) -> usize {
@@ -7172,6 +7275,11 @@ impl AppServer for FakeAppServer {
     async fn controlled_patch_approval_mode(&self) -> Result<Option<String>, AppServerError> {
         self.approval_mode_requests.fetch_add(1, Ordering::SeqCst);
         Ok(self.approval_mode.lock().unwrap().clone())
+    }
+
+    async fn refresh_connection(&self) -> Result<(), AppServerError> {
+        self.connection_refreshes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn next_event(&self) -> Option<AppEvent> {

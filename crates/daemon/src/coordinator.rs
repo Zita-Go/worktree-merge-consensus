@@ -46,6 +46,7 @@ use crate::{PrimaryBindingMode, PrimaryParticipantBinding};
 const MAX_DRIVER_STEPS: usize = 128;
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(1_800);
 const TURN_INTERRUPT_TIMEOUT: Duration = Duration::from_secs(10);
+const EPHEMERAL_IDLE_COMPLETION_GRACE: Duration = Duration::from_secs(2);
 const DELIVERY_IDENTITY_HEADING: &str = "Coordinator delivery identity for crash recovery:";
 const VERIFICATION_COMMAND_OUTPUT_CAP_BYTES: usize = 65_536;
 const MAX_VERIFICATION_FAILURE_OUTPUT_BYTES: usize = 16_384;
@@ -54,6 +55,11 @@ const VERIFICATION_OUTPUT_TRUNCATION_MARKER: &str = "[earlier output truncated]\
 struct CompletedTurn {
     response: String,
     turn: Value,
+}
+
+enum TurnWaitOutcome {
+    Completed(CompletedTurn),
+    RetryAction,
 }
 
 struct PreparedActionThread {
@@ -3078,9 +3084,13 @@ where
             turn.id
         };
 
-        let completed = self
+        let completed = match self
             .wait_for_turn_response(state, &thread_id, &turn_id, ephemeral)
-            .await?;
+            .await?
+        {
+            TurnWaitOutcome::Completed(completed) => completed,
+            TurnWaitOutcome::RetryAction => return Ok(()),
+        };
         if action == NextAction::RequestPrimaryVerification {
             verify_marker_only_verification_turn(&completed.turn)?;
         }
@@ -4170,7 +4180,7 @@ where
         thread_id: &str,
         turn_id: &str,
         ephemeral: bool,
-    ) -> Result<CompletedTurn, CoordinatorError> {
+    ) -> Result<TurnWaitOutcome, CoordinatorError> {
         if ephemeral {
             return self
                 .wait_for_ephemeral_turn_response(state, thread_id, turn_id)
@@ -4200,10 +4210,10 @@ where
                             .await?;
                         let canonical_turn = self
                             .completed_turn_with_event_evidence(state, thread_id, turn_id, turn)?;
-                        return Ok(CompletedTurn {
+                        return Ok(TurnWaitOutcome::Completed(CompletedTurn {
                             response: final_agent_text(&canonical_turn)?.to_owned(),
                             turn: canonical_turn,
-                        });
+                        }));
                     }
                     Some("failed" | "interrupted") => {
                         return Err(CoordinatorError::operational(
@@ -4237,9 +4247,10 @@ where
         state: &mut RunState,
         thread_id: &str,
         turn_id: &str,
-    ) -> Result<CompletedTurn, CoordinatorError> {
+    ) -> Result<TurnWaitOutcome, CoordinatorError> {
         let mut idle_deadline = tokio::time::Instant::now() + self.options.wait_timeout;
         let mut last_status = None;
+        let mut idle_without_evidence_since = None;
         loop {
             let persisted = self.required_run(&state.facts.run_id.to_string())?;
             if persisted.status == RunStatus::Cancelled {
@@ -4253,10 +4264,10 @@ where
                 self.completed_turn_from_event_evidence(state, thread_id, turn_id)?
             {
                 return match turn.get("status").and_then(Value::as_str) {
-                    Some("completed") => Ok(CompletedTurn {
+                    Some("completed") => Ok(TurnWaitOutcome::Completed(CompletedTurn {
                         response: final_agent_text(&turn)?.to_owned(),
                         turn,
-                    }),
+                    })),
                     Some("failed" | "interrupted") => Err(CoordinatorError::operational(
                         "COMMUNICATION_FAILURE",
                         "ephemeral task turn did not complete successfully",
@@ -4291,17 +4302,126 @@ where
                 last_status = Some(status);
                 idle_deadline = tokio::time::Instant::now() + self.options.wait_timeout;
             }
-            if summary
+            match summary
                 .runtime_status()
                 .map_err(|detail| CoordinatorError::operational("HISTORY_UNAVAILABLE", detail))?
-                == ThreadRuntimeStatus::SystemError
             {
-                return Err(CoordinatorError::operational(
-                    "HISTORY_UNAVAILABLE",
-                    "ephemeral task entered systemError before durable turn completion",
-                ));
+                ThreadRuntimeStatus::SystemError => {
+                    return Err(CoordinatorError::operational(
+                        "HISTORY_UNAVAILABLE",
+                        "ephemeral task entered systemError before durable turn completion",
+                    ));
+                }
+                ThreadRuntimeStatus::Idle
+                    if self.eventless_successful_patch_turn_is_candidate(
+                        state, thread_id, turn_id,
+                    )? =>
+                {
+                    let now = tokio::time::Instant::now();
+                    let started = idle_without_evidence_since.get_or_insert(now);
+                    let grace = std::cmp::min(
+                        EPHEMERAL_IDLE_COMPLETION_GRACE,
+                        self.options.wait_timeout / 2,
+                    );
+                    if now.duration_since(*started) >= grace {
+                        self.recover_eventless_successful_patch_turn(state, thread_id, turn_id)
+                            .await?;
+                        return Ok(TurnWaitOutcome::RetryAction);
+                    }
+                }
+                _ => idle_without_evidence_since = None,
             }
         }
+    }
+
+    fn eventless_successful_patch_turn_is_candidate(
+        &self,
+        state: &RunState,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<bool, CoordinatorError> {
+        if state.status != RunStatus::Running
+            || state.phase != Phase::Integrate
+            || state.next_action != NextAction::RequestPrimaryIntegration
+        {
+            return Ok(false);
+        }
+        let run_id = state.facts.run_id.to_string();
+        let Some(pending) = self.store.pending_send(&run_id)? else {
+            return Ok(false);
+        };
+        Ok(pending.role == "PRIMARY"
+            && pending.phase == "INTEGRATE"
+            && pending.round == state.round
+            && pending.thread_id.as_deref() == Some(thread_id)
+            && pending.turn_id.as_deref() == Some(turn_id)
+            && self
+                .store
+                .successful_patch_recorded(&run_id, &pending.message_hash)?
+            && self
+                .store
+                .turn_event_evidence(&run_id, thread_id, turn_id)?
+                .is_none()
+            && self
+                .store
+                .turn_event_item_count(&run_id, thread_id, turn_id)?
+                == 0)
+    }
+
+    async fn recover_eventless_successful_patch_turn(
+        &self,
+        state: &RunState,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<(), CoordinatorError> {
+        if !self.eventless_successful_patch_turn_is_candidate(state, thread_id, turn_id)? {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "eventless successful-patch recovery boundary changed before retry",
+            ));
+        }
+        let run_id = state.facts.run_id.to_string();
+        let pending = self.store.pending_send(&run_id)?.ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "eventless successful-patch recovery lost its pending request",
+            )
+        })?;
+        self.validate_recorded_role_thread(
+            state,
+            Role::Primary,
+            thread_id,
+            pending.participant_binding_generation,
+        )?;
+        self.validated_successful_patch_hash(state, &pending, false)?
+            .ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "eventless integration turn has no exact successful patch provenance",
+                )
+            })?;
+        let target = state.target_integration_branch.as_deref().ok_or_else(|| {
+            CoordinatorError::operational("INVALID_STATE", "target integration branch is missing")
+        })?;
+        let authoritative_head = self
+            .safety
+            .verify_integration_patch_ready(&state.facts, target)?;
+        if state.integration_sha.as_deref() == Some(authoritative_head.as_str()) {
+            return Err(CoordinatorError::operational(
+                "STALE_INTEGRATION_SHA",
+                "eventless corrective patch did not produce the required new integration SHA",
+            ));
+        }
+        self.app.refresh_connection().await.map_err(|error| {
+            communication_error("app-server connection refresh", Some(thread_id), error)
+        })?;
+        self.store.reset_eventless_successful_patch_turn_for_retry(
+            &run_id,
+            &pending.message_hash,
+            thread_id,
+            turn_id,
+        )?;
+        Ok(())
     }
 
     async fn drain_completed_turn_events(

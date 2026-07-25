@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.7
+
+- Recover one exact ephemeral Primary integration turn when its request-bound
+  controlled patch and clean commit succeeded but the App Server event stream
+  lost every item and completion notification after the task became idle.
+- Revalidate successful patch provenance, the clean authorized target branch,
+  source ancestry, and frozen source references before recovery. Refresh the
+  App Server proxy, archive the eventless attempt atomically, and retry only the
+  final read-only `INTEGRATION_READY` confirmation; never repeat the patch.
+- Bound this compatibility path to one attempt per deterministic request and
+  continue to fail closed for partial event histories, dirty worktrees, source
+  drift, mismatched bindings, or a second lost confirmation.
+
 ## 0.3.6
 
 - Authorize the request-bound controlled patch after a successful frozen

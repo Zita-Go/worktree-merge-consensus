@@ -1526,6 +1526,63 @@ impl SqliteRunStore {
         Ok(())
     }
 
+    pub fn reset_eventless_successful_patch_turn_for_retry(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<(), StoreError> {
+        const RETRY_STATUS: &str = "completed-event-evidence-unavailable-after-patch";
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let patch_count = transaction.query_row(
+            "SELECT COUNT(*) FROM patch_applications
+             WHERE run_id = ?1 AND message_hash = ?2",
+            params![run_id, message_hash],
+            |row| row.get::<_, u64>(0),
+        )?;
+        let event_item_count = transaction.query_row(
+            "SELECT COUNT(*) FROM turn_event_items
+             WHERE run_id = ?1 AND thread_id = ?2 AND turn_id = ?3",
+            params![run_id, thread_id, turn_id],
+            |row| row.get::<_, u64>(0),
+        )?;
+        let completion_count = transaction.query_row(
+            "SELECT COUNT(*) FROM turn_event_completions
+             WHERE run_id = ?1 AND thread_id = ?2 AND turn_id = ?3",
+            params![run_id, thread_id, turn_id],
+            |row| row.get::<_, u64>(0),
+        )?;
+        let prior_retry_count = transaction.query_row(
+            "SELECT COUNT(*) FROM turn_attempts
+             WHERE run_id = ?1 AND message_hash = ?2 AND terminal_status = ?3",
+            params![run_id, message_hash, RETRY_STATUS],
+            |row| row.get::<_, u64>(0),
+        )?;
+        if patch_count != 1
+            || event_item_count != 0
+            || completion_count != 0
+            || prior_retry_count != 0
+        {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "turn {turn_id} is not the one eventless successful-patch attempt allowed for run {run_id}"
+            )));
+        }
+        archive_and_reset_turn(
+            &transaction,
+            run_id,
+            message_hash,
+            thread_id,
+            turn_id,
+            "SENT",
+            RETRY_STATUS,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn reactivate_blocked_run_with_unsent_ephemeral_recreation_retry(
         &self,
         blocked_state: &RunState,
