@@ -16,7 +16,7 @@ integration branch**. Neither source branch is modified, and nothing is pushed.
 
 **Real Codex acceptance demo:**
 
-https://github.com/user-attachments/assets/c91f1da6-f2b2-484b-ae73-2864895233ff
+https://github.com/user-attachments/assets/d9c0341f-83ed-4d12-9be1-42479e4c5d45
 
 **Input:** two existing Codex tasks and two clean, committed worktrees in one
 repository.

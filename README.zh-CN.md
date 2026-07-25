@@ -16,7 +16,7 @@
 
 **真实 Codex 验收演示：**
 
-https://github.com/user-attachments/assets/c91f1da6-f2b2-484b-ae73-2864895233ff
+https://github.com/user-attachments/assets/d9c0341f-83ed-4d12-9be1-42479e4c5d45
 
 **输入：** 同一仓库中的两个已有 Codex 任务，以及两个干净、已经提交的 worktree。
 
