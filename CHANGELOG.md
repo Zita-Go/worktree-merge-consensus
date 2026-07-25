@@ -12,6 +12,9 @@
 - Bound this compatibility path to one attempt per deterministic request and
   continue to fail closed for partial event histories, dirty worktrees, source
   drift, mismatched bindings, or a second lost confirmation.
+- Apply the same exact recovery after an initial proxy refresh failure has
+  paused the Run: explicit same-Run resume rechecks the idle ephemeral task and
+  every Git/provenance invariant before retrying confirmation only.
 
 ## 0.3.6
 

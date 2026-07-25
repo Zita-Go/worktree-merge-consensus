@@ -987,27 +987,36 @@ where
             self.revalidate_current_repository(&state).await?;
         }
         if retry_terminal_turn {
-            self.restore_archived_integration_turn_after_ephemeral_loss(&state)?;
-            let completed_tool_failure_retry = if let Some(retry) = self
-                .inspect_completed_patch_not_authorized_retry(&state)
-                .await?
-            {
-                Some(retry)
+            let restored_archived_integration =
+                self.restore_archived_integration_turn_after_ephemeral_loss(&state)?;
+            let recovered_eventless_patch = if restored_archived_integration {
+                false
             } else {
-                self.inspect_completed_file_change_tool_unavailable_retry(&state)
+                self.prepare_paused_eventless_successful_patch_turn_retry(&state)
                     .await?
             };
-            if let Some(retry) = completed_tool_failure_retry {
-                self.store
-                    .reset_completed_integration_tool_failure_turn_for_retry(
-                        run_id,
-                        &retry.message_hash,
-                        &retry.thread_id,
-                        &retry.turn_id,
-                        &retry.observed_status,
-                    )?;
-            } else {
-                self.prepare_terminal_turn_retry(&state).await?;
+            if !restored_archived_integration && !recovered_eventless_patch {
+                let completed_tool_failure_retry = if let Some(retry) = self
+                    .inspect_completed_patch_not_authorized_retry(&state)
+                    .await?
+                {
+                    Some(retry)
+                } else {
+                    self.inspect_completed_file_change_tool_unavailable_retry(&state)
+                        .await?
+                };
+                if let Some(retry) = completed_tool_failure_retry {
+                    self.store
+                        .reset_completed_integration_tool_failure_turn_for_retry(
+                            run_id,
+                            &retry.message_hash,
+                            &retry.thread_id,
+                            &retry.turn_id,
+                            &retry.observed_status,
+                        )?;
+                } else {
+                    self.prepare_terminal_turn_retry(&state).await?;
+                }
             }
         }
         if let Some(action) = retry_forbidden_operation_action {
@@ -1415,6 +1424,73 @@ where
             status,
         )?;
         Ok(())
+    }
+
+    async fn prepare_paused_eventless_successful_patch_turn_retry(
+        &self,
+        state: &RunState,
+    ) -> Result<bool, CoordinatorError> {
+        if state.status != RunStatus::PausedUserAction
+            || state.reason_code.as_deref() != Some("COMMUNICATION_FAILURE")
+            || state.phase != Phase::Integrate
+            || state.next_action != NextAction::RequestPrimaryIntegration
+        {
+            return Ok(false);
+        }
+        let run_id = state.facts.run_id.to_string();
+        let Some(pending) = self.store.pending_send(&run_id)? else {
+            return Ok(false);
+        };
+        let (Some(thread_id), Some(turn_id)) =
+            (pending.thread_id.as_deref(), pending.turn_id.as_deref())
+        else {
+            return Ok(false);
+        };
+        if !self.eventless_successful_patch_turn_matches(
+            state,
+            thread_id,
+            turn_id,
+            RunStatus::PausedUserAction,
+        )? {
+            return Ok(false);
+        }
+        self.validate_recorded_role_thread(
+            state,
+            Role::Primary,
+            thread_id,
+            pending.participant_binding_generation,
+        )?;
+        if !self.recorded_role_thread_is_ephemeral(
+            state,
+            Role::Primary,
+            pending.participant_binding_generation,
+            "paused eventless successful-patch turn",
+        )? {
+            return Ok(false);
+        }
+        let summary = self.read_thread_summary_with_retry(thread_id).await?;
+        verify_requested_thread_summary_identity(thread_id, &summary)?;
+        match summary
+            .runtime_status()
+            .map_err(|detail| CoordinatorError::operational("HISTORY_UNAVAILABLE", detail))?
+        {
+            ThreadRuntimeStatus::Idle => {}
+            ThreadRuntimeStatus::SystemError => {
+                return Err(CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "ephemeral task entered systemError before paused successful-patch recovery",
+                ));
+            }
+            ThreadRuntimeStatus::NotLoaded | ThreadRuntimeStatus::Active => return Ok(false),
+        }
+        self.recover_eventless_successful_patch_turn_for_status(
+            state,
+            thread_id,
+            turn_id,
+            RunStatus::PausedUserAction,
+        )
+        .await?;
+        Ok(true)
     }
 
     fn restore_archived_integration_turn_after_ephemeral_loss(
@@ -4340,7 +4416,17 @@ where
         thread_id: &str,
         turn_id: &str,
     ) -> Result<bool, CoordinatorError> {
-        if state.status != RunStatus::Running
+        self.eventless_successful_patch_turn_matches(state, thread_id, turn_id, RunStatus::Running)
+    }
+
+    fn eventless_successful_patch_turn_matches(
+        &self,
+        state: &RunState,
+        thread_id: &str,
+        turn_id: &str,
+        expected_status: RunStatus,
+    ) -> Result<bool, CoordinatorError> {
+        if state.status != expected_status
             || state.phase != Phase::Integrate
             || state.next_action != NextAction::RequestPrimaryIntegration
         {
@@ -4374,7 +4460,28 @@ where
         thread_id: &str,
         turn_id: &str,
     ) -> Result<(), CoordinatorError> {
-        if !self.eventless_successful_patch_turn_is_candidate(state, thread_id, turn_id)? {
+        self.recover_eventless_successful_patch_turn_for_status(
+            state,
+            thread_id,
+            turn_id,
+            RunStatus::Running,
+        )
+        .await
+    }
+
+    async fn recover_eventless_successful_patch_turn_for_status(
+        &self,
+        state: &RunState,
+        thread_id: &str,
+        turn_id: &str,
+        expected_status: RunStatus,
+    ) -> Result<(), CoordinatorError> {
+        if !self.eventless_successful_patch_turn_matches(
+            state,
+            thread_id,
+            turn_id,
+            expected_status,
+        )? {
             return Err(CoordinatorError::operational(
                 "HISTORY_UNAVAILABLE",
                 "eventless successful-patch recovery boundary changed before retry",
@@ -4393,6 +4500,17 @@ where
             thread_id,
             pending.participant_binding_generation,
         )?;
+        if !self.recorded_role_thread_is_ephemeral(
+            state,
+            Role::Primary,
+            pending.participant_binding_generation,
+            "eventless successful-patch turn",
+        )? {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "eventless successful-patch recovery requires an ephemeral Primary binding",
+            ));
+        }
         self.validated_successful_patch_hash(state, &pending, false)?
             .ok_or_else(|| {
                 CoordinatorError::operational(

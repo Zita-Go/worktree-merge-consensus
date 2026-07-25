@@ -5072,6 +5072,101 @@ async fn eventless_ephemeral_corrective_patch_retries_only_the_final_confirmatio
 }
 
 #[tokio::test]
+async fn paused_eventless_ephemeral_patch_resumes_the_same_run_after_connection_refresh() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let mut replies = result_revision_replies();
+    let confirmation_reply = replies[6].clone();
+    replies.insert(7, confirmation_reply);
+    let app = Arc::new(
+        FakeAppServer::deferred(replies, 8, DeferMode::Hold)
+            .without_primary_participant()
+            .with_connection_refresh_failures(1),
+    );
+    let safety = Arc::new(ResultReviewPatchSafety::default());
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::clone(&safety),
+        CoordinatorOptions {
+            wait_timeout: Duration::from_millis(250),
+            poll_interval: Duration::from_millis(1),
+            communication_attempts: 1,
+            participant_mcp_executable: participant_mcp_executable(),
+        },
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let driver = {
+        let coordinator = coordinator.clone();
+        tokio::spawn(async move { coordinator.drive(RUN_ID).await })
+    };
+    wait_for_request_count(&app, 8).await;
+    let pending = wait_for_bound_pending_send(&store).await;
+    let lost_turn_id = pending.turn_id.clone().unwrap();
+
+    coordinator
+        .apply_patch(
+            RUN_ID,
+            &pending.message_hash,
+            "diff --git a/src/lib.rs b/src/lib.rs",
+        )
+        .await
+        .unwrap();
+    app.complete_deferred_turns();
+
+    let paused = driver.await.unwrap().unwrap();
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+    assert_eq!(paused.reason_code.as_deref(), Some("COMMUNICATION_FAILURE"));
+    assert_eq!(safety.patch_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(app.connection_refresh_count(), 1);
+    assert!(
+        store
+            .archived_turn_attempts(RUN_ID, &pending.message_hash)
+            .unwrap()
+            .is_empty()
+    );
+
+    let result = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(
+        result.status,
+        RunStatus::Accepted,
+        "{:?}",
+        result.last_error
+    );
+    assert_eq!(
+        result.integration_sha.as_deref(),
+        Some(CORRECTED_INTEGRATION_SHA)
+    );
+    assert_eq!(safety.patch_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(app.connection_refresh_count(), 2);
+    assert_eq!(
+        app.request_order()
+            .iter()
+            .filter(|request| request.ends_with("REQUEST_PRIMARY_INTEGRATION"))
+            .count(),
+        3
+    );
+    let attempts = store
+        .archived_turn_attempts(RUN_ID, &pending.message_hash)
+        .unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].turn_id, lost_turn_id);
+    assert_eq!(
+        attempts[0].terminal_status,
+        "completed-event-evidence-unavailable-after-patch"
+    );
+    assert!(
+        app.prompts()
+            .iter()
+            .any(|prompt| prompt.contains("Coordinator recovery override"))
+    );
+}
+
+#[tokio::test]
 async fn controlled_patch_on_mirror_records_exact_binding_provenance() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -6058,6 +6153,7 @@ struct FakeAppServer {
     responses: Mutex<Vec<Value>>,
     interrupts: Mutex<Vec<(String, String)>>,
     connection_refreshes: AtomicUsize,
+    connection_refresh_failures: AtomicUsize,
     approval_mode: Mutex<Option<String>>,
     approval_mode_requests: AtomicUsize,
     deferred: Option<(usize, DeferMode)>,
@@ -6166,6 +6262,7 @@ impl FakeAppServer {
             responses: Mutex::new(Vec::new()),
             interrupts: Mutex::new(Vec::new()),
             connection_refreshes: AtomicUsize::new(0),
+            connection_refresh_failures: AtomicUsize::new(0),
             approval_mode: Mutex::new(Some("approve".into())),
             approval_mode_requests: AtomicUsize::new(0),
             deferred: None,
@@ -6201,6 +6298,12 @@ impl FakeAppServer {
 
     fn with_lost_first_start_response(self) -> Self {
         self.lose_next_start_response.store(true, Ordering::SeqCst);
+        self
+    }
+
+    fn with_connection_refresh_failures(self, failures: usize) -> Self {
+        self.connection_refresh_failures
+            .store(failures, Ordering::SeqCst);
         self
     }
 
@@ -7279,6 +7382,17 @@ impl AppServer for FakeAppServer {
 
     async fn refresh_connection(&self) -> Result<(), AppServerError> {
         self.connection_refreshes.fetch_add(1, Ordering::SeqCst);
+        if self
+            .connection_refresh_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(AppServerError::InvalidResponse(
+                "injected App Server connection refresh failure".to_owned(),
+            ));
+        }
         Ok(())
     }
 

@@ -343,7 +343,9 @@ provenance and binding lineage must match, and the authorized integration
 target, ancestry, and frozen refs must revalidate. The coordinator then opens a
 fresh App Server event stream, atomically archives the eventless attempt, and
 reissues only the read-only `INTEGRATION_READY` confirmation. It never reapplies
-the patch; partial traces or a second eventless confirmation fail closed.
+the patch; partial traces or a second eventless confirmation fail closed. If
+the first connection refresh pauses the Run, explicit same-Run resume repeats
+the idle-task and repository checks before consuming the same one recovery.
 
 The same release contains one migration only for the exact legacy 0.2.4
 blocked-verification history: the same Run, Primary task, request, round,

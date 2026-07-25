@@ -405,6 +405,9 @@ item or completion event was persisted, the coordinator revalidates the target
 and frozen refs, refreshes its App Server proxy, and retries only the final
 read-only confirmation. The retry is bounded to one per request; any partial
 history, repository drift, dirty target, or repeated loss remains fail-closed.
+If the initial proxy refresh fails and pauses the Run, explicit same-Run resume
+rechecks the idle ephemeral task and all invariants before consuming the same
+single confirmation-only recovery allowance.
 
 `doctor` validates a fresh App Server protocol connection and asks the
 coordinator daemon to probe its own connection, but deliberately does not spend

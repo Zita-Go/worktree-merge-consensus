@@ -156,6 +156,10 @@ the evidence below.
    Primary attempt and a separate current confirmation-only attempt. Confirm
    matching 0.2.15 artifacts accept only the patch-free, read-only
    confirmation, preserve exactly one patch record, and resume the same Run.
+   Force the first post-patch App Server proxy refresh to fail, confirm the Run
+   pauses with `COMMUNICATION_FAILURE`, repair connectivity, and explicitly
+   resume the same Run. It must issue only the final read-only confirmation and
+   must not apply a second patch or create a replacement Run.
    Repeat both the interrupted-denial and completed-confirmation cases with
    exact `/bin/bash -lc 'git branch --show-current'`; matching 0.3.1 artifacts
    must resume the same Run without repeating patch, merge, staging, or commit.
