@@ -12,7 +12,9 @@
 把两个已经提交的 Codex worktree 变成一个经过测试和复核的**新本地集成分支**。
 两个来源分支都不会被修改，也不会发生 push。
 
-![两个 Codex 任务最终形成一个经过复核的本地集成分支](docs/assets/social-preview.svg)
+[![两个 Codex 任务最终形成一个经过复核的本地集成分支](docs/assets/social-preview.svg)](https://github.com/Zita-Go/worktree-merge-consensus/releases/download/v0.3.8/worktree-merge-consensus-demo-v0.3.8.mp4)
+
+[▶ 观看 75 秒真实 Codex 验收演示](https://github.com/Zita-Go/worktree-merge-consensus/releases/download/v0.3.8/worktree-merge-consensus-demo-v0.3.8.mp4)——展示同一 Run 恢复、精确 SHA 核验、隔离测试和 Reviewer 最终批准。
 
 **输入：** 同一仓库中的两个已有 Codex 任务，以及两个干净、已经提交的 worktree。
 

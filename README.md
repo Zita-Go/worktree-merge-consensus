@@ -12,7 +12,9 @@
 Turn two committed Codex worktrees into one tested and reviewed **new local
 integration branch**. Neither source branch is modified, and nothing is pushed.
 
-![Two Codex tasks converge on one reviewed local integration branch](docs/assets/social-preview.svg)
+[![Two Codex tasks converge on one reviewed local integration branch](docs/assets/social-preview.svg)](https://github.com/Zita-Go/worktree-merge-consensus/releases/download/v0.3.8/worktree-merge-consensus-demo-v0.3.8.mp4)
+
+[▶ Watch the 75-second real Codex acceptance demo](https://github.com/Zita-Go/worktree-merge-consensus/releases/download/v0.3.8/worktree-merge-consensus-demo-v0.3.8.mp4) — same-Run recovery, exact-SHA verification, isolated tests, and Reviewer approval.
 
 **Input:** two existing Codex tasks and two clean, committed worktrees in one
 repository.
