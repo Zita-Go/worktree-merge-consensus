@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.3
+
+- Accept only the exact read-only target preflight
+  `git show-ref --verify --quiet refs/heads/<target>` in addition to the
+  existing non-quiet form; continue to reject reordered flags, other refs,
+  extra arguments, and every write-capable `show-ref` shape.
+- Let same-Run recovery retain the canonical exit-one target-absence result,
+  then continue auditing the already-completed merge, controlled patch,
+  staging, Unicode commit token, and clean result without repeating them.
+- Replace the synthetic recovery preflight in the production-shaped
+  regression with the exact command observed in the real ephemeral Primary
+  turn, and document both accepted spellings in the integration prompt.
+
 ## 0.3.2
 
 - Accept a single Unicode letter-or-number commit token, plus `-`, `_`, `.`,

@@ -350,6 +350,7 @@ fn safe_show_ref_arguments(state: &RunState, arguments: &[&str]) -> bool {
     };
     let target_ref = format!("refs/heads/{branch}");
     matches!(arguments, ["--verify", reference] if *reference == target_ref)
+        || matches!(arguments, ["--verify", "--quiet", reference] if *reference == target_ref)
 }
 
 fn safe_read_only_git_arguments(arguments: &[&str]) -> bool {
@@ -600,6 +601,11 @@ mod tests {
             "/repo/primary",
             &format!("/bin/bash -lc 'git show-ref --verify {target}'")
         ));
+        assert!(is_retry_safe_read_only_integration_command(
+            &state,
+            "/repo/primary",
+            &format!("/bin/bash -lc 'git show-ref --verify --quiet {target}'")
+        ));
         assert_eq!(
             decide_command_approval(
                 &state,
@@ -625,7 +631,9 @@ mod tests {
         ));
         for command in [
             "git show-ref --verify refs/heads/primary",
-            "git show-ref --verify --quiet refs/heads/consensus/test-run",
+            "git show-ref --quiet --verify refs/heads/consensus/test-run",
+            "git show-ref --verify --quiet refs/heads/primary",
+            "git show-ref --verify --quiet refs/heads/consensus/test-run extra",
             "git show-ref --exclude-existing=refs/heads/consensus/test-run",
             "git branch --list primary",
             "git branch --list",

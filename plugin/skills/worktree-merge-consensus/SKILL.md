@@ -272,7 +272,10 @@ integration, verification, final approval, recovery, and fail-closed pauses.
   `git show-ref --verify refs/heads/<target-integration-branch>`. Version 0.1.19
   also permits only the equivalent exact
   `git branch --list <target-integration-branch>` query; every other `git branch`
-  form remains forbidden. The same-run
+  form remains forbidden. Version 0.3.3 additionally accepts only the exact
+  read-only `git show-ref --verify --quiet
+  refs/heads/<target-integration-branch>` spelling; reordered flags, other
+  refs, and extra arguments remain forbidden. The same-run
   recovery may retain canonically terminal read-only Git queries only when
   every query used the frozen primary cwd and still passes the integration
   allowlist. Version 0.1.20 marks coordinator-authored Primary and Reviewer

@@ -12,7 +12,7 @@ body:
     id: consensus_version
     attributes:
       label: codex-consensus version
-      placeholder: codex-consensus 0.3.2
+      placeholder: codex-consensus 0.3.3
     validations:
       required: true
   - type: input

@@ -300,6 +300,15 @@ only when its persisted command evidence, single patch provenance, frozen
 sources, clean target, ancestry, and authoritative result all still match; it
 never repeats merge, patch, staging, or commit.
 
+Release 0.3.3 additionally accepts the exact read-only target-absence query
+`git show-ref --verify --quiet refs/heads/<target-integration-branch>` and its
+canonical exit-one result. The non-quiet spelling remains accepted; reordered
+flags, other refs, extra arguments, and write-capable forms remain denied.
+Same-Run recovery may retain this completed preflight only after revalidating
+the frozen cwd, target identity, command provenance, terminal shape, single
+patch record, clean target, ancestry, and unchanged source refs, and never
+repeats integration side effects.
+
 The same release contains one migration only for the exact legacy 0.2.4
 blocked-verification history: the same Run, Primary task, request, round,
 verification clone, integration branch and SHA, frozen refs, and three archived

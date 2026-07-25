@@ -2000,9 +2000,9 @@ fn insert_completed_integration_command_evidence_with_commit_message(
         ),
         command(
             "target-absent",
-            "/bin/bash -lc 'git show --no-patch --format=%H refs/heads/consensus/test-run'",
+            "/bin/bash -lc 'git show-ref --verify --quiet refs/heads/consensus/test-run'",
             "failed",
-            128,
+            1,
         ),
         command(
             "branch",
