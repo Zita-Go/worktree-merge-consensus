@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.4
+
+- Preserve completed ephemeral turn payloads and command-item evidence when a
+  same-Run retry archives an earlier attempt, instead of deleting the only
+  durable proof needed by a later recovery.
+- If a read-only post-patch confirmation task is unloaded before producing any
+  durable event, re-audit and replay the already-completed archived integration
+  turn on the same Run. The coordinator verifies the exact request marker,
+  command policy, successful patch provenance, clean target, ancestry, and
+  unchanged frozen sources before doing so.
+- Process a pending Primary turn directly from durable completion evidence
+  without requiring its ephemeral task to remain loaded. The lost confirmation
+  is archived as unavailable; merge, patch, staging, and commit are never
+  repeated.
+
 ## 0.3.3
 
 - Accept only the exact read-only target preflight

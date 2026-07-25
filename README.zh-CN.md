@@ -77,7 +77,7 @@ Worktree Merge Consensus 补上这一层复核：
 `x86_64-unknown-linux-musl` 或 `aarch64-unknown-linux-musl`。
 
 ```bash
-VERSION=0.3.3
+VERSION=0.3.4
 TARGET=x86_64-unknown-linux-musl
 BASE_URL="https://github.com/Zita-Go/worktree-merge-consensus/releases/download/v${VERSION}"
 

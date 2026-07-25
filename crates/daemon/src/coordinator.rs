@@ -981,6 +981,7 @@ where
             self.revalidate_current_repository(&state).await?;
         }
         if retry_terminal_turn {
+            self.restore_archived_integration_turn_after_ephemeral_loss(&state)?;
             let completed_tool_failure_retry = if let Some(retry) = self
                 .inspect_completed_patch_not_authorized_retry(&state)
                 .await?
@@ -1397,6 +1398,119 @@ where
         Ok(())
     }
 
+    fn restore_archived_integration_turn_after_ephemeral_loss(
+        &self,
+        state: &RunState,
+    ) -> Result<bool, CoordinatorError> {
+        if state.status != RunStatus::PausedUserAction
+            || state.reason_code.as_deref() != Some("COMMUNICATION_FAILURE")
+            || state.phase != Phase::Integrate
+            || state.next_action != NextAction::RequestPrimaryIntegration
+            || state.integration_branch.is_some()
+            || state.integration_sha.is_some()
+            || state.current_integration_payload.is_some()
+        {
+            return Ok(false);
+        }
+        let run_id = state.facts.run_id.to_string();
+        let Some(pending) = self.store.pending_send(&run_id)? else {
+            return Ok(false);
+        };
+        let (Some(current_thread_id), Some(current_turn_id)) =
+            (pending.thread_id.as_deref(), pending.turn_id.as_deref())
+        else {
+            return Ok(false);
+        };
+        if pending.role != "PRIMARY"
+            || pending.phase != "INTEGRATE"
+            || pending.round != state.round
+            || !self
+                .store
+                .successful_patch_recorded(&run_id, &pending.message_hash)?
+            || self
+                .store
+                .turn_event_evidence(&run_id, current_thread_id, current_turn_id)?
+                .is_some()
+            || self
+                .store
+                .turn_event_item_count(&run_id, current_thread_id, current_turn_id)?
+                != 0
+        {
+            return Ok(false);
+        }
+        self.validate_recorded_role_thread(
+            state,
+            Role::Primary,
+            current_thread_id,
+            pending.participant_binding_generation,
+        )?;
+        let Some(archived) = self
+            .store
+            .archived_completed_turn_with_evidence(&run_id, &pending.message_hash)?
+        else {
+            return Ok(false);
+        };
+        let archived_turn = self
+            .store
+            .turn_event_evidence(&run_id, &archived.thread_id, &archived.turn_id)?
+            .ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "archived integration attempt lost its durable completion evidence",
+                )
+            })?
+            .completed_turn;
+        if archived_turn.get("status").and_then(Value::as_str) != Some("completed")
+            || !turn_contains_request_hash(&archived_turn, &pending.message_hash)
+        {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "archived integration attempt does not match its deterministic completed request",
+            ));
+        }
+        let response = parse_participant_response(
+            final_agent_text(&archived_turn)?.trim(),
+            allowed_participant_signals(NextAction::RequestPrimaryIntegration),
+        )
+        .map_err(|error| CoordinatorError::operational("INVALID_RESPONSE", error.to_string()))?;
+        if response.signal != ParticipantSignal::IntegrationReady {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                "archived integration attempt did not finish with INTEGRATION_READY",
+            ));
+        }
+        let successful_patch_hash = self
+            .validated_successful_patch_hash(state, &pending, true)?
+            .ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "archived integration attempt has no successful controlled patch record",
+                )
+            })?;
+        verify_integration_execution_items(
+            state,
+            &archived_turn,
+            &pending.message_hash,
+            Some(&successful_patch_hash),
+            true,
+        )?;
+        let target = state.target_integration_branch.as_deref().ok_or_else(|| {
+            CoordinatorError::operational("INVALID_STATE", "target integration branch is missing")
+        })?;
+        self.safety
+            .verify_integration_in_progress(&state.facts, target)?;
+        self.store
+            .restore_archived_completed_turn_after_ephemeral_loss(
+                &run_id,
+                &pending.message_hash,
+                current_thread_id,
+                current_turn_id,
+                &archived.thread_id,
+                &archived.turn_id,
+            )?;
+        Ok(true)
+    }
+
     async fn prepare_pending_controlled_patch_approval_retry(
         &self,
         state: &RunState,
@@ -1661,6 +1775,12 @@ where
         let Some(pending) = self.store.pending_send(&run_id)? else {
             return Ok(None);
         };
+        if self
+            .store
+            .successful_patch_recorded(&run_id, &pending.message_hash)?
+        {
+            return Ok(None);
+        }
         let (Some(thread_id), Some(turn_id)) =
             (pending.thread_id.as_deref(), pending.turn_id.as_deref())
         else {
@@ -1788,6 +1908,12 @@ where
         let Some(pending) = self.store.pending_send(&run_id)? else {
             return Ok(None);
         };
+        if self
+            .store
+            .successful_patch_recorded(&run_id, &pending.message_hash)?
+        {
+            return Ok(None);
+        }
         let (Some(thread_id), Some(turn_id)) =
             (pending.thread_id.as_deref(), pending.turn_id.as_deref())
         else {
@@ -2757,7 +2883,12 @@ where
         let role = action_role(action).ok_or_else(|| {
             CoordinatorError::operational("INVALID_STATE", "action has no task role")
         })?;
-        let prepared = self.prepare_action_thread(state, role).await?;
+        let prepared =
+            if let Some(prepared) = self.prepared_completed_pending_action_thread(state, role)? {
+                prepared
+            } else {
+                self.prepare_action_thread(state, role).await?
+            };
         let thread_id = prepared.thread_id;
         let primary_binding = prepared.primary_binding;
 
@@ -3838,6 +3969,57 @@ where
             thread_id,
             primary_binding: binding,
         })
+    }
+
+    fn prepared_completed_pending_action_thread(
+        &self,
+        state: &RunState,
+        role: Role,
+    ) -> Result<Option<PreparedActionThread>, CoordinatorError> {
+        if role != Role::Primary {
+            return Ok(None);
+        }
+        let run_id = state.facts.run_id.to_string();
+        let Some(pending) = self.store.pending_send(&run_id)? else {
+            return Ok(None);
+        };
+        let (Some(thread_id), Some(turn_id), Some(generation)) = (
+            pending.thread_id.as_deref(),
+            pending.turn_id.as_deref(),
+            pending.participant_binding_generation,
+        ) else {
+            return Ok(None);
+        };
+        if pending.role != role_name(role)
+            || self
+                .store
+                .turn_event_evidence(&run_id, thread_id, turn_id)?
+                .is_none()
+        {
+            return Ok(None);
+        }
+        let binding = self
+            .store
+            .primary_binding(&run_id, generation)?
+            .ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "completed pending Primary turn references an unknown binding",
+                )
+            })?;
+        if binding.source_primary_thread_id != state.facts.primary_thread_id
+            || binding.effective_primary_thread_id != thread_id
+            || binding.participant_server != PARTICIPANT_MCP_SERVER
+        {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "completed pending Primary turn does not match its historical binding",
+            ));
+        }
+        Ok(Some(PreparedActionThread {
+            thread_id: thread_id.to_owned(),
+            primary_binding: Some(binding),
+        }))
     }
 
     fn participant_mcp_config(&self) -> ParticipantMcpConfig {

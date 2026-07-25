@@ -1598,6 +1598,116 @@ async fn completed_ephemeral_integration_with_unicode_commit_token_resumes_the_s
     );
 }
 
+#[tokio::test]
+async fn lost_read_only_confirmation_replays_archived_ephemeral_integration_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let (coordinator, app, store, safety) =
+        seed_invalid_integration_recovery_with_preloaded_primary(
+            &path,
+            PARTICIPANT_MCP_SERVER,
+            true,
+        )
+        .await;
+    let patch_pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    let thread_id = patch_pending.thread_id.clone().unwrap();
+    let patch_turn_id = patch_pending.turn_id.clone().unwrap();
+    let binding = store.active_primary_binding(RUN_ID).unwrap().unwrap();
+    app.set_patch_plugin_id(&thread_id, &patch_turn_id, Value::Null);
+    insert_completed_integration_command_evidence_with_commit_message(
+        &app,
+        &thread_id,
+        &patch_turn_id,
+        "feat:会话变量",
+    );
+    app.set_agent_text(
+        &thread_id,
+        &patch_turn_id,
+        "<consensus-result>INTEGRATION_READY</consensus-result>\n\nIntegration complete.",
+    );
+    replace_persisted_ephemeral_turn_evidence(&path, &store, &app, &thread_id, &patch_turn_id);
+
+    let mut blocked = store.load_run(RUN_ID).unwrap().unwrap();
+    blocked.reason_code = Some("FORBIDDEN_OPERATION".into());
+    blocked.last_error = Some(RunDiagnostic {
+        code: "FORBIDDEN_OPERATION".into(),
+        detail: "integration command is outside the frozen execution policy".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some(thread_id.clone()),
+        source_thread_id: Some(binding.source_primary_thread_id.clone()),
+        effective_thread_id: Some(thread_id.clone()),
+        participant_binding_generation: Some(binding.generation),
+        participant_binding_mode: Some("EPHEMERAL_FORK".into()),
+        participant_server: Some(PARTICIPANT_MCP_SERVER.into()),
+    });
+    store.save_state(&blocked).unwrap();
+    safety
+        .integration_branch_active
+        .store(true, Ordering::SeqCst);
+
+    let prepared = coordinator.prepare_resume(RUN_ID).await.unwrap();
+    assert_eq!(prepared.status, RunStatus::Running);
+    let confirmation_pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    assert_eq!(confirmation_pending.thread_id, None);
+    assert_eq!(confirmation_pending.turn_id, None);
+    store
+        .record_turn_start_intent(RUN_ID, &confirmation_pending.message_hash)
+        .unwrap();
+    store
+        .record_turn_started(
+            RUN_ID,
+            &confirmation_pending.message_hash,
+            &thread_id,
+            "lost-read-only-confirmation",
+        )
+        .unwrap();
+
+    let mut paused = store.load_run(RUN_ID).unwrap().unwrap();
+    paused.record_error(RunDiagnostic {
+        code: "COMMUNICATION_FAILURE".into(),
+        detail: "thread/read summary returned thread not loaded".into(),
+        operation: Some("thread/read summary".into()),
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some(thread_id.clone()),
+        source_thread_id: Some(binding.source_primary_thread_id.clone()),
+        effective_thread_id: Some(thread_id.clone()),
+        participant_binding_generation: Some(binding.generation),
+        participant_binding_mode: Some("EPHEMERAL_FORK".into()),
+        participant_server: Some(PARTICIPANT_MCP_SERVER.into()),
+    });
+    paused.pause("COMMUNICATION_FAILURE").unwrap();
+    store.save_state(&paused).unwrap();
+    app.remove_thread(&thread_id);
+    app.discard_next_reply();
+
+    let accepted = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(
+        accepted.status,
+        RunStatus::Accepted,
+        "{:?}",
+        accepted.last_error
+    );
+    assert_eq!(accepted.integration_sha.as_deref(), Some(INTEGRATION_SHA));
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 2);
+    let attempts = store
+        .archived_turn_attempts(RUN_ID, &patch_pending.message_hash)
+        .unwrap();
+    assert_eq!(attempts[0].turn_id, patch_turn_id);
+    assert_eq!(attempts[0].terminal_status, "completed");
+    assert_eq!(attempts[1].turn_id, "lost-read-only-confirmation");
+    assert_eq!(attempts[1].terminal_status, "unavailable");
+    assert!(
+        store
+            .turn_event_evidence(RUN_ID, &thread_id, &patch_turn_id)
+            .unwrap()
+            .is_some()
+    );
+}
+
 async fn assert_current_branch_confirmation_blocker_resumes_the_same_run(
     command: &str,
     confirmation_turn_id: &str,
@@ -5989,6 +6099,10 @@ impl FakeAppServer {
             .get_mut(thread_id)
             .unwrap()
             .push(completed_turn(turn_id, prompt, &reply));
+    }
+
+    fn discard_next_reply(&self) {
+        self.replies.lock().unwrap().pop_front().unwrap();
     }
 
     fn inject_interrupted_turn(&self, thread_id: &str, turn_id: &str, prompt: &str) {

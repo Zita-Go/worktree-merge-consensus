@@ -278,7 +278,12 @@ integration, verification, final approval, recovery, and fail-closed pauses.
   refs, and extra arguments remain forbidden. The same-run
   recovery may retain canonically terminal read-only Git queries only when
   every query used the frozen primary cwd and still passes the integration
-  allowlist. Version 0.1.20 marks coordinator-authored Primary and Reviewer
+  allowlist. Version 0.3.4 preserves the archived completion and item evidence
+  across retry attempts. If a later read-only confirmation is unloaded before
+  emitting any durable event, it may replay the archived completed integration
+  only after re-auditing the exact request, command policy, patch provenance,
+  clean target, ancestry, and frozen source refs; it never repeats a merge,
+  patch, stage, or commit. Version 0.1.20 marks coordinator-authored Primary and Reviewer
   prompts as internal participant turns for which this launcher is inapplicable.
   Recovery may discard the exact denied legacy `sed -n 1,240p` read of this
   plugin's semver-versioned `SKILL.md`; that read never enters the live command

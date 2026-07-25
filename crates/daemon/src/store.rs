@@ -67,6 +67,12 @@ pub struct ArchivedTurnAttempt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchivedCompletedTurn {
+    pub thread_id: String,
+    pub turn_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerificationCommandRecord {
     pub run_id: String,
     pub message_hash: String,
@@ -1381,14 +1387,26 @@ impl SqliteRunStore {
         let connection = self.lock()?;
         let completed_turn_json = connection
             .query_row(
-                "SELECT completion.completed_turn_json
-                 FROM turn_event_completions completion
-                 JOIN turns turn_record ON turn_record.id = completion.turn_record_id
-                 WHERE completion.run_id = ?1
-                   AND completion.thread_id = ?2
-                   AND completion.turn_id = ?3
-                   AND turn_record.thread_id = ?2
-                   AND turn_record.turn_id = ?3",
+                "SELECT completed_turn_json
+                 FROM (
+                    SELECT completion.completed_turn_json, 0 AS archived
+                    FROM turn_event_completions completion
+                    JOIN turns turn_record ON turn_record.id = completion.turn_record_id
+                    WHERE completion.run_id = ?1
+                      AND completion.thread_id = ?2
+                      AND completion.turn_id = ?3
+                      AND turn_record.run_id = ?1
+                    UNION ALL
+                    SELECT completion.completed_turn_json, 1 AS archived
+                    FROM archived_turn_event_completions completion
+                    JOIN turns turn_record ON turn_record.id = completion.turn_record_id
+                    WHERE completion.run_id = ?1
+                      AND completion.thread_id = ?2
+                      AND completion.turn_id = ?3
+                      AND turn_record.run_id = ?1
+                 )
+                 ORDER BY archived ASC
+                 LIMIT 1",
                 params![run_id, thread_id, turn_id],
                 |row| row.get::<_, String>(0),
             )
@@ -2676,6 +2694,169 @@ impl SqliteRunStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn archived_completed_turn_with_evidence(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+    ) -> Result<Option<ArchivedCompletedTurn>, StoreError> {
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT attempt.thread_id, attempt.turn_id
+                 FROM turn_attempts attempt
+                 JOIN archived_turn_event_completions completion
+                   ON completion.turn_record_id = attempt.turn_record_id
+                  AND completion.run_id = attempt.run_id
+                  AND completion.thread_id = attempt.thread_id
+                  AND completion.turn_id = attempt.turn_id
+                 WHERE attempt.run_id = ?1
+                   AND attempt.message_hash = ?2
+                   AND attempt.terminal_status = 'completed'
+                 ORDER BY attempt.id DESC
+                 LIMIT 1",
+                params![run_id, message_hash],
+                |row| {
+                    Ok(ArchivedCompletedTurn {
+                        thread_id: row.get(0)?,
+                        turn_id: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn turn_event_item_count(
+        &self,
+        run_id: &str,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<u64, StoreError> {
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM turn_event_items
+                 WHERE run_id = ?1 AND thread_id = ?2 AND turn_id = ?3",
+                params![run_id, thread_id, turn_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore_archived_completed_turn_after_ephemeral_loss(
+        &self,
+        run_id: &str,
+        message_hash: &str,
+        current_thread_id: &str,
+        current_turn_id: &str,
+        archived_thread_id: &str,
+        archived_turn_id: &str,
+    ) -> Result<(), StoreError> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let turn_record_id = transaction
+            .query_row(
+                "SELECT id FROM turns
+                 WHERE run_id = ?1 AND message_hash = ?2
+                   AND delivery_state = 'SENT'
+                   AND thread_id = ?3 AND turn_id = ?4",
+                params![run_id, message_hash, current_thread_id, current_turn_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::TerminalTurnNotRetryable(format!(
+                    "turn {current_turn_id} is not the active lost ephemeral attempt for run {run_id}"
+                ))
+            })?;
+        let current_event_count = transaction.query_row(
+            "SELECT COUNT(*) FROM turn_event_items
+             WHERE turn_record_id = ?1 AND turn_id = ?2",
+            params![turn_record_id, current_turn_id],
+            |row| row.get::<_, u64>(0),
+        )?;
+        let current_completion_count = transaction.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM turn_event_completions
+                 WHERE turn_record_id = ?1 AND turn_id = ?2) +
+                (SELECT COUNT(*) FROM archived_turn_event_completions
+                 WHERE turn_record_id = ?1 AND turn_id = ?2)",
+            params![turn_record_id, current_turn_id],
+            |row| row.get::<_, u64>(0),
+        )?;
+        if current_event_count != 0 || current_completion_count != 0 {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "lost ephemeral attempt has durable event evidence and cannot be replaced".into(),
+            ));
+        }
+        let archived_exists = transaction
+            .query_row(
+                "SELECT 1
+                 FROM turn_attempts attempt
+                 JOIN archived_turn_event_completions completion
+                   ON completion.turn_record_id = attempt.turn_record_id
+                  AND completion.run_id = attempt.run_id
+                  AND completion.thread_id = attempt.thread_id
+                  AND completion.turn_id = attempt.turn_id
+                 WHERE attempt.turn_record_id = ?1
+                   AND attempt.run_id = ?2
+                   AND attempt.message_hash = ?3
+                   AND attempt.thread_id = ?4
+                   AND attempt.turn_id = ?5
+                   AND attempt.terminal_status = 'completed'",
+                params![
+                    turn_record_id,
+                    run_id,
+                    message_hash,
+                    archived_thread_id,
+                    archived_turn_id,
+                ],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !archived_exists {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "archived completed attempt has no durable completion evidence".into(),
+            ));
+        }
+        transaction.execute(
+            "INSERT INTO turn_attempts (
+                turn_record_id, run_id, message_hash, thread_id, turn_id,
+                terminal_status, recorded_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'unavailable', ?6)",
+            params![
+                turn_record_id,
+                run_id,
+                message_hash,
+                current_thread_id,
+                current_turn_id,
+                now_unix(),
+            ],
+        )?;
+        let changed = transaction.execute(
+            "UPDATE turns
+             SET thread_id = ?1, turn_id = ?2, turn_start_intent_at = NULL
+             WHERE id = ?3 AND delivery_state = 'SENT'
+               AND thread_id = ?4 AND turn_id = ?5",
+            params![
+                archived_thread_id,
+                archived_turn_id,
+                turn_record_id,
+                current_thread_id,
+                current_turn_id,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "lost ephemeral attempt changed while restoring archived evidence".into(),
+            ));
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn has_completed_archived_attempt_on_thread(
         &self,
         run_id: &str,
@@ -3249,7 +3430,13 @@ fn archive_and_reset_turn(
         ],
     )?;
     transaction.execute(
-        "DELETE FROM turn_event_items
+        "INSERT INTO archived_turn_event_completions (
+            turn_record_id, run_id, thread_id, turn_id,
+            completed_turn_json, recorded_at
+         )
+         SELECT turn_record_id, run_id, thread_id, turn_id,
+                completed_turn_json, recorded_at
+         FROM turn_event_completions
          WHERE turn_record_id = ?1 AND turn_id = ?2",
         params![turn_record_id, turn_id],
     )?;
@@ -3383,6 +3570,16 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             turn_id TEXT NOT NULL,
             completed_turn_json TEXT NOT NULL,
             recorded_at INTEGER NOT NULL,
+            UNIQUE(run_id, turn_id)
+         );
+         CREATE TABLE IF NOT EXISTS archived_turn_event_completions (
+            turn_record_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+            run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+            thread_id TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            completed_turn_json TEXT NOT NULL,
+            recorded_at INTEGER NOT NULL,
+            PRIMARY KEY(turn_record_id, turn_id),
             UNIQUE(run_id, turn_id)
          );
              CREATE TABLE IF NOT EXISTS patch_applications (

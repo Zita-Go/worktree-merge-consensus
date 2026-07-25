@@ -309,6 +309,15 @@ the frozen cwd, target identity, command provenance, terminal shape, single
 patch record, clean target, ancestry, and unchanged source refs, and never
 repeats integration side effects.
 
+Release 0.3.4 keeps completed ephemeral turn payloads and item events as
+archived evidence when a retry generation is created. If a subsequent
+read-only confirmation becomes unavailable before producing any durable event,
+the same Run may restore and replay the archived completed integration turn
+only after rechecking its deterministic request marker, result marker, complete
+command trace, single successful patch provenance, clean target branch,
+ancestry, and frozen source refs. The unavailable confirmation is retained as
+an audited attempt, and no integration write is repeated.
+
 The same release contains one migration only for the exact legacy 0.2.4
 blocked-verification history: the same Run, Primary task, request, round,
 verification clone, integration branch and SHA, frozen refs, and three archived

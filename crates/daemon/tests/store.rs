@@ -1025,19 +1025,33 @@ fn corrective_patch_tool_retry_reactivates_and_resets_exactly_once_atomically() 
             .unwrap(),
         vec!["corrective-blocker-turn"]
     );
-    let stale_event_rows = Connection::open(&path)
+    let archived_event_rows = Connection::open(&path)
         .unwrap()
         .query_row(
             "SELECT
                 (SELECT COUNT(*) FROM turn_event_items
                  WHERE run_id = ?1 AND turn_id = 'corrective-blocker-turn'),
                 (SELECT COUNT(*) FROM turn_event_completions
+                 WHERE run_id = ?1 AND turn_id = 'corrective-blocker-turn'),
+                (SELECT COUNT(*) FROM archived_turn_event_completions
                  WHERE run_id = ?1 AND turn_id = 'corrective-blocker-turn')",
             [RUN_ID],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
         )
         .unwrap();
-    assert_eq!(stale_event_rows, (0, 0));
+    assert_eq!(archived_event_rows, (1, 0, 1));
+    assert!(
+        store
+            .turn_event_evidence(RUN_ID, "primary-thread", "corrective-blocker-turn")
+            .unwrap()
+            .is_some()
+    );
     let competing = fixture_run("9f8a5c17-0f06-4df9-873f-589f3b54dbcc", "/repo/.git");
     assert_eq!(
         store.insert_run(&competing).unwrap_err().code(),
