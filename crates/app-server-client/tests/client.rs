@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
 use app_server_client::{
-    AppServer, CONTROLLED_PATCH_APPROVAL_KEY, CodexAppServer, CommandExecRequest,
+    AppServer, AppServerError, CONTROLLED_PATCH_APPROVAL_KEY, CodexAppServer, CommandExecRequest,
     ParticipantMcpConfig, ThreadForkPolicy, ThreadResumePolicy, ThreadRuntimeStatus,
-    TurnExecutionPolicy, transport::JsonRpcTransport,
+    TurnExecutionPolicy,
+    transport::{JsonRpcTransport, RpcError},
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex, split};
@@ -406,6 +407,49 @@ async fn typed_methods_emit_the_pinned_v2_request_shapes() {
     let configured = client.configure_controlled_patch_approval().await.unwrap();
     assert_eq!(configured["status"], "ok");
     client.interrupt_turn("t-1", "turn-4").await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn exact_thread_not_loaded_error_has_a_typed_identity() {
+    let (client_side, server_side) = duplex(16 * 1024);
+    let (client_read, client_write) = split(client_side);
+    let client = CodexAppServer::from_transport(JsonRpcTransport::new(client_read, client_write));
+    let (server_read, mut server_write) = split(server_side);
+    let mut lines = BufReader::new(server_read).lines();
+
+    let server = tokio::spawn(async move {
+        let exact = read_request(&mut lines).await;
+        assert_eq!(
+            exact["params"],
+            json!({"threadId": "ephemeral-1", "includeTurns": false})
+        );
+        respond_error(
+            &mut server_write,
+            &exact,
+            -32_600,
+            "thread not loaded: ephemeral-1",
+        )
+        .await;
+
+        let near_match = read_request(&mut lines).await;
+        respond_error(
+            &mut server_write,
+            &near_match,
+            -32_600,
+            "thread not loaded: different-task",
+        )
+        .await;
+    });
+
+    assert!(matches!(
+        client.read_thread_summary("ephemeral-1").await.unwrap_err(),
+        AppServerError::ThreadNotLoaded(thread_id) if thread_id == "ephemeral-1"
+    ));
+    assert!(matches!(
+        client.read_thread_summary("ephemeral-2").await.unwrap_err(),
+        AppServerError::Rpc(RpcError::Remote { code: -32_600, .. })
+    ));
     server.await.unwrap();
 }
 
@@ -864,6 +908,30 @@ async fn respond(
                     "jsonrpc": "2.0",
                     "id": request["id"],
                     "result": result
+                }))
+                .unwrap()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    writer.flush().await.unwrap();
+}
+
+async fn respond_error(
+    writer: &mut tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    request: &Value,
+    code: i64,
+    message: &str,
+) {
+    writer
+        .write_all(
+            format!(
+                "{}\n",
+                serde_json::to_string(&json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "error": {"code": code, "message": message}
                 }))
                 .unwrap()
             )

@@ -300,7 +300,12 @@ integration, verification, final approval, recovery, and fail-closed pauses.
   This path is allowed once per request; partial histories, drift, a dirty
   target, or a second eventless confirmation remain terminal. If the initial
   connection refresh pauses the Run, explicit same-Run resume repeats these
-  checks and may consume the same one confirmation-only recovery. Version 0.1.20
+  checks and may consume the same one confirmation-only recovery. Version
+  0.3.8 also accepts the exact App Server `-32600 / thread not loaded` response
+  for that same ephemeral identity after hot reload. It may rotate the binding
+  only after the pending request is provably unsent and its frozen Source
+  history is unchanged; the replacement receives confirmation only. Near-match
+  identities and uncertain dispatch remain terminal. Version 0.1.20
   marks coordinator-authored Primary and Reviewer prompts as internal
   participant turns for which this launcher is inapplicable.
   Recovery may discard the exact denied legacy `sed -n 1,240p` read of this

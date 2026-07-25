@@ -5167,6 +5167,107 @@ async fn paused_eventless_ephemeral_patch_resumes_the_same_run_after_connection_
 }
 
 #[tokio::test]
+async fn paused_eventless_unloaded_ephemeral_patch_rotates_only_for_confirmation() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let mut replies = result_revision_replies();
+    let confirmation_reply = replies[6].clone();
+    replies.insert(7, confirmation_reply);
+    let app = Arc::new(
+        FakeAppServer::deferred(replies, 8, DeferMode::Hold)
+            .without_primary_participant()
+            .with_connection_refresh_failures(1),
+    );
+    let safety = Arc::new(ResultReviewPatchSafety::default());
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::clone(&safety),
+        CoordinatorOptions {
+            wait_timeout: Duration::from_millis(250),
+            poll_interval: Duration::from_millis(1),
+            communication_attempts: 1,
+            participant_mcp_executable: participant_mcp_executable(),
+        },
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let driver = {
+        let coordinator = coordinator.clone();
+        tokio::spawn(async move { coordinator.drive(RUN_ID).await })
+    };
+    wait_for_request_count(&app, 8).await;
+    let pending = wait_for_bound_pending_send(&store).await;
+    let lost_thread_id = pending.thread_id.clone().unwrap();
+    let lost_turn_id = pending.turn_id.clone().unwrap();
+    let original_binding = store.active_primary_binding(RUN_ID).unwrap().unwrap();
+
+    coordinator
+        .apply_patch(
+            RUN_ID,
+            &pending.message_hash,
+            "diff --git a/src/lib.rs b/src/lib.rs",
+        )
+        .await
+        .unwrap();
+    app.complete_deferred_turns();
+
+    let paused = driver.await.unwrap().unwrap();
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+    assert_eq!(paused.reason_code.as_deref(), Some("COMMUNICATION_FAILURE"));
+    assert_eq!(app.connection_refresh_count(), 1);
+    app.remove_thread(&lost_thread_id);
+
+    let result = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(
+        result.status,
+        RunStatus::Accepted,
+        "{:?}",
+        result.last_error
+    );
+    assert_eq!(
+        result.integration_sha.as_deref(),
+        Some(CORRECTED_INTEGRATION_SHA)
+    );
+    assert_eq!(safety.patch_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(app.connection_refresh_count(), 2);
+    assert_eq!(app.forks().len(), 2);
+    let replacement_binding = store.active_primary_binding(RUN_ID).unwrap().unwrap();
+    assert_eq!(
+        replacement_binding.generation,
+        original_binding.generation + 1
+    );
+    assert_ne!(
+        replacement_binding.effective_primary_thread_id,
+        lost_thread_id
+    );
+    assert_eq!(
+        app.request_order()
+            .iter()
+            .filter(|request| request.ends_with("REQUEST_PRIMARY_INTEGRATION"))
+            .count(),
+        3
+    );
+    let attempts = store
+        .archived_turn_attempts(RUN_ID, &pending.message_hash)
+        .unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].turn_id, lost_turn_id);
+    assert_eq!(
+        attempts[0].terminal_status,
+        "completed-event-evidence-unavailable-after-patch"
+    );
+    assert!(
+        app.prompts()
+            .iter()
+            .any(|prompt| prompt.contains("Coordinator recovery override"))
+    );
+}
+
+#[tokio::test]
 async fn controlled_patch_on_mirror_records_exact_binding_provenance() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -6825,9 +6926,7 @@ impl AppServer for FakeAppServer {
 
     async fn read_thread(&self, thread_id: &str) -> Result<ThreadDetail, AppServerError> {
         if !self.threads.lock().unwrap().contains_key(thread_id) {
-            return Err(AppServerError::InvalidResponse(format!(
-                "task {thread_id} is unavailable"
-            )));
+            return Err(AppServerError::ThreadNotLoaded(thread_id.to_owned()));
         }
         if thread_id.contains("-consensus-mirror-") {
             self.method_order
@@ -6847,9 +6946,7 @@ impl AppServer for FakeAppServer {
             .unwrap()
             .push(format!("thread/read-summary:{thread_id}"));
         if !self.threads.lock().unwrap().contains_key(thread_id) {
-            return Err(AppServerError::InvalidResponse(format!(
-                "task {thread_id} is unavailable"
-            )));
+            return Err(AppServerError::ThreadNotLoaded(thread_id.to_owned()));
         }
         Ok(self.detail(thread_id).summary)
     }

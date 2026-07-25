@@ -84,7 +84,7 @@ Download the static musl binary, plugin bundle, and `SHA256SUMS` from the same
 Choose `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl` for your host.
 
 ```bash
-VERSION=0.3.7
+VERSION=0.3.8
 TARGET=x86_64-unknown-linux-musl
 BASE_URL="https://github.com/Zita-Go/worktree-merge-consensus/releases/download/v${VERSION}"
 

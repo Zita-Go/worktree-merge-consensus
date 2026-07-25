@@ -160,6 +160,10 @@ the evidence below.
    pauses with `COMMUNICATION_FAILURE`, repair connectivity, and explicitly
    resume the same Run. It must issue only the final read-only confirmation and
    must not apply a second patch or create a replacement Run.
+   Repeat after plugin hot reload makes the exact ephemeral task return
+   `-32600 / thread not loaded: <id>`. Matching 0.3.8 artifacts must rotate the
+   binding only after the pending request is reset to unsent with unchanged
+   frozen Source history, then complete through a confirmation-only turn.
    Repeat both the interrupted-denial and completed-confirmation cases with
    exact `/bin/bash -lc 'git branch --show-current'`; matching 0.3.1 artifacts
    must resume the same Run without repeating patch, merge, staging, or commit.

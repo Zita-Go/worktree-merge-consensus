@@ -70,6 +70,8 @@ pub enum AppServerError {
     InvalidResponse(String),
     #[error("Codex process failed: {0}")]
     Process(String),
+    #[error("thread not loaded: {0}")]
+    ThreadNotLoaded(String),
     #[error("INCOMPATIBLE_CODEX: {0}")]
     IncompatibleCodex(String),
 }
@@ -265,6 +267,10 @@ impl CodexAppServer {
     }
 
     async fn rpc_request(&self, method: &str, params: Value) -> Result<Value, AppServerError> {
+        let requested_thread_id = params
+            .get("threadId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         match self.transport.request(method, params).await {
             Ok(value) => Ok(value),
             Err(RpcError::Remote {
@@ -274,6 +280,18 @@ impl CodexAppServer {
             }) => Err(AppServerError::IncompatibleCodex(format!(
                 "required App Server method {method} is unavailable: {message}"
             ))),
+            Err(RpcError::Remote {
+                code: -32_600,
+                message,
+                ..
+            }) if requested_thread_id
+                .as_deref()
+                .is_some_and(|thread_id| message == format!("thread not loaded: {thread_id}")) =>
+            {
+                Err(AppServerError::ThreadNotLoaded(
+                    requested_thread_id.expect("guarded thread identity"),
+                ))
+            }
             Err(error) => Err(error.into()),
         }
     }

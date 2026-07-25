@@ -409,6 +409,14 @@ If the initial proxy refresh fails and pauses the Run, explicit same-Run resume
 rechecks the idle ephemeral task and all invariants before consuming the same
 single confirmation-only recovery allowance.
 
+Release 0.3.8 additionally normalizes only the exact App Server
+`-32600 / thread not loaded: <requested id>` response. For the same eventless
+successful-patch boundary, explicit resume may archive the unloaded attempt and
+rotate to a replacement ephemeral Primary only while the pending request is
+provably unsent and the frozen Source-history fingerprint is identical. The
+replacement performs confirmation only. Near-match identities, uncertain
+dispatch, partial event history, or changed lineage remain fail-closed.
+
 `doctor` validates a fresh App Server protocol connection and asks the
 coordinator daemon to probe its own connection, but deliberately does not spend
 a model turn. If the managed App Server restarts after the coordinator daemon,

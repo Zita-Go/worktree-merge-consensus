@@ -347,6 +347,14 @@ the patch; partial traces or a second eventless confirmation fail closed. If
 the first connection refresh pauses the Run, explicit same-Run resume repeats
 the idle-task and repository checks before consuming the same one recovery.
 
+Release 0.3.8 extends that boundary to the exact App Server
+`-32600 / thread not loaded: <requested ephemeral id>` response after a hot
+reload or lifecycle transition. Same-Run resume archives the eventless attempt
+and rotates its binding only after the pending request is provably unsent and
+the frozen Source-history fingerprint is identical. The replacement ephemeral
+Primary receives only the final confirmation request. Near-match identities,
+uncertain dispatch, partial traces, or changed lineage remain terminal.
+
 The same release contains one migration only for the exact legacy 0.2.4
 blocked-verification history: the same Run, Primary task, request, round,
 verification clone, integration branch and SHA, frozen refs, and three archived

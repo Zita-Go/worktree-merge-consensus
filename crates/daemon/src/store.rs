@@ -2948,7 +2948,7 @@ impl SqliteRunStore {
         Ok(())
     }
 
-    pub fn has_completed_archived_attempt_on_thread(
+    pub fn has_patch_provenance_archived_attempt_on_thread(
         &self,
         run_id: &str,
         message_hash: &str,
@@ -2959,7 +2959,11 @@ impl SqliteRunStore {
             .query_row(
                 "SELECT 1 FROM turn_attempts
                  WHERE run_id = ?1 AND message_hash = ?2
-                   AND thread_id = ?3 AND terminal_status = 'completed'
+                   AND thread_id = ?3
+                   AND terminal_status IN (
+                       'completed',
+                       'completed-event-evidence-unavailable-after-patch'
+                   )
                  LIMIT 1",
                 params![run_id, message_hash, thread_id],
                 |_| Ok(()),

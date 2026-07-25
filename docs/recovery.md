@@ -128,6 +128,15 @@ the first connection refresh itself fails and pauses the Run, explicit
 same-Run resume repeats these checks and may perform that one confirmation-only
 recovery after connectivity is restored.
 
+Version 0.3.8 extends only that same boundary when App Server returns the exact
+`-32600 / thread not loaded: <requested ephemeral id>` identity after a hot
+reload or lifecycle transition. Explicit same-Run resume performs the 0.3.7
+checks, archives the eventless attempt, and rotates the ephemeral binding only
+after the deterministic pending request is provably unsent and the frozen
+Source-history fingerprint is unchanged. The replacement receives only the
+final confirmation request; a different identity, uncertain dispatch, partial
+events, or changed Source history remains fail-closed.
+
 If the managed App Server restarts while the daemon is alive, `doctor` probes
 both a fresh direct connection and the daemon-owned proxy. It repairs a closed
 proxy before an idempotent task read. If repair fails, preserve the Run and fix

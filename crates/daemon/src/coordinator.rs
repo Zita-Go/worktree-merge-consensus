@@ -1468,20 +1468,18 @@ where
         )? {
             return Ok(false);
         }
-        let summary = self.read_thread_summary_with_retry(thread_id).await?;
-        verify_requested_thread_summary_identity(thread_id, &summary)?;
-        match summary
-            .runtime_status()
-            .map_err(|detail| CoordinatorError::operational("HISTORY_UNAVAILABLE", detail))?
+        match self
+            .eventless_successful_patch_thread_runtime_status(thread_id)
+            .await?
         {
-            ThreadRuntimeStatus::Idle => {}
+            ThreadRuntimeStatus::Idle | ThreadRuntimeStatus::NotLoaded => {}
             ThreadRuntimeStatus::SystemError => {
                 return Err(CoordinatorError::operational(
                     "HISTORY_UNAVAILABLE",
                     "ephemeral task entered systemError before paused successful-patch recovery",
                 ));
             }
-            ThreadRuntimeStatus::NotLoaded | ThreadRuntimeStatus::Active => return Ok(false),
+            ThreadRuntimeStatus::Active => return Ok(false),
         }
         self.recover_eventless_successful_patch_turn_for_status(
             state,
@@ -1491,6 +1489,46 @@ where
         )
         .await?;
         Ok(true)
+    }
+
+    async fn eventless_successful_patch_thread_runtime_status(
+        &self,
+        thread_id: &str,
+    ) -> Result<ThreadRuntimeStatus, CoordinatorError> {
+        let attempts = self.options.communication_attempts.max(1);
+        let mut last_error = None;
+        for attempt in 0..attempts {
+            match self.app.read_thread_summary(thread_id).await {
+                Ok(summary) => {
+                    verify_requested_thread_summary_identity(thread_id, &summary)?;
+                    return summary.runtime_status().map_err(|detail| {
+                        CoordinatorError::operational("HISTORY_UNAVAILABLE", detail)
+                    });
+                }
+                Err(AppServerError::ThreadNotLoaded(reported)) if reported == thread_id => {
+                    return Ok(ThreadRuntimeStatus::NotLoaded);
+                }
+                Err(AppServerError::ThreadNotLoaded(_)) => {
+                    return Err(CoordinatorError::operational(
+                        "HISTORY_UNAVAILABLE",
+                        "App Server reported a different unloaded task identity",
+                    ));
+                }
+                Err(error) => last_error = Some(error),
+            }
+            if attempt + 1 < attempts {
+                tokio::time::sleep(self.options.poll_interval).await;
+            }
+        }
+        Err(communication_error(
+            "thread/read summary",
+            Some(thread_id),
+            last_error.unwrap_or_else(|| {
+                AppServerError::InvalidResponse(
+                    "ephemeral thread status failed without an error".to_owned(),
+                )
+            }),
+        ))
     }
 
     fn restore_archived_integration_turn_after_ephemeral_loss(
@@ -5112,7 +5150,7 @@ where
                             )
                         })?;
                     let archived_patch_attempt =
-                        self.store.has_completed_archived_attempt_on_thread(
+                        self.store.has_patch_provenance_archived_attempt_on_thread(
                             &run_id,
                             &pending.message_hash,
                             effective,

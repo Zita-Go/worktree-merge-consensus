@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.8
+
+- Recognize only the exact App Server `-32600 / thread not loaded: <id>`
+  response for the requested ephemeral Primary identity; near-match identities
+  and every other transport failure remain fail-closed.
+- Resume the same eventless successful-patch Run after that exact ephemeral
+  task has been unloaded by a hot reload or App Server lifecycle transition.
+  The coordinator repeats all 0.3.7 provenance and Git checks before recovery.
+- Atomically archive the old attempt, rotate its binding only after the pending
+  request is provably unsent and retains the same frozen Source-history hash,
+  and ask the replacement ephemeral Primary for the final read-only
+  confirmation. The controlled patch, merge, staging, and commit are not run
+  again.
+
 ## 0.3.7
 
 - Recover one exact ephemeral Primary integration turn when its request-bound
