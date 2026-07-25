@@ -12,9 +12,14 @@
 Turn two committed Codex worktrees into one tested and reviewed **new local
 integration branch**. Neither source branch is modified, and nothing is pushed.
 
-[![Two Codex tasks converge on one reviewed local integration branch](docs/assets/social-preview.svg)](https://github.com/Zita-Go/worktree-merge-consensus/releases/download/v0.3.8/worktree-merge-consensus-demo-v0.3.8.mp4)
+![Two Codex tasks converge on one reviewed local integration branch](docs/assets/social-preview.svg)
 
-[▶ Watch the 75-second real Codex acceptance demo](https://github.com/Zita-Go/worktree-merge-consensus/releases/download/v0.3.8/worktree-merge-consensus-demo-v0.3.8.mp4) — same-Run recovery, exact-SHA verification, isolated tests, and Reviewer approval.
+**Real Codex run — all six public stages:**
+
+![Real Codex run showing SOURCE_FREEZE through RESULT_REVIEW and ACCEPTED](docs/assets/real-consensus-run.png)
+
+This is assembled only from crops of one real run. The task sidebar and
+environment panel were removed; the Codex UI was not recreated.
 
 **Input:** two existing Codex tasks and two clean, committed worktrees in one
 repository.
@@ -53,13 +58,14 @@ The task that launches the workflow follows the durable public event stream and
 shows meaningful progress rather than a spinner:
 
 ```text
-[1/6 CONTRACT]     Both tasks declared behavior, constraints, and tests
-[2/6 PLAN_REVIEW]  Reviewer requested one missing compatibility case
-[2/6 PLAN_REVIEW]  Primary revised the plan; Reviewer approved revision 2
-[3/6 INTEGRATE]    Created consensus/7b1... at 4e20c6a
-[4/6 VERIFY]       3/3 frozen commands passed on the exact detached SHA
-[5/6 RESULT_REVIEW] Reviewer approved 4e20c6a
-[6/6 ACCEPTED]     Source refs unchanged; local branch retained; no push
+[1/6 SOURCE_FREEZE] Frozen both source refs and worktrees
+[2/6 CONTRACT]      Both tasks declared behavior, constraints, and tests
+[3/6 PLAN_REVIEW]   Reviewer requested one missing compatibility case
+[3/6 PLAN_REVIEW]   Primary revised the plan; Reviewer approved revision 2
+[4/6 INTEGRATE]     Created consensus/7b1... at 4e20c6a
+[5/6 VERIFY]        3/3 frozen commands passed on the exact detached SHA
+[6/6 RESULT_REVIEW] Reviewer approved 4e20c6a
+[6/6 ACCEPTED]      Source refs unchanged; local branch retained; no push
 ```
 
 `consensus_wait` supports a resumable `after_cursor`, so launcher observation

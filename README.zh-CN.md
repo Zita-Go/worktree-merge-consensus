@@ -12,9 +12,14 @@
 把两个已经提交的 Codex worktree 变成一个经过测试和复核的**新本地集成分支**。
 两个来源分支都不会被修改，也不会发生 push。
 
-[![两个 Codex 任务最终形成一个经过复核的本地集成分支](docs/assets/social-preview.svg)](https://github.com/Zita-Go/worktree-merge-consensus/releases/download/v0.3.8/worktree-merge-consensus-demo-v0.3.8.mp4)
+![两个 Codex 任务最终形成一个经过复核的本地集成分支](docs/assets/social-preview.svg)
 
-[▶ 观看 75 秒真实 Codex 验收演示](https://github.com/Zita-Go/worktree-merge-consensus/releases/download/v0.3.8/worktree-merge-consensus-demo-v0.3.8.mp4)——展示同一 Run 恢复、精确 SHA 核验、隔离测试和 Reviewer 最终批准。
+**真实 Codex 运行——完整六阶段：**
+
+![真实 Codex 运行，展示 SOURCE_FREEZE 到 RESULT_REVIEW 及 ACCEPTED](docs/assets/real-consensus-run.png)
+
+图片仅由同一次真实运行的界面取帧、裁剪和拼接而成；去掉了任务侧栏与环境面板，
+没有重绘 Codex UI。
 
 **输入：** 同一仓库中的两个已有 Codex 任务，以及两个干净、已经提交的 worktree。
 
@@ -48,12 +53,13 @@ Worktree Merge Consensus 补上这一层复核：
 启动流程的 Codex 任务会持续展示有意义的公开进度，而不是只显示一个等待动画：
 
 ```text
-[1/6 CONTRACT]      双方分别声明行为、约束与测试
-[2/6 PLAN_REVIEW]   Reviewer 指出一个遗漏的兼容场景
-[2/6 PLAN_REVIEW]   Primary 修订方案，Reviewer 批准第 2 版
-[3/6 INTEGRATE]     创建 consensus/7b1...，结果为 4e20c6a
-[4/6 VERIFY]        3/3 条冻结命令在精确 detached SHA 上通过
-[5/6 RESULT_REVIEW] Reviewer 批准 4e20c6a
+[1/6 SOURCE_FREEZE] 冻结双方来源引用与 worktree
+[2/6 CONTRACT]      双方分别声明行为、约束与测试
+[3/6 PLAN_REVIEW]   Reviewer 指出一个遗漏的兼容场景
+[3/6 PLAN_REVIEW]   Primary 修订方案，Reviewer 批准第 2 版
+[4/6 INTEGRATE]     创建 consensus/7b1...，结果为 4e20c6a
+[5/6 VERIFY]        3/3 条冻结命令在精确 detached SHA 上通过
+[6/6 RESULT_REVIEW] Reviewer 批准 4e20c6a
 [6/6 ACCEPTED]      来源引用未变；保留本地分支；没有 push
 ```
 
