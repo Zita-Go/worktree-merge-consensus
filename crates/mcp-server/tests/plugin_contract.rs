@@ -100,20 +100,13 @@ fn skill_launches_and_observes_the_daemon_without_becoming_a_review_relay() {
     let skill =
         fs::read_to_string(root.join("plugin/skills/worktree-merge-consensus/SKILL.md")).unwrap();
     for required in [
+        "Git preserves code differences",
+        "own original task history",
+        "complete transcripts or hidden reasoning",
         "consensus_doctor",
-        "automatically installs",
-        "configures only",
-        "MCP tool, not a shell command",
+        "MCP tools, not shell executables",
         "codex-consensus doctor",
-        "codex-consensus mcp-server",
-        "Never run `consensus_doctor` as an executable",
-        "codex-consensus threads list",
-        "codex-consensus worktrees list",
-        "codex-consensus run",
-        "codex-consensus status",
-        "codex-consensus watch",
-        "codex-consensus resume",
-        "codex-consensus cancel",
+        "never run `consensus_doctor` as an executable",
         "codex mcp list --json",
         "consensus_list_threads",
         "consensus_list_worktrees",
@@ -125,15 +118,17 @@ fn skill_launches_and_observes_the_daemon_without_becoming_a_review_relay() {
         "repository_path",
         "task cwd",
         "run_id",
-        "same host",
+        "same-host",
         "existing Codex tasks",
         "dangerFullAccess",
         "trusted tasks",
-        "coordinator-owned verification",
-        "do not run Shell in the verification marker turn",
+        "Verification is coordinator-owned",
         "after_cursor",
         "commentary update",
         "hidden reasoning",
+        "references/installation.md",
+        "references/participant-binding.md",
+        "references/recovery.md",
     ] {
         assert!(
             skill.contains(required),
@@ -155,6 +150,85 @@ fn skill_launches_and_observes_the_daemon_without_becoming_a_review_relay() {
         assert!(
             !lowercase.contains(forbidden),
             "launcher skill mentions forbidden mechanism: {forbidden}"
+        );
+    }
+
+    assert!(
+        skill.lines().count() <= 220,
+        "launcher skill should keep the normal operator path concise"
+    );
+    for forbidden_history in ["Release 0.", "Version 0."] {
+        assert!(
+            !skill.contains(forbidden_history),
+            "launcher skill duplicates release history: {forbidden_history}"
+        );
+    }
+
+    let protocol = fs::read_to_string(
+        root.join("plugin/skills/worktree-merge-consensus/references/protocol.md"),
+    )
+    .unwrap();
+    for required in [
+        "worktree-merge-consensus/v2",
+        "coordinator-owned",
+        "VERIFICATION_EXECUTION_UNCERTAIN",
+        "consensus_wait",
+        "Accepted result",
+    ] {
+        assert!(
+            protocol.contains(required),
+            "missing protocol reference: {required}"
+        );
+    }
+
+    let installation = fs::read_to_string(
+        root.join("plugin/skills/worktree-merge-consensus/references/installation.md"),
+    )
+    .unwrap();
+    for required in [
+        "SHA256SUMS",
+        "HTTPS_PROXY",
+        "LEGACY_SKILL_CONFLICT",
+        "APPROVAL_CONFIGURATION_REQUIRED",
+    ] {
+        assert!(
+            installation.contains(required),
+            "missing installation reference: {required}"
+        );
+    }
+
+    let binding = fs::read_to_string(
+        root.join("plugin/skills/worktree-merge-consensus/references/participant-binding.md"),
+    )
+    .unwrap();
+    for required in [
+        "Source Primary",
+        "Effective Primary",
+        "thread/read(includeTurns: false)",
+        "mcpServerStatus/list",
+        "exactly one tool",
+    ] {
+        assert!(
+            binding.contains(required),
+            "missing binding reference: {required}"
+        );
+    }
+
+    let recovery = fs::read_to_string(
+        root.join("plugin/skills/worktree-merge-consensus/references/recovery.md"),
+    )
+    .unwrap();
+    for required in [
+        "COMMUNICATION_FAILURE",
+        "INVALID_RESPONSE",
+        "FORBIDDEN_OPERATION",
+        "PATCH_NOT_AUTHORIZED",
+        "CONTROLLED_PATCH_TOOL_UNAVAILABLE",
+        "VERIFICATION_EXECUTION_UNCERTAIN",
+    ] {
+        assert!(
+            recovery.contains(required),
+            "missing recovery reference: {required}"
         );
     }
 

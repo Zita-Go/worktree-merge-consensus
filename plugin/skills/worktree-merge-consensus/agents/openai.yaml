@@ -1,4 +1,4 @@
 interface:
   display_name: "Worktree Merge Consensus"
-  short_description: "Start and monitor two-task integration"
-  default_prompt: "Use $worktree-merge-consensus to start and visibly monitor reviewed integration between two existing Codex tasks."
+  short_description: "Preserve both tasks' intent during integration"
+  default_prompt: "Use $worktree-merge-consensus to let two original Codex development tasks review and integrate their committed worktrees."

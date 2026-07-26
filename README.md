@@ -7,10 +7,36 @@
 
 [简体中文](README.zh-CN.md)
 
-> Git can merge diffs. This tool makes two Codex tasks reconcile intent.
+> Git preserves what changed. The original Codex tasks remember why.
 
-Turn two committed Codex worktrees into one tested and reviewed **new local
-integration branch**. Neither source branch is modified, and nothing is pushed.
+Parallel Codex development creates two kinds of assets:
+
+- commits preserve the resulting code;
+- the original task histories preserve design intent, constraints, tradeoffs,
+  tests, and implementation details that must not be lost.
+
+A normal Git merge uses only the first. A textually clean merge can still erase
+behavior or combine two individually correct changes incorrectly. When files do
+conflict, a separate merger can see where they differ but may have to guess why.
+
+Worktree Merge Consensus keeps both original development tasks in the loop.
+The Primary proposes an integration, the Reviewer checks it against its own
+task history, and they revise the plan before any integration write occurs.
+The exact result SHA is then tested and reviewed again.
+
+It does not copy complete transcripts or hidden reasoning between tasks. Each
+task keeps and applies its own context while the coordinator exchanges only the
+contracts, plans, feedback, summaries, evidence, and verdicts needed for review.
+
+| Plain Git merge | Worktree Merge Consensus |
+| --- | --- |
+| Sees code differences | Keeps the original tasks' intent in the review loop |
+| A clean text merge may hide semantic loss | Reviewer checks behavior, constraints, and protected details |
+| One merger resolves conflicts from files alone | Primary proposes; Reviewer challenges from original context |
+| Finishes when files combine | Tests and reviews the exact integration SHA |
+
+The output is one tested and reviewed **new local integration branch**. Neither
+source branch is modified, and nothing is pushed.
 
 ![Two Codex tasks converge on one reviewed local integration branch](docs/assets/social-preview.svg)
 
@@ -29,14 +55,10 @@ with isolated test evidence and unchanged source refs.
 > ships as a pre-release. Participant turns are unattended and use
 > `dangerFullAccess`. Use it only with tasks and repository contents you trust.
 
-## Why this exists
+## How context stays in the loop
 
-Two Codex tasks can implement related changes in separate worktrees while each
-task retains important reasoning in its own conversation history. A plain Git
-merge sees the resulting files, but it cannot ask whether either task's behavior,
-constraints, tests, or protected implementation details were lost.
-
-Worktree Merge Consensus coordinates that missing review:
+The coordinator turns each original task into an active reviewer of the
+integration rather than treating its commit as context-free input:
 
 - the **Primary** proposes how both implementations should be preserved;
 - the **Reviewer** checks the proposal against its own task history;

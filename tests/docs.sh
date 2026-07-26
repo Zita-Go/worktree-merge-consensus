@@ -28,6 +28,11 @@ required_files=(
   docs/protocol-v2.md
   docs/compatibility.md
   docs/real-codex-smoke-test.md
+  plugin/skills/worktree-merge-consensus/SKILL.md
+  plugin/skills/worktree-merge-consensus/references/installation.md
+  plugin/skills/worktree-merge-consensus/references/participant-binding.md
+  plugin/skills/worktree-merge-consensus/references/protocol.md
+  plugin/skills/worktree-merge-consensus/references/recovery.md
   .github/ISSUE_TEMPLATE/bug_report.yml
   .github/ISSUE_TEMPLATE/feature_request.yml
   .github/ISSUE_TEMPLATE/config.yml
@@ -78,6 +83,13 @@ for readme in README.md README.zh-CN.md; do
   grep -Fq 'codex plugin add' "$readme" || fail "$readme is missing plugin installation"
 done
 
+skill_lines="$(wc -l < plugin/skills/worktree-merge-consensus/SKILL.md)"
+(( skill_lines <= 220 )) ||
+  fail "launcher SKILL.md is too long for routine context: $skill_lines lines"
+if grep -Eq '^(Release|Version) 0\.' plugin/skills/worktree-merge-consensus/SKILL.md; then
+  fail 'launcher SKILL.md duplicates chronological release history'
+fi
+
 for readme in README.md README.zh-CN.md; do
   line_count="$(wc -l < "$readme")"
   (( line_count <= 360 )) ||
@@ -97,6 +109,15 @@ quick_start_line="$(grep -n '^## Quick start$' README.md | cut -d: -f1)"
 quick_start_zh_line="$(grep -n '^## 快速开始$' README.zh-CN.md | cut -d: -f1)"
 [[ -n "$quick_start_zh_line" ]] || fail 'README.zh-CN.md is missing 快速开始'
 (( quick_start_zh_line <= 100 )) || fail 'README.zh-CN.md buries 快速开始 below the first 100 lines'
+
+head -n 45 README.md | grep -Fq 'original Codex tasks remember why' ||
+  fail 'README.md does not lead with the original-task context problem'
+head -n 45 README.md | grep -Fq 'textually clean merge' ||
+  fail 'README.md does not explain semantic loss without text conflicts'
+head -n 45 README.zh-CN.md | grep -Fq '原开发任务记得' ||
+  fail 'README.zh-CN.md does not lead with the original-task context problem'
+head -n 45 README.zh-CN.md | grep -Fq '文本没有冲突' ||
+  fail 'README.zh-CN.md does not explain semantic loss without text conflicts'
 
 if grep -Eq '^Version 0\.[0-9]' README.md; then
   fail 'README.md duplicates version history instead of linking CHANGELOG.md'
@@ -132,7 +153,7 @@ binding_documents=(
   docs/safety-model.zh-CN.md
   docs/compatibility.md
   docs/protocol-v2.md
-  plugin/skills/worktree-merge-consensus/references/protocol.md
+  plugin/skills/worktree-merge-consensus/references/participant-binding.md
 )
 for document in "${binding_documents[@]}"; do
   for marker in 'thread/fork' ephemeral 'Source Primary' 'Effective Primary' '>=0.144.1'; do
@@ -198,7 +219,7 @@ binding_documents = [
     "docs/safety-model.md",
     "docs/compatibility.md",
     "docs/protocol-v2.md",
-    "plugin/skills/worktree-merge-consensus/references/protocol.md",
+    "plugin/skills/worktree-merge-consensus/references/participant-binding.md",
 ]
 for path in binding_documents:
     require(path, "binding happens before the first Primary action", [
@@ -241,14 +262,13 @@ require("docs/safety-model.zh-CN.md", "uncertain turns are not reforked or resen
     r"(?:pending|uncertain).{0,120}(?:不会|不得).{0,80}(?:重新 fork|refork).{0,100}(?:重发|resent)",
 ])
 
-semantic_documents = [
+participant_documents = [
     "docs/compatibility.md",
     "docs/protocol-v1.md",
     "docs/protocol-v2.md",
-    "plugin/skills/worktree-merge-consensus/SKILL.md",
-    "plugin/skills/worktree-merge-consensus/references/protocol.md",
+    "plugin/skills/worktree-merge-consensus/references/participant-binding.md",
 ]
-for path in semantic_documents:
+for path in participant_documents:
     require(path, "one-tool participant inventory", [
         r"(?:inventory|server|participant).{0,160}(?:exactly|only).{0,100}consensus_apply_patch|(?:exactly|only).{0,100}consensus_apply_patch.{0,160}(?:tool|inventory)",
     ])
@@ -257,6 +277,14 @@ for path in semantic_documents:
         r"mcpServerStatus/list",
         r"(?:before every.{0,80}(?:turn/start|such turn)|before.{0,80}turn/start)",
     ])
+
+recovery_documents = [
+    "docs/compatibility.md",
+    "docs/protocol-v1.md",
+    "docs/protocol-v2.md",
+    "plugin/skills/worktree-merge-consensus/references/recovery.md",
+]
+for path in recovery_documents:
     require(path, "matching deployment and explicit resume", [
         r"(?:matching.{0,80}0\.2\.8|0\.2\.8.{0,80}matching)",
         r"explicit.{0,80}resume|consensus_resume",
@@ -317,7 +345,7 @@ recovery_claims = [
     ]),
 ]
 
-for path in semantic_documents:
+for path in recovery_documents:
     window = recovery_window(path)
     for claim, patterns in recovery_claims:
         require_text(path, window, claim, patterns)

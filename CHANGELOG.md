@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.10
+
+- Reframe the project around its core guarantee: Git preserves code, while the
+  two original Codex development tasks preserve the intent, constraints, and
+  implementation context needed to integrate their committed work safely.
+- Rewrite the English and Chinese README introductions to explain the semantic
+  loss that can survive a clean text merge, how task-context consensus closes
+  that gap, and how the workflow differs from an ordinary Git merge.
+- Reduce the launcher skill to a concise operational contract and move
+  installation, participant binding, protocol details, and recovery guidance
+  into focused references that are loaded only when relevant.
+- Strengthen plugin contract and documentation tests so future releases retain
+  the context-preserving positioning and progressive-disclosure structure.
+
 ## 0.3.9
 
 - Install the exact Linux x86_64 or ARM64 static coordinator automatically on

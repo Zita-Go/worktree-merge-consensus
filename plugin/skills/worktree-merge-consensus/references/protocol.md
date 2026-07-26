@@ -1,368 +1,122 @@
 # Consensus Protocol Reference
 
+Use this reference when explaining lifecycle states, participant output,
+verification evidence, or the accepted result. The launcher procedure remains
+in `../SKILL.md`.
+
+## Contents
+
+- [Preconditions](#preconditions)
+- [Lifecycle](#lifecycle)
+- [Participant responses](#participant-responses)
+- [Verification](#verification)
+- [Statuses](#statuses)
+- [Public observation](#public-observation)
+- [Accepted result](#accepted-result)
+
 ## Preconditions
 
-- Exactly two existing Codex tasks are selected on one host.
-- Their committed heads are in different registered worktrees of the same Git common directory.
-- The primary task is the only integration writer.
-- The reviewer task protects the intent and implementation details of its frozen commit.
+- Select exactly two existing Codex tasks on one host.
+- Bind their committed heads to two different registered worktrees in one Git
+  common directory.
+- Require both source worktrees to be available, clean, and committed.
+- Let only the Primary write the integration result.
+- Let the Reviewer protect the intent and implementation details of its frozen
+  source.
 
-Task IDs and source worktrees are selected independently. A task's App Server cwd is orientation metadata only and may be identical or outside Git. The confirmed start operation freezes both task IDs, canonical registered worktree paths, commit SHAs, and source refs. A mismatch fails closed before integration.
-
-Discovery uses `consensus_list_worktrees` with `repository_path`; start requires `primary_thread`, `reviewer_thread`, `primary_worktree`, and `reviewer_worktree`. `UNREGISTERED_WORKTREE`, `DUPLICATE_WORKTREE`, `REPOSITORY_MISMATCH`, `DIRTY_WORKTREE`, or `WORKTREE_UNAVAILABLE` stops preflight. A task that finds its explicitly bound source inconsistent with its conversation history returns `SOURCE_BINDING_MISMATCH`.
+Task IDs and source worktrees are selected independently. A task cwd is display
+metadata and may be identical for both tasks or outside Git. The confirmed start
+freezes both task IDs, canonical worktree paths, source refs, and commit SHAs.
+A mismatch fails before integration.
 
 ## Lifecycle
 
 | Phase | Required outcome |
 | --- | --- |
-| `CONTRACT` | Both tasks independently describe behavior, constraints, tests, and protected details. |
-| `PLAN_REVIEW` | The primary proposes coverage; the reviewer either identifies concrete gaps or approves the exact plan revision. |
-| `INTEGRATE` | Only after exact plan approval, the primary creates a new local branch and integrates both frozen commits. |
-| `VERIFY` | The coordinator creates a detached, remote-free clone of the exact result SHA. A separate Primary marker-only turn performs no tools. The daemon then runs each frozen command itself through App Server `command/exec`, in order and continuing after failures; it journals exact structured results, derives bounded diagnostics, and confirms both source refs are unchanged. A failed command returns the same Run to another controlled integration round. |
-| `RESULT_REVIEW` | The reviewer audits the exact integration SHA and evidence, then requests changes or approves that SHA. |
-| `ACCEPTED` | The daemon revalidates the approved SHA and source refs, records the result, and stops. |
+| `SOURCE_FREEZE` | Freeze the selected tasks, registered worktrees, refs, and SHAs. |
+| `CONTRACT` | Both tasks independently declare behavior, constraints, tests, and protected details. |
+| `PLAN_REVIEW` | Primary proposes complete coverage; Reviewer identifies concrete gaps or approves the exact revision. |
+| `INTEGRATE` | After plan approval, Primary integrates both frozen commits on one unique new local branch. |
+| `VERIFY` | The coordinator tests the exact result SHA in a detached, remote-free clone. |
+| `RESULT_REVIEW` | Reviewer audits the exact SHA, result summary, and frozen test evidence. |
+| `ACCEPTED` | The daemon revalidates the approved SHA and unchanged source refs, records the result, and stops. |
 
-Review rounds are bounded. Repeated non-progress, malformed envelopes, incompatible Codex versions, communication failures, permission requests, or safety violations stop or pause the run instead of guessing.
+Review rounds are bounded. Repeated non-progress, malformed participant output,
+incompatible Codex behavior, communication uncertainty, or a safety violation
+pauses or blocks the Run instead of guessing.
 
 ## Participant responses
 
-Release 0.2.0 uses `worktree-merge-consensus/v2`. Every response has exactly
-one `<consensus-result>...</consensus-result>` marker. Contracts pair the marker
-with one JSON object so exact test commands remain machine-readable. Plans,
-change requests, approvals, integration and verification summaries, and result
-reviews use ordinary Markdown outside the marker. The coordinator binds the
-response to its pending task turn, computes plan identity, and derives branch,
-SHA, changed files, ancestry, source-ref stability, and test evidence itself.
-Valid v1 JSON envelopes remain accepted only as a migration fallback.
+The participant protocol is `worktree-merge-consensus/v2`.
 
-## Primary participant binding and patch-tool preflight
+Every response contains exactly one
+`<consensus-result>...</consensus-result>` marker. The initial contract pairs
+that marker with one JSON object so test commands remain machine-readable.
+Plans, change requests, approvals, integration summaries, verification
+summaries, and final reviews use ordinary Markdown outside the marker.
 
-Before the first Primary action, the coordinator establishes a durable
-participant binding. The frozen selected task is the **Source Primary**. A
-`notLoaded` Source Primary is loaded with task-scoped
-`worktreeMergeConsensusParticipant` MCP configuration and binds directly as
-the **Effective Primary**. A preloaded Source Primary with the exact tool also
-binds directly. A preloaded Source Primary without that capability is not
-mutated in place: `thread/fork` creates an `ephemeral: true`,
-`excludeTurns: false` full-history mirror with the participant configuration.
-Before forking, the coordinator requires `thread/goal/get: null` on the Source
-Primary and omits goal carry or continuation from the fork request. It then
-requires matching canonical turn IDs, idle mirror status, and an exact
-inventory before using that mirror. The mirror represents the Source Primary;
-it is not a third source or reviewer and does not carry an active Source goal.
-The coordinator never queries a goal on the ephemeral mirror because supported
-Codex runtimes may reject goal operations for ephemeral tasks.
+The coordinator binds every response to the exact pending task turn and derives
+plan identity, branch, SHA, changed files, ancestry, source-ref stability, and
+test evidence itself. A participant's self-report is not authoritative evidence.
 
-Before every Primary turn, the coordinator resumes the Effective Primary and
-fully paginates `mcpServerStatus/list` before `turn/start`. The only accepted
-participant tool inventory is exactly `consensus_apply_patch`; the operator
-plugin's separate tools do not prove participant visibility. Reviewer routing
-is unchanged, and both selected source task IDs, refs, worktrees, and SHAs stay
-frozen. A mirror may be recreated only between completed actions. A pending or
-uncertain turn is never reforked or resent, and an uncertain `thread/fork`
-response is never retried automatically. The required experimental App Server
-surface begins at Codex CLI `>=0.144.1`.
+Read [participant-binding.md](participant-binding.md) only when a binding,
+ephemeral task, or patch-tool preflight diagnostic needs explanation.
+
+## Verification
+
+Verification is coordinator-owned:
+
+1. Create a detached, remote-free clone at the exact integration SHA.
+2. Ask Primary for a marker-only readiness handoff; that participant turn must
+   not run Shell, Git, file, MCP, or patch tools.
+3. Journal each frozen direct command before dispatch.
+4. Execute every command through App Server `command/exec` in order, continuing
+   after failures so the evidence set is complete.
+5. Record exact cwd, command identity, structured exit code, and bounded failure
+   diagnostics.
+6. Recheck both frozen source refs.
+
+A completed exact result can be reused after restart. A command journaled as
+started without a durable terminal result becomes
+`VERIFICATION_EXECUTION_UNCERTAIN` and is never executed again automatically.
+A failed command returns the same Run to a controlled correction round; only a
+new SHA that passes every frozen command reaches final review.
 
 ## Statuses
 
 - `RUNNING`: the daemon can dispatch the next deterministic action.
 - `WAITING_THREAD`: one selected task has an active turn.
-- `PAUSED_USER_ACTION`: explicit user action is required; inspect the reason before resuming.
-- `ACCEPTED`: the exact integration SHA passed verification and reviewer approval.
+- `PAUSED_USER_ACTION`: an external condition or explicit decision is required.
+- `ACCEPTED`: the exact result SHA passed frozen verification and Reviewer
+  approval.
 - `BLOCKED`: a terminal protocol or safety condition prevented acceptance.
-- `CANCELLED`: cancellation was requested; existing Git state remains intact.
-- `INCOMPATIBLE_CODEX`: the local Codex version is outside the supported adapter set.
+- `CANCELLED`: cancellation was requested; existing Git state remains.
+- `INCOMPATIBLE_CODEX`: the required App Server behavior is unavailable.
+
+## Public observation
+
+`consensus_wait` returns bounded, cursor-ordered public events. Resume with the
+returned `after_cursor`; an empty timeout is not a state change.
+
+The stream may include source identities, contracts, plans, review feedback,
+integration summaries, frozen test exit codes, and acceptance evidence. It
+excludes hidden reasoning, participant prompts, complete task history, private
+SQLite data, and raw command stdout/stderr.
 
 ## Accepted result
 
-An accepted status includes the run ID, new local integration branch,
-integration SHA, both frozen source SHAs, coordinator-journaled test evidence
-(`turn_id`, deterministic command item ID, command, cwd, and exit code), and
-`source_refs_unchanged: true`. The coordinator does not publish the branch or
-merge it into an existing branch. A task's self-reported test result is never
-sufficient evidence.
+An accepted result includes:
 
-## Recovery
+- Run ID;
+- new local integration branch;
+- exact integration SHA;
+- both frozen source SHAs;
+- coordinator-journaled test commands, cwd values, and exit codes;
+- `source_refs_unchanged: true`;
+- confirmation that nothing was pushed or merged into an existing branch.
 
-Version 0.1.24 requires the effective per-tool setting
-`plugins.worktree-merge-consensus.mcp_servers.worktreeMergeConsensus.tools.consensus_apply_patch.approval_mode = "approve"`
-before Run start or controlled-patch resume. After explicit same-Run resume, a
-canonically `waitingOnApproval` Primary integration turn may be interrupted and
-retried only when it contains exactly one request-bound `inProgress`
-`consensus_apply_patch` call, every command item completed successfully and
-still passes the integration allowlist, no successful patch is recorded, the
-authorized target is clean with both frozen ancestors, and frozen refs remain
-unchanged. Unknown or multiple calls, other incomplete items, mismatched
-arguments, drift, and possible writes fail closed. A turn that completes during
-the interrupt race is reused, not duplicated. This is the sole exception to the
-summary below that otherwise treats `inProgress` as terminal.
+Acceptance is bound to the exact tested SHA. Moving the result, changing a
+source ref, or relying only on a participant's reported tests cannot satisfy it.
 
-Version 0.1.25 covers the exact completed rejection race after configuration
-hot reload. If App Server continues the old approval while the Run remains
-paused, the daemon rejects the patch with `PATCH_NOT_AUTHORIZED`. Explicit
-same-Run resume may archive and retry that Primary integration turn only when
-canonical history contains exactly one request-bound `consensus_apply_patch`
-item with status `failed`, the final blocker carries the exact approved
-identity, no successful patch record exists, the authorized target is clean at
-the reported merge SHA with both frozen ancestors, and source refs remain
-unchanged. The existing merge is reused; any unknown item, additional tool,
-possible write, mismatch, or drift fails closed.
-
-Version 0.1.26 covers the equivalent App Server residue in which that exact
-failed tool item and final blocker are canonical but the turn remains
-`inProgress` with `waitingOnApproval`. Same-Run resume performs all 0.1.25
-checks, interrupts only that stale turn, and atomically archives it before
-retrying the same request. Participant waits use a 30-minute inactivity window
-that renews on changes to canonical task status or turn history; unchanged
-active state still times out and fails closed.
-
-Version 0.1.27 covers the immediately earlier residue in which the exact patch
-item is already canonically `failed` but no final assistant JSON exists. It is
-retryable only when every other item is complete and allowlisted, no successful
-patch is recorded, and the clean authorized merge SHA is unchanged across the
-single-turn interruption. Unknown items, possible writes, target movement, or
-source drift fail closed.
-
-Version 0.1.28 retains all direct machine identity checks but permits the
-redundant `payload.role` label and free-form `blocking_condition` prose to be
-absent. The persisted pending send already binds the exact Primary task, and
-the paused daemon state rejects the controlled patch before Git access. Missing
-request, plan, source, target, or result-SHA identity remains terminal.
-
-Version 0.2.0 additionally permits same-Run recovery after one controlled patch
-was recorded successfully and the integration commit is already present, but
-the legacy final integration response was invalid. The daemon must match the
-exact completed turn, stored patch hash, authoritative clean Git result, both
-frozen ancestors, and unchanged refs. It then requests one read-only
-`INTEGRATION_READY` marker and forbids a second patch, branch creation, or
-merge.
-
-Version 0.2.1 permits one additional same-Run recovery only when the exact
-completed Primary verification turn contains zero command items. Resume
-revalidates the unchanged integration result and isolated clone, rejects
-unknown or side-effect-capable items, archives the empty turn, and retries the
-same frozen verification request once. Partial execution, a second empty
-response, or drift remains terminal.
-
-Version 0.2.2 makes `VERIFICATION_READY` a completeness marker rather than a
-pass verdict. Every frozen command must reach a terminal state; the coordinator
-derives its exit code and bounded failure output. Nonzero results become
-machine feedback for a new controlled Primary integration round in the same
-Run, followed by verification of the new SHA. Reviewer result review starts
-only after all commands pass. Explicit same-Run resume may also replace one
-exact completed, side-effect-free `CARGO_UNAVAILABLE` verification blocker
-after the environment is repaired. A second environment retry, source drift,
-or integration drift remains terminal.
-
-Version 0.2.3 persists `item/started`, `item/completed`, and the ordered
-`turn/completed` barrier while each participant turn is active. The daemon
-combines those exact-turn lifecycle items with stored user and final-agent
-messages when App Server history omits command or MCP items. Older full
-`thread/read` histories remain a fallback. A pre-0.2.3 Run may use one atomic
-evidence-compatibility retry only after the exact archived sequence of one
-empty verification attempt and one side-effect-free `CARGO_UNAVAILABLE`
-recovery. It cannot repeat a controlled patch, branch creation, merge, or
-source-ref update, and a second evidence retry is terminal.
-
-Version 0.2.4 starts every participant turn with App Server approval policy
-`never`. No contract, plan, integration, verification, or result-review action
-requires interactive command or file approval. The coordinator still pins the
-offline sandbox and writable roots and rejects acceptance unless exact command,
-Git, test, and frozen-ref evidence is valid.
-
-Version 0.2.5 replaces those participant sandbox profiles with
-`dangerFullAccess`. This is a trusted-tasks execution boundary, not OS-level
-containment: every selected task and the repository contents must be trusted.
-Prompts and canonical-history checks still constrain role behavior and fail
-closed, but cannot undo an already executed participant action. The Primary
-verification response is only a side-effect-free `VERIFICATION_READY` marker;
-it must not run Shell, Git, file, MCP, or patch tools. The coordinator then
-executes every frozen direct argv command through App Server `command/exec`
-with the exact detached verification cwd, `sandboxPolicy.type:
-"dangerFullAccess"`, a bounded timeout, and a 65,536-byte output cap. The
-participant marker turn retains `approvalPolicy: "never"`. Each command is
-journaled as STARTED before dispatch and COMPLETED after its structured result.
-An exact COMPLETED row is reused after restart; a STARTED row produces
-`VERIFICATION_EXECUTION_UNCERTAIN` and is never executed a second time
-automatically.
-
-Version 0.2.7 permits an explicit same-Run recovery only for the exact
-post-0.2.6 `CONTROLLED_PATCH_TOOL_UNAVAILABLE` correction blocker. It preserves
-the same Run, round, integration branch, old SHA, and failed frozen verification
-evidence; archives only the empty side-effect-free correction turn; reacquires
-the lock; and repeats participant preflight. One request-bound correction patch
-and commit may advance the SHA, after which every frozen verification command
-runs again. Matching 0.2.8 installation alone does not mutate the blocked Run;
-explicit resume is required and every near-match remains terminal.
-
-Release 0.2.8 makes ephemeral Primary execution summary- and event-backed.
-The coordinator never requests full history, turn lists, or resume for an
-ephemeral binding. It uses `thread/read(includeTurns: false)` for liveness,
-persists all matching item and terminal-turn events, and reconstructs the
-canonical terminal turn from that journal. The frozen Source-history hash and
-pre-dispatch start intent prevent changed-history reforks and duplicate sends.
-Missing terminal evidence fails closed. Stored Source, Reviewer, and direct
-Primary tasks retain full-history recovery.
-
-Release 0.2.9 separates canonical terminal shape from side-effect policy when
-auditing a completed integration turn. Approved writes remain valid only as
-`completed` with exit code zero. Retry-safe read-only inspections may terminate
-with a numeric nonzero code, but that result is not considered a successful
-check; it is only safe to archive before a fresh read-only confirmation.
-Explicit resume is limited to the exact turn whose request-bound controlled
-patch and integration commit already succeeded. The same Run revalidates the
-patch record, frozen refs, clean target result, both source ancestors, and
-final SHA, archives only the rejected response, and forbids all repeated
-writes. One recovery-only `git diff --no-index -- /dev/null <relative-path>`
-shape is recognized only in historical evidence and never enters the live
-approval allowlist. An explicit null `pluginId` is compatible only with the
-exact injected participant server and patch tool.
-
-Release 0.2.10 uses the integration-in-progress repository check before that
-completed-turn recovery. The Primary worktree may already be attached to the
-exact authorized target branch, while the frozen source refs and Reviewer
-worktree must remain unchanged. The existing authoritative target, patch
-record, source ancestry, cleanliness, changed-file, and final-SHA checks still
-run before the response attempt is archived.
-
-Release 0.2.11 recognizes `unifiedExecStartup` as canonical agent-initiated
-command provenance during recovery. It continues to reject `userShell`,
-`unifiedExecInteraction`, null, malformed, and unknown sources, and does not
-weaken the command, terminal-result, side-effect, frozen-state, or target-result
-checks.
-
-Release 0.2.12 lets a same-Run completed-integration confirmation recover from
-a missing ephemeral Effective Primary before dispatch. It atomically rotates
-the binding and rebinds the pending request only when no effective task ID,
-turn ID, or turn-start intent exists and the active generation and frozen
-Source-history fingerprint still match. Successful patch provenance remains on
-the archived completed old generation and crosses generations only for the
-exact same ephemeral lineage. Sent, intent-recorded, uncertain, divergent, or
-mixed-provenance states fail closed.
-
-Release 0.2.13 handles the persisted Source Primary itself being `notLoaded`
-before that replacement. It resumes the frozen Source with task-scoped
-participant configuration, verifies identity and idle state, then forks the
-new ephemeral mirror without resuming an ephemeral task. The release also
-migrates only the exact 0.2.12 `BLOCKED / HISTORY_UNAVAILABLE` diagnostic with
-detail `Source Primary before safe mirror recreation is not idle`. Explicit
-resume atomically reacquires the lock only for the unchanged approved plan and
-target, one pending Primary integration request with no task ID, turn ID, or
-start intent, the exact active ephemeral generation and frozen history hash,
-and the archived completed patch attempt for the same request. It preserves
-the same Run and pending row; every near-match remains terminal.
-
-Release 0.2.14 allows exactly `git symbolic-ref --short HEAD` in the frozen
-Primary worktree as a read-only current-branch query. One canonical
-`/bin/bash -lc` wrapper is accepted; every alternate `symbolic-ref` form is
-rejected. Explicit resume may migrate only the exact 0.2.13
-`BLOCKED / FORBIDDEN_OPERATION` diagnostic naming that wrapped query.
-Recovery revalidates the completed request and binding, canonical retry-safe
-turn history, successful controlled patch, unchanged frozen sources, clean
-target, ancestry, and authoritative result. It atomically archives only the
-confirmation and reacquires the lock on the same Run, then requests the result
-without another patch, merge, staging, or commit. Near-matches, uncertain
-commands, side effects, identity drift, and accepted-result state remain
-terminal.
-
-Release 0.2.15 recognizes the production two-attempt form of that recovery.
-The successful controlled patch must be the one SQLite record attributed to an
-archived completed ephemeral Primary attempt with the exact frozen binding
-lineage. The current completed attempt is audited separately and must contain
-no MCP, file-change, or dynamic-tool item. Only canonical messages, reasoning,
-context compaction, the final response, and agent-initiated, exit-zero,
-retry-safe read-only commands in the Primary cwd before that response are
-accepted. Frozen refs, clean target, ancestry, and the authoritative result
-must still revalidate. Only the current confirmation is archived, preserving
-the same Run, request, branch, commit, binding lineage, and single patch
-record. A matching 0.2.14 resume that failed before state mutation with
-`MODEL_RESPONSE_RETRY_UNSAFE` may be explicitly retried once with 0.2.15 while
-the exact original blocker remains recorded.
-
-Release 0.3.1 accepts exact `git branch --show-current` in the frozen Primary
-worktree, directly or under one canonical `/bin/bash -lc` wrapper. The
-coordinator itself derives and validates current branch and HEAD identity, and
-the command gate now accepts both this preferred form and
-`git symbolic-ref --short HEAD` so equivalent model choices cannot change the
-outcome. Explicit same-Run recovery covers an older interrupted denial and a
-completed post-patch confirmation only when canonical terminal history,
-successful patch provenance when applicable, unchanged frozen refs, and the
-authoritative target all revalidate. Recovery never repeats patch, merge,
-staging, or commit. `no_progress_rounds` is the unchanged-review threshold;
-material plan changes create a new fingerprint streak.
-
-Release 0.3.2 defines `git commit -m ONE_SAFE_TOKEN` as one nonempty token of
-at most 120 UTF-8 bytes containing only Unicode letters or numbers plus `-`,
-`_`, `.`, or `:`. Whitespace, shell metacharacters, slashes, emoji, and every
-multi-token form remain denied. Explicit same-Run recovery re-audits a
-completed ephemeral integration that an older byte-oriented policy blocked
-only when its persisted command evidence, single patch provenance, frozen
-sources, clean target, ancestry, and authoritative result all still match; it
-never repeats merge, patch, staging, or commit.
-
-Release 0.3.3 additionally accepts the exact read-only target-absence query
-`git show-ref --verify --quiet refs/heads/<target-integration-branch>` and its
-canonical exit-one result. The non-quiet spelling remains accepted; reordered
-flags, other refs, extra arguments, and write-capable forms remain denied.
-Same-Run recovery may retain this completed preflight only after revalidating
-the frozen cwd, target identity, command provenance, terminal shape, single
-patch record, clean target, ancestry, and unchanged source refs, and never
-repeats integration side effects.
-
-Release 0.3.4 keeps completed ephemeral turn payloads and item events as
-archived evidence when a retry generation is created. If a subsequent
-read-only confirmation becomes unavailable before producing any durable event,
-the same Run may restore and replay the archived completed integration turn
-only after rechecking its deterministic request marker, result marker, complete
-command trace, single successful patch provenance, clean target branch,
-ancestry, and frozen source refs. The unavailable confirmation is retained as
-an audited attempt, and no integration write is repeated.
-
-Release 0.3.5 reconstructs that archived turn from its durable completed item
-events before auditing it. This is required when the App Server's canonical
-completion envelope contains `items: []` and `itemsView: "notLoaded"`; the
-separately persisted item events remain the complete, request-bound trace.
-
-Release 0.3.6 treats the Primary integration request after Reviewer result
-feedback as an active corrective patch request even when every previous frozen
-verification command passed. An exact accepted `PATCH_NOT_AUTHORIZED` blocker
-may be retried once on the same Run only when the modern Primary binding,
-completed request marker, normalized response hash, clean persisted integration
-SHA, successful frozen evidence, and retained Reviewer feedback all match. The
-turn may contain one participant patch call, or the two known compatibility
-surfaces, only when every call failed with the same patch payload and exact
-`PATCH_NOT_AUTHORIZED` result and SQLite records no successful patch. Recovery
-archives that failed turn and resends the same deterministic request; it does
-not repeat the previous patch or skip the new verification and result review.
-
-Release 0.3.7 adds a one-attempt recovery for an ephemeral Primary turn whose
-exact request-bound patch and final clean commit succeeded but whose App Server
-connection persisted no item or completion event. After a short completion
-grace, the task must be idle, the event trace must be completely empty, patch
-provenance and binding lineage must match, and the authorized integration
-target, ancestry, and frozen refs must revalidate. The coordinator then opens a
-fresh App Server event stream, atomically archives the eventless attempt, and
-reissues only the read-only `INTEGRATION_READY` confirmation. It never reapplies
-the patch; partial traces or a second eventless confirmation fail closed. If
-the first connection refresh pauses the Run, explicit same-Run resume repeats
-the idle-task and repository checks before consuming the same one recovery.
-
-Release 0.3.8 extends that boundary to the exact App Server
-`-32600 / thread not loaded: <requested ephemeral id>` response after a hot
-reload or lifecycle transition. Same-Run resume archives the eventless attempt
-and rotates its binding only after the pending request is provably unsent and
-the frozen Source-history fingerprint is identical. The replacement ephemeral
-Primary receives only the final confirmation request. Near-match identities,
-uncertain dispatch, partial traces, or changed lineage remain terminal.
-
-The same release contains one migration only for the exact legacy 0.2.4
-blocked-verification history: the same Run, Primary task, request, round,
-verification clone, integration branch and SHA, frozen refs, and three archived
-signals `VERIFICATION_READY`, `BLOCKED:CARGO_UNAVAILABLE`,
-`VERIFICATION_READY`, with exactly one prior evidence-compatibility archive and
-one final completed side-effect-free marker turn. Resume atomically archives
-only that final turn as `completed-unattended-verification-migration` and
-restores `REQUEST_PRIMARY_VERIFICATION`. It cannot repeat a patch, branch
-creation, merge, commit, or source update, and cannot be applied twice.
-
-Run state and pending sends are persisted in SQLite before dispatch. Restarting the daemon resumes runnable work idempotently. Use status to inspect a pause, resolve the reported external condition, then resume the same run ID. A contract or plan that declares a Git test pauses with `INVALID_TEST_COMMAND`; explicit resume may archive and replace only the exact completed pre-integration read-only turn after source revalidation and canonical item checks. Completed calls to this plugin's exact `consensus_list_threads`, `consensus_list_worktrees`, and `consensus_status` queries are retry-safe; mutating, external, and unknown MCP calls fail closed. Version 0.1.10 and later can recover the equivalent legacy 0.1.9 `BLOCKED` state while atomically reacquiring its repository lock. Version 0.1.12 applies the same safeguards to malformed model output in a pre-integration contract, primary-plan, or reviewer-plan-verdict turn. Version 0.1.13 gives each approval request a concrete top-level payload template and rejects identity values provided only under a nested object. Post-integration and side-effectful `INVALID_RESPONSE` states remain terminal. Version 0.1.14 explicitly selects the same-host `local` execution environment with each turn's pinned cwd; an empty environment selection would disable the task's command and file tools. It adds one narrow recovery: an exact pre-integration `BLOCKED / EXECUTION_TOOL_UNAVAILABLE` accepted from the primary may be replaced only when canonical history and the accepted response hash match, the blocker payload proves no writes, no command or file-change item is present, both frozen worktrees and refs remain unchanged, and the target branch is absent. Version 0.1.15 treats an App Server `proposedExecpolicyAmendment` as ignored metadata when returning one-time `accept`, never applies the proposal, and adds recovery for an exact first-integration `BLOCKED / FORBIDDEN_OPERATION` only when the pending turn is canonically failed or interrupted, contains no side-effect-capable item, both frozen sources remain unchanged and clean, and the target branch is absent. Version 0.1.16 removes exactly one App Server-generated known-shell `-c` or `-lc` wrapper before applying the unchanged inner-command allowlist; nested shells, subcommand approval callbacks, non-local environments, and added permissions remain denied. Version 0.1.17 adds only the exact target-ref `git show-ref --verify refs/heads/<target-integration-branch>` preflight. Version 0.1.19 additionally permits only the equivalent exact `git branch --list <target-integration-branch>` query; every other `git branch` form remains forbidden. Same-run forbidden-operation recovery may retain canonically terminal read-only Git queries only when every item used the frozen primary cwd and still passes that allowlist. Version 0.1.20 marks coordinator-authored Primary and Reviewer prompts as internal participant turns for which the launcher skill is inapplicable. Recovery may discard the exact denied legacy `sed -n 1,240p` read of this plugin's semver-versioned `SKILL.md`; that read remains outside the live command allowlist. Version 0.1.21 recognizes App Server's internal `contextCompaction` lifecycle marker only when it has exactly a nonempty `id` and the fixed `type`; extra fields remain terminal. Version 0.1.22 permits exactly `rg --files -g AGENTS.md` in the frozen primary cwd for repository-instruction discovery, keeps all other `rg` forms denied, and directs later tracked-file reads through the read-only Git policy. Version 0.1.23 adds the request-bound `consensus_apply_patch` capability for one successful text-only patch of at most 512 KiB on the exact clean authorized integration branch after both frozen commits are ancestors. Git preflights the patch without unsafe paths, source refs are revalidated, and SQLite prevents a second successful patch for the same request. The same version may archive and replace an exact completed `FILE_CHANGE_TOOL_UNAVAILABLE` Primary turn after a communication pause only when the approved identity, bwrap permission failure, reported merge SHA, clean target, source ancestry, and frozen refs all match; it reuses that existing merge and never creates a replacement Run. Version 0.1.25 adds only the exact completed `PATCH_NOT_AUTHORIZED` recovery described above. Version 0.1.26 adds only the exact stale `inProgress + waitingOnApproval` variant described above. Every other `inProgress` shape, writes outside that controlled patch, wrong cwd, unknown items, later phases, incomplete or mismatched evidence, and other side effects remain terminal. Other `BLOCKED` states remain terminal. Cancellation never deletes the integration branch or worktree state.
+For a paused or blocked Run, read [recovery.md](recovery.md) instead of inferring
+a recovery from this lifecycle summary.

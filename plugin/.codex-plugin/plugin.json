@@ -1,7 +1,7 @@
 {
   "name": "worktree-merge-consensus",
-  "version": "0.3.9",
-  "description": "Coordinate and visibly monitor reviewed integration across two existing Codex task worktrees.",
+  "version": "0.3.10",
+  "description": "Keep two original Codex task contexts in the review loop while integrating their committed worktrees.",
   "author": {
     "name": "Worktree Merge Consensus contributors"
   },
@@ -17,16 +17,16 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Worktree Merge Consensus",
-    "shortDescription": "Integrate two Codex worktrees with visible review progress.",
-    "longDescription": "Launch and visibly monitor a persistent, reviewed integration run between two existing Codex tasks while preserving both source branches.",
+    "shortDescription": "Preserve both tasks' intent during worktree integration.",
+    "longDescription": "Let the original Primary and Reviewer tasks use their own conversation context to reach consensus, test, and retain a new local integration branch without changing either source.",
     "developerName": "Worktree Merge Consensus contributors",
     "category": "Productivity",
     "capabilities": [
       "Local coordination",
       "Git safety",
-      "Reviewed integration",
+      "Context-preserving review",
       "Live progress"
     ],
-    "defaultPrompt": "Start and monitor a reviewed integration between two existing Codex tasks."
+    "defaultPrompt": "Let two original Codex development tasks review and integrate their committed worktrees."
   }
 }
