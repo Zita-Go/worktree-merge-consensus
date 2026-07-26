@@ -33,7 +33,8 @@ fn plugin_manifest_and_mcp_registration_match_the_binary() {
                     "description": "Coordinate and expose public progress for reviewed integration across two existing Codex tasks.",
                     "cwd": ".",
                     "command": "/bin/sh",
-                    "args": ["./scripts/start-mcp.sh"]
+                    "args": ["./scripts/start-mcp.sh"],
+                    "startup_timeout_sec": 300
                 }
             }
         })
@@ -46,7 +47,14 @@ fn plugin_mcp_launcher_uses_the_explicit_binary_override() {
     let root = repository_root();
     let temp = tempfile::tempdir().unwrap();
     let fake_binary = temp.path().join("codex-consensus");
-    fs::write(&fake_binary, "#!/bin/sh\nprintf '%s\\n' \"$1\"\n").unwrap();
+    fs::write(
+        &fake_binary,
+        format!(
+            "#!/bin/sh\ncase \"${{1:-}}\" in\n  --version) printf '%s\\n' 'codex-consensus {}' ;;\n  mcp-server) printf '%s\\n' mcp-server ;;\n  *) exit 64 ;;\nesac\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .unwrap();
     fs::set_permissions(&fake_binary, fs::Permissions::from_mode(0o755)).unwrap();
 
     let output = Command::new("/bin/sh")
@@ -59,6 +67,33 @@ fn plugin_mcp_launcher_uses_the_explicit_binary_override() {
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "mcp-server\n");
 }
 
+#[cfg(unix)]
+#[test]
+fn plugin_runtime_resolver_and_bootstrap_regression_are_shipped() {
+    let root = repository_root();
+    let resolver = root.join("plugin/scripts/ensure-runtime.sh");
+    assert!(resolver.is_file());
+    assert_ne!(
+        fs::metadata(&resolver).unwrap().permissions().mode() & 0o111,
+        0
+    );
+
+    let output = Command::new("bash")
+        .arg(root.join("tests/plugin-bootstrap.sh"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("plugin bootstrap checks passed")
+    );
+}
+
 #[test]
 fn skill_launches_and_observes_the_daemon_without_becoming_a_review_relay() {
     let root = repository_root();
@@ -66,6 +101,8 @@ fn skill_launches_and_observes_the_daemon_without_becoming_a_review_relay() {
         fs::read_to_string(root.join("plugin/skills/worktree-merge-consensus/SKILL.md")).unwrap();
     for required in [
         "consensus_doctor",
+        "automatically installs",
+        "configures only",
         "MCP tool, not a shell command",
         "codex-consensus doctor",
         "codex-consensus mcp-server",

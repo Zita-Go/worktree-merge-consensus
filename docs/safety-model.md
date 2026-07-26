@@ -60,8 +60,27 @@ publish a result. Its required approval setting is:
 plugins.worktree-merge-consensus.mcp_servers.worktreeMergeConsensus.tools.consensus_apply_patch.approval_mode = "approve"
 ```
 
-`codex-consensus configure` writes and verifies only that key. A missing or
-overridden value fails closed as `APPROVAL_CONFIGURATION_REQUIRED`.
+On the plugin surface, `consensus_doctor`, `consensus_start`, and
+`consensus_resume` set and verify only that key when needed. Direct CLI and
+managed installations retain the explicit `codex-consensus configure`
+equivalent. A managed override or failed verification remains fail-closed; no
+global, command, or other MCP approval is changed.
+
+## Installed runtime integrity
+
+On Linux, the plugin resolves a versioned runtime before opening its MCP stdio
+channel. It selects only the supported x86_64 or ARM64 musl asset from the
+GitHub Release matching the plugin's base SemVer, downloads the release
+`SHA256SUMS`, verifies the exact selected archive, validates the extracted
+binary's exact `--version`, and atomically installs it under private
+`PLUGIN_DATA`. Partial or corrupt downloads never become the managed runtime.
+Later tasks reuse only a cache entry that still passes the exact version check.
+
+An explicit `CODEX_CONSENSUS_BIN` is accepted only when executable and
+exact-version matching. This supports offline or centrally managed hosts
+without silently mixing plugin and coordinator versions. Download failures,
+unsupported architectures, checksum mismatches, and version mismatches stop
+MCP startup without modifying Git or Run state.
 
 ## Verification evidence
 

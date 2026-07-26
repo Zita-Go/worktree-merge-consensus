@@ -169,7 +169,7 @@ async fn doctor_value(state_dir: &Path, surface: DoctorSurface) -> Result<Value,
         ));
     }
     let app = connect_app_server().await?;
-    let controlled_patch_approval = require_controlled_patch_approval(&app).await?;
+    let controlled_patch_approval = controlled_patch_approval_for_surface(&app, surface).await?;
     let page = app.list_threads(None, 1).await.map_err(app_server_error)?;
     let config = ServerConfig::new(state_dir);
     SqliteRunStore::open(&config.database_path)
@@ -196,7 +196,9 @@ async fn doctor_value(state_dir: &Path, surface: DoctorSurface) -> Result<Value,
         "sampled_threads": page.data.len(),
         "controlled_patch_approval": {
             "key": CONTROLLED_PATCH_APPROVAL_KEY,
-            "mode": controlled_patch_approval,
+            "mode": controlled_patch_approval.mode,
+            "configured_now": controlled_patch_approval.configured_now,
+            "file_path": controlled_patch_approval.file_path,
         },
         "plugin_surface": surface == DoctorSurface::PluginMcp,
         "legacy_skill": legacy_skill,
@@ -231,11 +233,62 @@ async fn configure_codex(json_output: bool) -> Result<(), CliError> {
 }
 
 async fn require_controlled_patch_approval(app: &impl AppServer) -> Result<String, CliError> {
+    controlled_patch_approval_for_surface(app, DoctorSurface::DirectCli)
+        .await
+        .map(|status| status.mode)
+}
+
+#[derive(Debug)]
+struct ControlledPatchApprovalStatus {
+    mode: String,
+    configured_now: bool,
+    file_path: Option<String>,
+}
+
+#[async_trait]
+trait ControlledPatchApprovalClient: Send + Sync {
+    async fn read_controlled_patch_approval(
+        &self,
+    ) -> Result<Option<String>, app_server_client::AppServerError>;
+    async fn write_controlled_patch_approval(
+        &self,
+    ) -> Result<Value, app_server_client::AppServerError>;
+}
+
+#[async_trait]
+impl<T> ControlledPatchApprovalClient for T
+where
+    T: AppServer + ?Sized,
+{
+    async fn read_controlled_patch_approval(
+        &self,
+    ) -> Result<Option<String>, app_server_client::AppServerError> {
+        AppServer::controlled_patch_approval_mode(self).await
+    }
+
+    async fn write_controlled_patch_approval(
+        &self,
+    ) -> Result<Value, app_server_client::AppServerError> {
+        AppServer::configure_controlled_patch_approval(self).await
+    }
+}
+
+async fn controlled_patch_approval_for_surface(
+    app: &(impl ControlledPatchApprovalClient + ?Sized),
+    surface: DoctorSurface,
+) -> Result<ControlledPatchApprovalStatus, CliError> {
     let mode = app
-        .controlled_patch_approval_mode()
+        .read_controlled_patch_approval()
         .await
         .map_err(app_server_error)?;
-    if mode.as_deref() != Some(CONTROLLED_PATCH_APPROVAL_MODE) {
+    if mode.as_deref() == Some(CONTROLLED_PATCH_APPROVAL_MODE) {
+        return Ok(ControlledPatchApprovalStatus {
+            mode: CONTROLLED_PATCH_APPROVAL_MODE.to_owned(),
+            configured_now: false,
+            file_path: None,
+        });
+    }
+    if surface == DoctorSurface::DirectCli {
         return Err(CliError::new(
             "APPROVAL_CONFIGURATION_REQUIRED",
             format!(
@@ -243,7 +296,33 @@ async fn require_controlled_patch_approval(app: &impl AppServer) -> Result<Strin
             ),
         ));
     }
-    Ok(CONTROLLED_PATCH_APPROVAL_MODE.to_owned())
+
+    let response = app
+        .write_controlled_patch_approval()
+        .await
+        .map_err(|error| {
+            CliError::new(
+                "APPROVAL_CONFIGURATION_REQUIRED",
+                format!(
+                    "automatic scoped approval configuration failed: {error}; run `codex-consensus configure` under the same Codex account and CODEX_HOME, or ask the administrator to permit only {CONTROLLED_PATCH_APPROVAL_KEY}={CONTROLLED_PATCH_APPROVAL_MODE}"
+                ),
+            )
+        })?;
+    Ok(ControlledPatchApprovalStatus {
+        mode: CONTROLLED_PATCH_APPROVAL_MODE.to_owned(),
+        configured_now: true,
+        file_path: response
+            .get("filePath")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    })
+}
+
+async fn ensure_plugin_controlled_patch_approval() -> Result<(), CliError> {
+    let app = connect_app_server().await?;
+    controlled_patch_approval_for_surface(&app, DoctorSurface::PluginMcp)
+        .await
+        .map(|_| ())
 }
 
 async fn list_threads(json_output: bool) -> Result<(), CliError> {
@@ -570,6 +649,9 @@ impl ToolBackend for CliMcpBackend {
             }
             "consensus_start" => {
                 let arguments: McpStartArguments = decode_mcp_arguments(arguments)?;
+                ensure_plugin_controlled_patch_approval()
+                    .await
+                    .map_err(cli_backend_error)?;
                 start_run_value(
                     &self.state_dir,
                     &RunArgs {
@@ -609,6 +691,9 @@ impl ToolBackend for CliMcpBackend {
             }
             "consensus_resume" => {
                 let arguments: McpRunIdArguments = decode_mcp_arguments(arguments)?;
+                ensure_plugin_controlled_patch_approval()
+                    .await
+                    .map_err(cli_backend_error)?;
                 daemon_request_value(
                     &self.state_dir,
                     DaemonRequest::Resume {
@@ -856,4 +941,84 @@ fn app_server_error(error: app_server_client::AppServerError) -> CliError {
 
 fn git_error(error: consensus_core::git::GitSafetyError) -> CliError {
     CliError::new(error.code(), error.to_string())
+}
+
+#[cfg(test)]
+mod controlled_patch_approval_tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    struct FakeApprovalClient {
+        mode: Mutex<Option<String>>,
+        writes: Mutex<usize>,
+    }
+
+    impl FakeApprovalClient {
+        fn new(mode: Option<&str>) -> Self {
+            Self {
+                mode: Mutex::new(mode.map(str::to_owned)),
+                writes: Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ControlledPatchApprovalClient for FakeApprovalClient {
+        async fn read_controlled_patch_approval(
+            &self,
+        ) -> Result<Option<String>, app_server_client::AppServerError> {
+            Ok(self.mode.lock().unwrap().clone())
+        }
+
+        async fn write_controlled_patch_approval(
+            &self,
+        ) -> Result<Value, app_server_client::AppServerError> {
+            *self.writes.lock().unwrap() += 1;
+            *self.mode.lock().unwrap() = Some(CONTROLLED_PATCH_APPROVAL_MODE.to_owned());
+            Ok(json!({
+                "status": "ok",
+                "filePath": "/tmp/config.toml"
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_surface_configures_only_when_the_scoped_key_is_missing() {
+        let client = FakeApprovalClient::new(Some("prompt"));
+
+        let status = controlled_patch_approval_for_surface(&client, DoctorSurface::PluginMcp)
+            .await
+            .unwrap();
+
+        assert_eq!(status.mode, CONTROLLED_PATCH_APPROVAL_MODE);
+        assert!(status.configured_now);
+        assert_eq!(status.file_path.as_deref(), Some("/tmp/config.toml"));
+        assert_eq!(*client.writes.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn plugin_surface_reuses_an_existing_exact_scoped_key() {
+        let client = FakeApprovalClient::new(Some(CONTROLLED_PATCH_APPROVAL_MODE));
+
+        let status = controlled_patch_approval_for_surface(&client, DoctorSurface::PluginMcp)
+            .await
+            .unwrap();
+
+        assert!(!status.configured_now);
+        assert!(status.file_path.is_none());
+        assert_eq!(*client.writes.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn direct_cli_keeps_configuration_explicit() {
+        let client = FakeApprovalClient::new(None);
+
+        let error = controlled_patch_approval_for_surface(&client, DoctorSurface::DirectCli)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), "APPROVAL_CONFIGURATION_REQUIRED");
+        assert_eq!(*client.writes.lock().unwrap(), 0);
+    }
 }

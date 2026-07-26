@@ -75,6 +75,7 @@ participant prompts, raw task history, and command stdout/stderr.
 
 - Linux x86_64 or ARM64.
 - Git and Codex CLI `>=0.144.1` in `PATH`.
+- `curl` or `wget`, `tar`, and `sha256sum` or `shasum` for the first launch.
 - Two existing Codex tasks under the same local account and host.
 - Two different registered worktrees in the same Git common directory.
 - Both implementations committed and both source worktrees clean.
@@ -82,62 +83,49 @@ participant prompts, raw task history, and command stdout/stderr.
 This is a **same-host** workflow. Cross-machine and cross-account coordination
 are not supported.
 
-### 1. Install the release binary
+### 1. Install directly from the Codex marketplace
 
-Download the static musl binary, plugin bundle, and `SHA256SUMS` from the same
-[GitHub Release](https://github.com/Zita-Go/worktree-merge-consensus/releases).
-Choose `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl` for your host.
-
-```bash
-VERSION=0.3.8
-TARGET=x86_64-unknown-linux-musl
-BASE_URL="https://github.com/Zita-Go/worktree-merge-consensus/releases/download/v${VERSION}"
-
-curl -fLO "${BASE_URL}/SHA256SUMS"
-curl -fLO "${BASE_URL}/codex-consensus-v${VERSION}-${TARGET}.tar.gz"
-curl -fLO "${BASE_URL}/worktree-merge-consensus-plugin-v${VERSION}.tar.gz"
-sha256sum --ignore-missing --check SHA256SUMS
-
-tar -xzf "codex-consensus-v${VERSION}-${TARGET}.tar.gz"
-mkdir -p "$HOME/.local/bin"
-install -m 0755 \
-  "codex-consensus-v${VERSION}-${TARGET}/codex-consensus" \
-  "$HOME/.local/bin/codex-consensus"
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-The released binaries are static and do not require a particular host GLIBC.
-To build from source instead, install Rust 1.85 or newer and run:
+Register the GitHub repository and install the plugin. Codex downloads the
+marketplace snapshot; no release archive needs to be downloaded or extracted
+by hand.
 
 ```bash
-cargo install --locked --path crates/cli
-```
-
-### 2. Install the Codex plugin
-
-The binary/plugin artifacts must have the same version. Extract the plugin and
-register the directory containing `.agents/plugins/marketplace.json`:
-
-```bash
-tar -xzf "worktree-merge-consensus-plugin-v${VERSION}.tar.gz"
-codex plugin marketplace add \
-  "$PWD/worktree-merge-consensus-plugin-v${VERSION}"
+codex plugin marketplace add Zita-Go/worktree-merge-consensus
 codex plugin add worktree-merge-consensus@worktree-merge-consensus
-codex-consensus configure
-codex-consensus doctor
 ```
 
-`codex-consensus configure` writes and verifies only the request-bound patch
-approval key:
+After registering the marketplace, you can alternatively open `/plugins` in
+Codex, select **Worktree Merge Consensus**, and choose **Install**.
+
+On the first new Codex task, the plugin automatically selects
+`x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`, downloads the exact
+matching static binary from the same
+[GitHub Release](https://github.com/Zita-Go/worktree-merge-consensus/releases),
+verifies its entry in `SHA256SUMS`, and caches it under private `PLUGIN_DATA`.
+The MCP startup allowance is five minutes for slow or proxied downloads; later
+tasks reuse the verified cache. The binary/plugin version remains locked.
+
+`consensus_doctor` then verifies the runtime and configures only this scoped
+approval when it is missing:
 
 ```text
 plugins.worktree-merge-consensus.mcp_servers.worktreeMergeConsensus.tools.consensus_apply_patch.approval_mode = "approve"
 ```
 
-It does not weaken global command or approval policy. Open a new Codex task after
-installation or upgrade so the plugin tool surface is freshly loaded.
+It does not weaken global command or approval policy. Open a new Codex task
+after installation or upgrade so the complete plugin tool surface is loaded.
 
-### 3. Launch from Codex
+For an offline or centrally managed host, install the matching release binary
+yourself and expose its absolute path as `CODEX_CONSENSUS_BIN`. To build from
+source, install Rust 1.85 or newer and run:
+
+```bash
+cargo install --locked --path crates/cli
+codex-consensus configure
+codex-consensus doctor
+```
+
+### 2. Launch from Codex
 
 In the new launcher task, invoke:
 
@@ -270,12 +258,15 @@ never silently creates a replacement Run or repeats an uncertain write. See
 Common installation diagnostics:
 
 - `LEGACY_SKILL_CONFLICT`: an older manually installed skill shadows the plugin;
-  back it up or remove it manually, reinstall matching binary/plugin versions,
-  and open a new task.
-- `APPROVAL_CONFIGURATION_REQUIRED`: run `codex-consensus configure` as the same
-  account and `CODEX_HOME` used by Codex. Do not enable global auto-approval.
-- Missing `consensus_*` tools: run `codex mcp list --json`; a successful CLI
-  doctor does not prove that an already-open task loaded the plugin.
+  back it up or remove it manually, reinstall the matching binary/plugin
+  marketplace release, and open a new task.
+- `APPROVAL_CONFIGURATION_REQUIRED`: plugin setup normally repairs the one
+  scoped key automatically. If managed policy blocks it, run
+  `codex-consensus configure` under the same account and `CODEX_HOME`; never
+  enable global auto-approval.
+- Missing `consensus_*` tools: run `codex mcp list --json` and inspect the MCP
+  startup diagnostic; a successful direct CLI doctor does not prove that an
+  already-open task loaded the plugin.
 
 ## Documentation
 

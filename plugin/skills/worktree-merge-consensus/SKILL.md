@@ -40,7 +40,13 @@ started command fails closed instead of being run again automatically.
 
 `consensus_doctor` is an MCP tool, not a shell command. The same applies to every `consensus_*` name below. Call these names through the Codex tool interface. Never run `consensus_doctor` as an executable.
 
-Codex starts the bundled MCP server with `codex-consensus mcp-server`. Do not start that foreground process manually during a normal plugin run. The CLI equivalents are:
+Codex starts the bundled MCP server through `scripts/start-mcp.sh`. Release
+0.3.9 automatically installs the exact static `codex-consensus` release for
+Linux x86_64 or ARM64 into the plugin's private `PLUGIN_DATA` cache, verifies
+the matching release checksum, and then runs `codex-consensus mcp-server`.
+`CODEX_CONSENSUS_BIN` remains an exact-version override for offline or managed
+deployments. Do not start that foreground process manually during a normal
+plugin run. The CLI equivalents are:
 
 - `consensus_doctor` → `codex-consensus doctor`
 - `consensus_list_threads` → `codex-consensus threads list`
@@ -51,8 +57,11 @@ Codex starts the bundled MCP server with `codex-consensus mcp-server`. Do not st
 - `consensus_resume` → `codex-consensus resume <run-id>`
 - `consensus_cancel` → `codex-consensus cancel <run-id>`
 
-`codex-consensus configure` is a one-time installation command, not an MCP
-tool. It writes and verifies only
+On the plugin surface, `consensus_doctor` configures only the request-bound
+patch approval below when it is missing, verifies the effective value, and
+reports whether it changed the config. `codex-consensus configure` remains the
+manual equivalent for direct CLI or centrally managed installations; it is not
+an MCP tool. Both paths write and verify only
 `plugins.worktree-merge-consensus.mcp_servers.worktreeMergeConsensus.tools.consensus_apply_patch.approval_mode = "approve"`.
 Do not replace it with a global approval change.
 
@@ -189,11 +198,29 @@ participant-side `consensus_apply_patch`; injection, preflight, and any
 authorized use of that tool belong exclusively to the persistent coordinator
 and its self-contained Primary prompt.
 
-Use those CLI commands only for diagnostics or when the user explicitly requests the CLI surface. If no `consensus_*` MCP tools are exposed, run `codex mcp list --json`, `command -v codex-consensus`, and `codex-consensus doctor` when shell access is available. Report whether `worktreeMergeConsensus` is absent, disabled, or unable to start, then stop. A successful CLI doctor does not prove that the plugin MCP tools were loaded. Do not search for a `consensus_doctor` binary or substitute ordinary task/thread tools.
+Use those CLI commands only for diagnostics or when the user explicitly
+requests the CLI surface. If no `consensus_*` MCP tools are exposed, run
+`codex mcp list --json` and report whether `worktreeMergeConsensus` is absent,
+disabled, or unable to start, including its runtime download, checksum,
+architecture, timeout, or managed-policy diagnostic. The managed runtime is
+normally private to `PLUGIN_DATA` and absent from `PATH`; use
+`command -v codex-consensus` and `codex-consensus doctor` only when a direct or
+centrally managed binary is actually installed. Then stop. A successful CLI
+doctor does not prove that the plugin MCP tools were loaded. Do not search for
+a `consensus_doctor` binary or substitute ordinary task/thread tools.
 
 ## Launch
 
-1. Call `consensus_doctor`. Stop and report its exact error if the binary, plugin surface, Codex App Server, Git, private state, or daemon is unavailable or incompatible. For `LEGACY_SKILL_CONFLICT`, do not delete anything; give the returned migration guidance. For `APPROVAL_CONFIGURATION_REQUIRED`, tell the user to run the one-time `codex-consensus configure` installation command as the same account and `CODEX_HOME` used by Codex, then stop. Never relax global or command approvals.
+1. Call `consensus_doctor`. The first successful plugin call may install the
+   verified native runtime before the tool becomes available and may set the
+   one request-bound patch approval automatically. Stop and report the exact
+   error if the binary, plugin surface, Codex App Server, Git, private state,
+   daemon, download, checksum, or scoped configuration is unavailable or
+   incompatible. For `LEGACY_SKILL_CONFLICT`, do not delete anything; give the
+   returned migration guidance. If automatic scoped configuration is blocked
+   by managed policy, report that policy error and the manual
+   `codex-consensus configure` equivalent; never relax global or command
+   approvals.
 2. Call `consensus_list_threads`. Present all visible tasks and assign two different task IDs as primary and reviewer. A task cwd is display metadata only: do not filter tasks by cwd or infer a source worktree from it.
 3. Obtain an absolute `repository_path` to any worktree in the intended repository. Call `consensus_list_worktrees` with that path.
 4. Present the registered entries with path, source ref or detached state, full HEAD SHA, and clean state. Assign two different, available, clean worktrees as primary and reviewer sources.

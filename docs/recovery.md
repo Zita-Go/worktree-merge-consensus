@@ -47,7 +47,7 @@ Recovery never silently:
 | `EXECUTION_TOOL_UNAVAILABLE` | After restoring the task's tools, a first integration request may be retried only when no target branch or write exists. |
 | `CONTROLLED_PATCH_TOOL_UNAVAILABLE` | Use the exact version-gated path below; near-matches remain terminal. |
 | `FORBIDDEN_OPERATION` | Some historical exact read-only command misclassifications have narrow same-Run migrations. Inspect the version-specific section below. |
-| `APPROVAL_CONFIGURATION_REQUIRED` | Run `codex-consensus configure` as the same Codex account and `CODEX_HOME`, then retry the original operation. |
+| `APPROVAL_CONFIGURATION_REQUIRED` | Plugin setup normally writes the one scoped key automatically. If managed policy blocks it, run `codex-consensus configure` as the same Codex account and `CODEX_HOME`, then retry the original operation. |
 | `WAITING_THREAD` | Finish or interrupt the unrelated active task turn, then resume. |
 | `SOURCE_DRIFT` | Inspect the source changes and start a new Run from newly confirmed commits. Do not resume with different source identity. |
 | `INTEGRATION_BRANCH_EXISTS` | Choose a different new branch and start a new Run; the coordinator never reuses or deletes it. |
@@ -147,23 +147,38 @@ the App Server connection before explicitly resuming.
 ### Plugin tools are absent
 
 ```bash
-command -v codex-consensus
-codex-consensus --version
-codex-consensus doctor
+codex plugin list
 codex mcp list --json
 ```
 
-`doctor` proving that the binary and daemon are healthy does not prove that an
-already-open Codex task loaded the plugin. Confirm `worktreeMergeConsensus` is
-enabled and points to the matching plugin version, then open a new launcher
-task. MCP names such as `consensus_doctor` are not shell executables.
+Version 0.3.9 resolves the exact static runtime before the MCP handshake. On a
+fresh install, allow the first task up to five minutes to download and verify
+the matching release. Confirm `worktreeMergeConsensus` is enabled and inspect
+its startup diagnostic for download, checksum, architecture, or managed-policy
+errors, then open a new launcher task. MCP names such as `consensus_doctor` are
+not shell executables.
+
+The verified runtime is versioned under the plugin's private `PLUGIN_DATA`; it
+is intentionally not required to appear in `PATH`. If a direct
+`codex-consensus` executable is present, these optional checks still apply:
+
+```bash
+command -v codex-consensus
+codex-consensus --version
+codex-consensus doctor
+```
+
+For offline or centrally managed installations, set `CODEX_CONSENSUS_BIN` to
+an executable whose output is exactly the plugin's
+`codex-consensus <version>`. A mismatch is rejected rather than silently
+mixing binary/plugin versions.
 
 ### `LEGACY_SKILL_CONFLICT`
 
 An older manually installed `$CODEX_HOME/skills/worktree-merge-consensus`
-shadows the plugin workflow. Back it up or remove it manually, reinstall
-matching binary/plugin artifacts, and open a new task. Diagnostics never delete
-the legacy directory.
+shadows the plugin workflow. Back it up or remove it manually, reinstall the
+plugin from its matching marketplace release, and open a new task. Diagnostics
+never delete the legacy directory.
 
 ### `INCOMPATIBLE_CODEX`
 

@@ -48,6 +48,9 @@ jobs:
       - name: Regression-test release version gate
         run: bash tests/release-gate.sh
 
+      - name: Regression-test direct plugin runtime installation
+        run: bash tests/plugin-bootstrap.sh
+
   supply-chain:
     name: Audit dependencies and licenses
     runs-on: ubuntu-24.04

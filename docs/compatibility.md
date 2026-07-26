@@ -85,9 +85,10 @@ exact key
 to equal `"approve"`. `codex-consensus configure` writes only that key through
 `config/batchWrite` with `reloadUserConfig: true`, then verifies it through
 `config/read`. It does not modify command approvals, sandbox policy, other MCP
-tools, or a global approval setting. `doctor`, run start, and controlled-patch
-resume fail with `APPROVAL_CONFIGURATION_REQUIRED` when the effective value is
-absent or overridden. The coordinator uses `turn/interrupt` only for the exact
+tools, or a global approval setting. Since 0.3.9, plugin-surface doctor, run
+start, and resume perform that same scoped write automatically when the value
+is absent; direct CLI remains explicit. A managed override or failed effective
+read remains fail-closed. The coordinator uses `turn/interrupt` only for the exact
 v0.1.24 pending controlled-patch approval recovery described by the protocol.
 Version 0.1.25 does not broaden interruption behavior: it reads canonical
 completed history and retries only the exact failed request-bound
@@ -361,13 +362,21 @@ include `consensus_list_worktrees` and the cursor-based `consensus_wait`;
 `consensus_start` requires both task IDs and both worktree paths.
 `consensus_apply_patch` is available only to an exact active Primary
 integration request and has no public CLI equivalent. Plugin and binary
-versions must come from the same release.
+versions must come from the same release. Release 0.3.9 automatically resolves
+the exact Linux x86_64 or ARM64 static binary, verifies the selected archive
+against the matching release `SHA256SUMS`, validates its exact version, and
+installs it atomically in versioned private `PLUGIN_DATA`. The bundled MCP
+startup timeout is 300 seconds so slow or proxied first-run downloads do not
+inherit Codex's default ten-second limit. An exact-version
+`CODEX_CONSENSUS_BIN` remains available for offline or managed installations.
 After installing or updating the plugin, restart Codex or open a new task. A
 conflicting manually installed `$CODEX_HOME/skills/worktree-merge-consensus`
 is reported as `LEGACY_SKILL_CONFLICT` and is never deleted automatically.
-The same-account installation must also run `codex-consensus configure` once;
-a broad or global auto-approval configuration is neither required nor accepted
-as a substitute for the exact tool key.
+On the plugin surface, doctor, start, and resume automatically configure and
+verify only the exact `consensus_apply_patch` approval key when it is missing.
+Direct CLI and managed installations may run `codex-consensus configure`
+explicitly. A broad or global auto-approval configuration is neither required
+nor accepted as a substitute for the exact tool key.
 
 Release 0.3.0 adds the read-only `consensus_wait` observation endpoint. Its
 global monotonic SQLite cursor is resumed with `after_cursor`; each call waits

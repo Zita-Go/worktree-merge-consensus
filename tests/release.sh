@@ -35,6 +35,16 @@ plugin_version="$(python3 -c 'import json; print(json.load(open("plugin/.codex-p
 [[ "$plugin_version" == "$release_version" ]] ||
   fail "tag $release_version does not match plugin version $plugin_version"
 
+[[ -x plugin/scripts/ensure-runtime.sh ]] ||
+  fail 'plugin runtime resolver is missing or not executable'
+grep -Fq 'SHA256SUMS' plugin/scripts/ensure-runtime.sh ||
+  fail 'plugin runtime resolver does not verify release checksums'
+grep -Fq 'PLUGIN_DATA' plugin/scripts/ensure-runtime.sh ||
+  fail 'plugin runtime resolver does not use private plugin data'
+startup_timeout="$(python3 -c 'import json; print(json.load(open("plugin/.mcp.json", encoding="utf-8"))["mcpServers"]["worktreeMergeConsensus"]["startup_timeout_sec"])')"
+[[ "$startup_timeout" == "300" ]] ||
+  fail 'plugin MCP startup timeout must cover first-run runtime installation'
+
 while IFS= read -r manifest; do
   grep -Fq 'version.workspace = true' "$manifest" ||
     fail "$manifest does not inherit the release workspace version"

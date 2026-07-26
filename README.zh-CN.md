@@ -69,66 +69,50 @@ Worktree Merge Consensus 补上这一层复核：
 
 - Linux x86_64 或 ARM64。
 - `PATH` 中可以使用 Git 和 Codex CLI `>=0.144.1`。
+- 首次启动可使用 `curl` 或 `wget`、`tar`，以及 `sha256sum` 或 `shasum`。
 - 同一本地账号、同一主机上的两个已有 Codex 任务。
 - 同一 Git common directory 中两个不同的已注册 worktree。
 - 两个实现都已经提交，两个来源 worktree 都是干净的。
 
 这是一个 **same-host** 流程，不支持跨机器或跨账号协调。
 
-### 1. 安装发布版二进制
+### 1. 直接从 Codex marketplace 安装
 
-从同一个 [GitHub Release](https://github.com/Zita-Go/worktree-merge-consensus/releases)
-下载静态 musl 二进制、插件包和 `SHA256SUMS`。根据机器选择
-`x86_64-unknown-linux-musl` 或 `aarch64-unknown-linux-musl`。
-
-```bash
-VERSION=0.3.8
-TARGET=x86_64-unknown-linux-musl
-BASE_URL="https://github.com/Zita-Go/worktree-merge-consensus/releases/download/v${VERSION}"
-
-curl -fLO "${BASE_URL}/SHA256SUMS"
-curl -fLO "${BASE_URL}/codex-consensus-v${VERSION}-${TARGET}.tar.gz"
-curl -fLO "${BASE_URL}/worktree-merge-consensus-plugin-v${VERSION}.tar.gz"
-sha256sum --ignore-missing --check SHA256SUMS
-
-tar -xzf "codex-consensus-v${VERSION}-${TARGET}.tar.gz"
-mkdir -p "$HOME/.local/bin"
-install -m 0755 \
-  "codex-consensus-v${VERSION}-${TARGET}/codex-consensus" \
-  "$HOME/.local/bin/codex-consensus"
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-发布的二进制为静态链接，不要求宿主机具有特定 GLIBC 版本。如果希望从源码构建，请安装
-Rust 1.85 或更高版本，然后运行：
+注册 GitHub 仓库并安装插件。Codex 会自行下载 marketplace 快照，不再需要人工下载、解压
+发布包。
 
 ```bash
-cargo install --locked --path crates/cli
-```
-
-### 2. 安装 Codex 插件
-
-binary/plugin 必须来自同一个版本。解压插件，并注册包含
-`.agents/plugins/marketplace.json` 的目录：
-
-```bash
-tar -xzf "worktree-merge-consensus-plugin-v${VERSION}.tar.gz"
-codex plugin marketplace add \
-  "$PWD/worktree-merge-consensus-plugin-v${VERSION}"
+codex plugin marketplace add Zita-Go/worktree-merge-consensus
 codex plugin add worktree-merge-consensus@worktree-merge-consensus
-codex-consensus configure
-codex-consensus doctor
 ```
 
-`codex-consensus configure` 只写入并验证绑定请求的补丁工具审批键：
+注册 marketplace 后，也可以在 Codex 中打开 `/plugins`，选择
+**Worktree Merge Consensus**，再点击 **Install**。
+
+在第一个新的 Codex 任务中，插件会自动识别
+`x86_64-unknown-linux-musl` 或 `aarch64-unknown-linux-musl`，从同版本
+[GitHub Release](https://github.com/Zita-Go/worktree-merge-consensus/releases)
+下载对应静态二进制，核验其 `SHA256SUMS` 条目，并缓存到私有 `PLUGIN_DATA`。MCP 首次启动
+为慢速或代理下载预留五分钟，后续任务直接复用已验证缓存。binary/plugin 版本保持锁定。
+
+随后 `consensus_doctor` 会验证运行环境，并在缺失时只配置下面这一项审批：
 
 ```text
 plugins.worktree-merge-consensus.mcp_servers.worktreeMergeConsensus.tools.consensus_apply_patch.approval_mode = "approve"
 ```
 
-它不会放宽全局命令或审批策略。安装或升级后请新建 Codex 任务，让新的插件工具面被完整加载。
+它不会放宽全局命令或审批策略。安装或升级后请新建 Codex 任务，让完整插件工具面重新加载。
 
-### 3. 在 Codex 中启动
+离线或集中运维环境可以自行安装同版本发布二进制，并通过绝对路径
+`CODEX_CONSENSUS_BIN` 指定。如果希望从源码构建，请安装 Rust 1.85 或更高版本，然后运行：
+
+```bash
+cargo install --locked --path crates/cli
+codex-consensus configure
+codex-consensus doctor
+```
+
+### 2. 在 Codex 中启动
 
 在新的启动任务中调用：
 
@@ -250,11 +234,11 @@ shell 可执行文件。不要运行 `command -v consensus_doctor`；终端诊�
 常见安装诊断：
 
 - `LEGACY_SKILL_CONFLICT`：旧的手动安装 Skill 覆盖了插件；请自行备份或移除旧 Skill，重新
-  安装版本匹配的 binary/plugin，并新建任务。
-- `APPROVAL_CONFIGURATION_REQUIRED`：使用与 Codex 相同的账号和 `CODEX_HOME` 运行
-  `codex-consensus configure`，不要启用全局自动审批。
-- 缺少 `consensus_*` 工具：运行 `codex mcp list --json`；CLI doctor 成功不代表一个已经打开的
-  旧任务加载了插件。
+  安装版本匹配的 binary/plugin marketplace 发布版，并新建任务。
+- `APPROVAL_CONFIGURATION_REQUIRED`：插件通常会自动修复唯一的作用域键；若被托管策略阻止，
+  使用与 Codex 相同的账号和 `CODEX_HOME` 运行 `codex-consensus configure`，不要启用全局自动审批。
+- 缺少 `consensus_*` 工具：运行 `codex mcp list --json` 并检查 MCP 启动诊断；直接 CLI doctor
+  成功不代表一个已经打开的旧任务加载了插件。
 
 ## 文档
 

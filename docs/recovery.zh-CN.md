@@ -42,7 +42,7 @@ ID、worktree 路径、来源引用与 SHA、授权目标分支和已有集成 S
 | `EXECUTION_TOOL_UNAVAILABLE` | 恢复任务工具后，只有目标分支和写入都不存在时才会重试首次集成请求。 |
 | `CONTROLLED_PATCH_TOOL_UNAVAILABLE` | 使用下文精确版本边界；任何近似状态仍是终态。 |
 | `FORBIDDEN_OPERATION` | 某些历史精确只读命令误判具有窄范围同 Run 迁移；见下文版本说明。 |
-| `APPROVAL_CONFIGURATION_REQUIRED` | 使用相同 Codex 账号和 `CODEX_HOME` 运行 `codex-consensus configure`，然后重试原操作。 |
+| `APPROVAL_CONFIGURATION_REQUIRED` | 插件通常会自动写入唯一的作用域键；若被托管策略阻止，使用相同 Codex 账号和 `CODEX_HOME` 运行 `codex-consensus configure`，然后重试原操作。 |
 | `WAITING_THREAD` | 完成或中断无关的活动任务 turn，再恢复。 |
 | `SOURCE_DRIFT` | 检查来源变化，使用重新确认的提交新建 Run；不要用不同来源身份恢复。 |
 | `INTEGRATION_BRANCH_EXISTS` | 选择另一个新分支并新建 Run；协调器不会复用或删除该分支。 |
@@ -115,20 +115,30 @@ idle，但协调器没有持久化该 turn 的任何事件。此时会重新验�
 ### 缺少插件工具
 
 ```bash
-command -v codex-consensus
-codex-consensus --version
-codex-consensus doctor
+codex plugin list
 codex mcp list --json
 ```
 
-`doctor` 证明 binary 和 daemon 正常，不代表一个已经打开的 Codex 任务加载了插件。确认
-`worktreeMergeConsensus` 已启用且指向匹配插件版本，然后新建启动任务。
-`consensus_doctor` 等 MCP 名称不是 shell 可执行文件。
+0.3.9 会在 MCP 握手前解析并安装精确版本的静态运行时。全新安装时，第一个任务最多等待五分钟
+下载并校验同版本发布包。确认 `worktreeMergeConsensus` 已启用，检查其启动诊断中的下载、校验和、
+架构或托管策略错误，然后新建启动任务。`consensus_doctor` 等 MCP 名称不是 shell 可执行文件。
+
+已验证运行时按版本保存在插件私有 `PLUGIN_DATA` 中，故意不要求出现在 `PATH`。如果系统中还存在
+直接安装的 `codex-consensus`，仍可选择执行：
+
+```bash
+command -v codex-consensus
+codex-consensus --version
+codex-consensus doctor
+```
+
+离线或集中运维安装可把 `CODEX_CONSENSUS_BIN` 指向一个可执行文件；其输出必须精确等于插件对应的
+`codex-consensus <version>`。版本不匹配会直接拒绝，不会静默混用 binary/plugin。
 
 ### `LEGACY_SKILL_CONFLICT`
 
 旧的手动安装 `$CODEX_HOME/skills/worktree-merge-consensus` 覆盖了插件流程。请自行备份或删除，
-重新安装匹配的 binary/plugin 产物并新建任务；诊断不会自动删除旧目录。
+从对应 marketplace 发布版重新安装插件并新建任务；诊断不会自动删除旧目录。
 
 ### `INCOMPATIBLE_CODEX`
 

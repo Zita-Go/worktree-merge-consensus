@@ -118,6 +118,12 @@ pub trait AppServer: Send + Sync {
     }
     async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), AppServerError>;
     async fn controlled_patch_approval_mode(&self) -> Result<Option<String>, AppServerError>;
+    async fn configure_controlled_patch_approval(&self) -> Result<Value, AppServerError> {
+        Err(AppServerError::InvalidRequest(
+            "controlled patch approval configuration is not implemented by this AppServer"
+                .to_owned(),
+        ))
+    }
     async fn respond_to_request(&self, id: Value, result: Value) -> Result<(), AppServerError>;
     async fn refresh_connection(&self) -> Result<(), AppServerError> {
         Err(AppServerError::InvalidRequest(
@@ -703,6 +709,19 @@ impl AppServer for ReconnectingCodexAppServer {
         }
     }
 
+    async fn configure_controlled_patch_approval(&self) -> Result<Value, AppServerError> {
+        let mut client = self.inner.lock().await;
+        match client.configure_controlled_patch_approval().await {
+            Ok(response) => Ok(response),
+            Err(error) if reconnectable(&error) => {
+                self.reconnect_locked(&mut client, "config/batchWrite", &error)
+                    .await?;
+                client.configure_controlled_patch_approval().await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     async fn respond_to_request(&self, id: Value, result: Value) -> Result<(), AppServerError> {
         self.inner.lock().await.respond_to_request(id, result).await
     }
@@ -968,6 +987,10 @@ impl AppServer for CodexAppServer {
             .and_then(|value| value.get("approval_mode"))
             .and_then(Value::as_str)
             .map(str::to_owned))
+    }
+
+    async fn configure_controlled_patch_approval(&self) -> Result<Value, AppServerError> {
+        CodexAppServer::configure_controlled_patch_approval(self).await
     }
 
     async fn next_event(&self) -> Option<AppEvent> {

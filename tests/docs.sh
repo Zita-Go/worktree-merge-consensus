@@ -36,6 +36,7 @@ required_files=(
   .github/workflows/release.yml
   tests/release.sh
   tests/release-gate.sh
+  tests/plugin-bootstrap.sh
   tests/static-link.sh
 )
 

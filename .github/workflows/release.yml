@@ -39,6 +39,9 @@ jobs:
       - name: Regression-test exact binary version matching
         run: bash tests/release-gate.sh
 
+      - name: Regression-test direct plugin runtime installation
+        run: bash tests/plugin-bootstrap.sh
+
       - name: Check formatting
         run: cargo fmt --all --check
 

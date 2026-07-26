@@ -19,7 +19,7 @@ pub fn tool_definitions() -> Vec<Value> {
     vec![
         tool(
             MCP_TOOL_NAMES[0],
-            "Check Git, Codex App Server, daemon, and local state compatibility.",
+            "Check Git, Codex App Server, daemon, and local state compatibility; configure only the request-bound patch approval when it is missing.",
             empty_schema(),
         ),
         tool(

@@ -51,8 +51,21 @@ App Server 也不会为这些 turn 提供操作系统隔离。
 plugins.worktree-merge-consensus.mcp_servers.worktreeMergeConsensus.tools.consensus_apply_patch.approval_mode = "approve"
 ```
 
-`codex-consensus configure` 只写入并验证这个键；缺少或被覆盖时会以
-`APPROVAL_CONFIGURATION_REQUIRED` 失败关闭。
+在插件工具面中，`consensus_doctor`、`consensus_start` 和 `consensus_resume` 会在需要时只设置并
+验证这个键。直接 CLI 和集中运维安装仍保留显式 `codex-consensus configure` 等价操作。托管覆盖
+或验证失败仍会失败关闭；不会修改全局、命令或其他 MCP 审批。
+
+## 已安装运行时完整性
+
+在 Linux 上，插件会在打开 MCP stdio 通道前解析按版本隔离的运行时。它只会选择与插件基础
+SemVer 相同 GitHub Release 中受支持的 x86_64 或 ARM64 musl 产物，下载发布版
+`SHA256SUMS`，校验精确选中的压缩包，验证解压后二进制的精确 `--version`，再原子安装到私有
+`PLUGIN_DATA`。部分下载或损坏文件不会成为托管运行时；后续任务只复用仍能通过精确版本检查的
+缓存。
+
+显式 `CODEX_CONSENSUS_BIN` 仅在文件可执行且版本精确匹配时接受，供离线或集中运维主机使用，
+不会静默混用插件与协调器版本。下载失败、不支持的架构、校验和不匹配或版本不匹配都会在不修改
+Git 或 Run 状态的前提下停止 MCP 启动。
 
 ## 验证证据
 

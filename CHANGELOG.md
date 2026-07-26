@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.9
+
+- Install the exact Linux x86_64 or ARM64 static coordinator automatically on
+  first plugin startup. The launcher downloads the matching GitHub Release,
+  verifies the selected archive against `SHA256SUMS`, installs atomically into
+  private `PLUGIN_DATA`, and reuses the versioned cache on later tasks.
+- Raise the bundled MCP startup allowance from the default 10 seconds to five
+  minutes so first-run downloads remain reliable on proxied or slower hosts.
+  Preserve an exact-version `CODEX_CONSENSUS_BIN` override for offline and
+  centrally managed deployments, and reject mismatched overrides fail-closed.
+- Let plugin-surface `consensus_doctor`, `consensus_start`, and
+  `consensus_resume` configure and verify only the request-bound
+  `consensus_apply_patch` approval when needed. Direct CLI usage remains
+  explicit through `codex-consensus configure`; no global approval is changed.
+- Replace the manual release-download quick start with direct GitHub
+  marketplace installation and add checksum, cache, override, and corrupt
+  artifact regressions to CI and the release gate.
+
 ## 0.3.8
 
 - Recognize only the exact App Server `-32600 / thread not loaded: <id>`
