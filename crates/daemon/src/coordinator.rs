@@ -3469,6 +3469,19 @@ where
             .map_err(|error| {
                 CoordinatorError::operational("INVALID_RESPONSE", error.to_string())
             })?;
+        let successful_patch_recorded = if action == NextAction::RequestPrimaryIntegration {
+            let run_id = state.facts.run_id.to_string();
+            match self.store.pending_send(&run_id)? {
+                Some(pending) => self
+                    .store
+                    .successful_patch_recorded(&run_id, &pending.message_hash)?,
+                None => false,
+            }
+        } else {
+            false
+        };
+        let response =
+            promote_post_patch_limit_response(action, response, successful_patch_recorded);
         self.normalized_marker_message(state, action, response)
     }
 
@@ -5795,6 +5808,33 @@ fn verify_integration_execution_items(
     Ok(())
 }
 
+fn promote_post_patch_limit_response(
+    action: NextAction,
+    mut response: ParticipantResponse,
+    successful_patch_recorded: bool,
+) -> ParticipantResponse {
+    if action != NextAction::RequestPrimaryIntegration
+        || response.signal != ParticipantSignal::Blocked
+        || response.blocked_reason.as_deref() != Some("PATCH_LIMIT_REACHED")
+        || !successful_patch_recorded
+    {
+        return response;
+    }
+
+    let evidence = response.body.trim();
+    response.signal = ParticipantSignal::IntegrationReady;
+    response.blocked_reason = None;
+    response.body = if evidence.is_empty() {
+        "The Primary reported that the request-bound patch allowance was exhausted after one successful patch. The clean committed result is being handed to coordinator-owned verification without repeating the patch."
+            .to_owned()
+    } else {
+        format!(
+            "The Primary reported a known post-patch defect after exhausting this request's patch allowance. The clean committed result is being handed to coordinator-owned verification without repeating the patch.\n\nKnown issue reported by Primary:\n\n{evidence}"
+        )
+    };
+    response
+}
+
 #[cfg(test)]
 fn integration_patch_mcp_blocker(
     state: &RunState,
@@ -7828,6 +7868,53 @@ mod retry_safety_tests {
             integration_patch_mcp_blocker(&state, &call, request_hash)
                 .unwrap()
                 .contains("arguments")
+        );
+    }
+
+    #[test]
+    fn successful_patch_limit_blocker_is_handed_to_authoritative_verification() {
+        let response = ParticipantResponse {
+            signal: ParticipantSignal::Blocked,
+            blocked_reason: Some("PATCH_LIMIT_REACHED".into()),
+            body: "A Rust string contains an invalid escape.".into(),
+        };
+
+        let promoted = promote_post_patch_limit_response(
+            NextAction::RequestPrimaryIntegration,
+            response.clone(),
+            true,
+        );
+        assert_eq!(promoted.signal, ParticipantSignal::IntegrationReady);
+        assert_eq!(promoted.blocked_reason, None);
+        assert!(promoted.body.contains("invalid escape"));
+        assert!(promoted.body.contains("without repeating the patch"));
+
+        assert_eq!(
+            promote_post_patch_limit_response(
+                NextAction::RequestPrimaryIntegration,
+                response.clone(),
+                false,
+            ),
+            response
+        );
+        assert_eq!(
+            promote_post_patch_limit_response(
+                NextAction::RequestPrimaryPlan,
+                response.clone(),
+                true,
+            ),
+            response
+        );
+
+        let mut unsafe_reason = response.clone();
+        unsafe_reason.blocked_reason = Some("FORBIDDEN_OPERATION".into());
+        assert_eq!(
+            promote_post_patch_limit_response(
+                NextAction::RequestPrimaryIntegration,
+                unsafe_reason.clone(),
+                true,
+            ),
+            unsafe_reason
         );
     }
 

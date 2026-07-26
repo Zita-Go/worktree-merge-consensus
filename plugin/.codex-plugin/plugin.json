@@ -1,6 +1,6 @@
 {
   "name": "worktree-merge-consensus",
-  "version": "0.3.10",
+  "version": "0.3.11",
   "description": "Keep two original Codex task contexts in the review loop while integrating their committed worktrees.",
   "author": {
     "name": "Worktree Merge Consensus contributors"

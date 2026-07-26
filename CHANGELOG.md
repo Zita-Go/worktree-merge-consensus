@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.11
+
+- Preserve the one-successful-patch safety boundary while allowing a clean,
+  committed integration result to proceed to coordinator-owned verification
+  when the Primary discovers a defect during its final read-only inspection.
+- Carry the Primary's known-defect evidence into the verified integration
+  payload so a failing frozen check can open a new request-bound correction
+  round, and the Reviewer can evaluate any issue not covered by tests.
+- Fail closed unless the exact current integration request has a durable
+  successful-patch record; missing provenance, other blocker reasons, dirty or
+  invalid Git state, and any second patch attempt remain rejected.
+- Add coordinator, prompt-contract, and protocol regressions for the real
+  `BLOCKED:PATCH_LIMIT_REACHED` failure observed during worktree qualification.
+
 ## 0.3.10
 
 - Reframe the project around its core guarantee: Git preserves code, while the

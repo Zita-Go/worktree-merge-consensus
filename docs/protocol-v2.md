@@ -76,6 +76,19 @@ Free-form prose is never treated as machine evidence. It is stored and relayed
 so the other task can reason about it, and its complete content participates in
 progress fingerprints and plan hashes.
 
+After one request-bound controlled patch succeeds and the resulting integration
+commit is clean, a defect found by the Primary's final read-only inspection is
+not a reason to repeat that patch or terminate the whole Run. The Primary hands
+the exact commit to coordinator-owned verification with `INTEGRATION_READY` and
+records the known defect in Markdown. If a participant instead returns the
+precise legacy marker `BLOCKED:PATCH_LIMIT_REACHED`, the coordinator promotes it
+only when SQLite proves that this exact request already has one successful patch
+record; Git identity, command history, ancestry, cleanliness, and the isolated
+verification suite must still pass their ordinary checks. A second attempted
+patch remains forbidden. Failed verification creates a separate request-bound
+correction round and a new integration SHA rather than weakening the one-patch
+limit.
+
 ## Recovery and compatibility
 
 Release 0.2.0 can still read a valid v1 JSON envelope from an already-running

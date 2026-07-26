@@ -350,6 +350,118 @@ async fn task_cwd_is_metadata_and_bound_worktrees_drive_turns() {
 }
 
 #[tokio::test]
+async fn completed_patch_limit_blocker_is_verified_instead_of_terminating() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let mut replies = marker_replies();
+    replies[4] = json!(
+        "<consensus-result>BLOCKED:PATCH_LIMIT_REACHED</consensus-result>\n\nA Rust string contains an invalid escape."
+    );
+    let app = Arc::new(
+        FakeAppServer::deferred(replies, 5, DeferMode::PatchApproval).with_marker_protocol(),
+    );
+    let safety = Arc::new(RecordingSafety::default());
+    let coordinator = Arc::new(Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::clone(&safety),
+        CoordinatorOptions {
+            wait_timeout: Duration::from_secs(2),
+            poll_interval: Duration::from_millis(1),
+            communication_attempts: 1,
+            participant_mcp_executable: participant_mcp_executable(),
+        },
+    ));
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let running = Arc::clone(&coordinator);
+    let drive = tokio::spawn(async move { running.drive(RUN_ID).await });
+    for _ in 0..1_000 {
+        if app.request_count() == 5 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert_eq!(app.request_count(), 5);
+
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    let patch = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n";
+    let patch_hash = canonical_json_hash(&json!({"patch": patch}));
+    let binding = store.active_primary_binding(RUN_ID).unwrap().unwrap();
+    store
+        .record_successful_patch_with_provenance(
+            RUN_ID,
+            &pending.message_hash,
+            &patch_hash,
+            Some(&binding.source_primary_thread_id),
+            Some(&binding.effective_primary_thread_id),
+            Some(binding.generation),
+        )
+        .unwrap();
+    {
+        let mut threads = app.threads.lock().unwrap();
+        let turn = threads
+            .get_mut("primary")
+            .unwrap()
+            .iter_mut()
+            .find(|turn| turn.get("id").and_then(Value::as_str) == Some("turn-5"))
+            .unwrap();
+        let patch_item = turn["items"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| {
+                item.get("type").and_then(Value::as_str) == Some("mcpToolCall")
+                    && item.get("tool").and_then(Value::as_str) == Some("consensus_apply_patch")
+            })
+            .unwrap();
+        patch_item["status"] = json!("completed");
+    }
+    safety
+        .integration_branch_active
+        .store(true, Ordering::SeqCst);
+    app.complete_deferred_turns();
+
+    let result = tokio::time::timeout(Duration::from_secs(2), drive)
+        .await
+        .expect("coordinator should finish")
+        .expect("driver task should not panic")
+        .expect("coordinator should accept the verified result");
+
+    assert_eq!(result.status, RunStatus::Accepted, "{result:#?}");
+    assert_eq!(result.integration_sha.as_deref(), Some(INTEGRATION_SHA));
+    assert!(
+        result
+            .current_integration_payload
+            .as_ref()
+            .is_some_and(|payload| {
+                payload
+                    .pointer("/integration_evidence/summary")
+                    .and_then(Value::as_str)
+                    .is_some_and(|summary| {
+                        summary.contains("invalid escape")
+                            && summary.contains("without repeating the patch")
+                    })
+            })
+    );
+    assert!(
+        store
+            .successful_patch_recorded(RUN_ID, &pending.message_hash)
+            .unwrap()
+    );
+    assert_eq!(
+        app.request_order()
+            .iter()
+            .filter(|request| request.ends_with("REQUEST_PRIMARY_INTEGRATION"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn participant_patch_preflight_orders_resume_inventory_and_turn_start() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
