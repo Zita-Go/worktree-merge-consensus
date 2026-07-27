@@ -441,6 +441,10 @@ done
 
 grep -Fq 'qualify:' .github/workflows/release.yml || fail 'release omits qualification job'
 grep -Fq 'needs: qualify' .github/workflows/release.yml || fail 'release builds bypass qualification'
+grep -Fq 'publish-release:' .github/workflows/release.yml || fail 'release omits stable publication job'
+if grep -Fq -- '--prerelease' .github/workflows/release.yml; then
+  fail 'qualified release workflow still publishes a pre-release'
+fi
 grep -Fq 'bash tests/release.sh "$GITHUB_REF_NAME"' .github/workflows/release.yml ||
   fail 'release does not validate tag and package versions'
 grep -Fq 'bash tests/release-gate.sh' .github/workflows/release.yml ||
