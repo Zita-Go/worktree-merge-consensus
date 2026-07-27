@@ -11,6 +11,8 @@
   fail-closed.
 - Add production-shaped policy and same-Run replay regressions for the quoted
   alternation query observed during 0.3.14 qualification.
+- Record the completed real-Codex acceptance Run that found and corrected a
+  semantic compatibility regression before approving the exact tested SHA.
 
 ## 0.3.14
 

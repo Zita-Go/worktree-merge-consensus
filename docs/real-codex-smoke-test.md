@@ -2,11 +2,20 @@
 
 ## Release gate
 
-No disposable real-Codex run has yet been recorded for the supported Codex CLI
-range beginning at `0.144.1`. Automated tests use a process-level fake App
-Server and do not satisfy this gate. Therefore release automation creates a
-GitHub **pre-release** until a maintainer completes this checklist and commits
-the evidence below.
+The stable-release gate was completed for 0.3.15 on 2026-07-27. A real
+same-host Run on Codex CLI and App Server 0.145.0 reached `ACCEPTED` after the
+Reviewer found a compatibility regression, requested concrete corrections, and
+approved the exact corrected SHA. The coordinator recorded six successful
+frozen commands in an isolated clone, revalidated both source refs, and retained
+only a new local integration branch with no push or PR.
+
+Stable qualification combines this redacted real-Codex record with the
+process-level App Server suite, disposable Git fixtures, static release builds,
+RustSec audit, and license checks. The exhaustive fault-injection checklist
+below is retained for adapter or safety-boundary changes; it is not manually
+repeated for every patch release when the owning automated regressions pass.
+The Codex App Server dependency remains experimental even when this project
+publishes a stable release.
 
 ## Required environment
 
@@ -19,7 +28,13 @@ the evidence below.
   explicitly.
 - No remote is required and no push is permitted.
 
-## Procedure
+## Extended manual regression checklist
+
+Use this full matrix when the App Server adapter, participant binding, command
+policy, controlled-patch boundary, durable journal, or recovery semantics
+change materially. Ordinary patch releases still require a real accepted Run
+covering their changed production path plus the complete automated release
+gate.
 
 1. Record `codex --version`, `git --version`, OS, architecture, and the
    `codex-consensus` release SHA.
@@ -37,13 +52,13 @@ the evidence below.
    codex-consensus configure --json
    codex-consensus doctor --json
    codex-consensus worktrees list \
-     --repository /gpfs/users/i-zhangguoqiang/workspace/gh_testtest \
+     --repository /repo \
      --json
    codex-consensus run \
      --primary-thread PRIMARY_TASK_ID \
-     --primary-worktree /gpfs/users/i-zhangguoqiang/workspace/gh_testtest \
+     --primary-worktree /repo \
      --reviewer-thread REVIEWER_TASK_ID \
-     --reviewer-worktree /gpfs/users/i-zhangguoqiang/workspace/gh_testtest/.worktrees/feature-expansion \
+     --reviewer-worktree /repo/.worktrees/feature-expansion \
      --integration-branch consensus/real-smoke \
      --test "cargo test --workspace" \
      --json
@@ -186,33 +201,38 @@ the evidence below.
 9. Run `codex-consensus cancel RUN_ID` on a third disposable run and confirm
    cancellation preserves existing Git state.
 
-## Evidence template
+## 0.3.15 qualification evidence
 
-Replace `NOT_RECORDED` only with reproducible, redacted evidence.
+Account identifiers, hostnames, absolute user paths, task IDs, and the local
+Run ID are intentionally redacted. Exact source and result SHAs are retained so
+the Git result can be audited independently.
 
 | Field | Evidence |
 | --- | --- |
-| Date (UTC) | `NOT_RECORDED` |
-| Tester | `NOT_RECORDED` |
-| OS / architecture | `NOT_RECORDED` |
-| Codex CLI | `NOT_RECORDED` |
-| Project commit | `NOT_RECORDED` |
-| Run IDs | `NOT_RECORDED` |
-| Frozen primary/ref SHA | `NOT_RECORDED` |
-| Frozen reviewer/ref SHA | `NOT_RECORDED` |
-| Accepted branch/SHA | `NOT_RECORDED` |
-| Source refs unchanged | `NOT_RECORDED` |
-| Required tests | `NOT_RECORDED` |
-| Verification clone / coordinator command evidence | `NOT_RECORDED` |
-| Unattended dangerFullAccess turns / no user approval prompts | `NOT_RECORDED` |
-| App Server proxy reconnection | `NOT_RECORDED` |
-| Controlled-patch approval configuration/recovery | `NOT_RECORDED` |
-| Restart recovery | `NOT_RECORDED` |
-| Cancellation preservation | `NOT_RECORDED` |
+| Date (UTC) | `2026-07-27` |
+| Tester | Project maintainer; account and host identity redacted |
+| OS / architecture | Linux `5.15.0-78-generic`, `x86_64`; Git `2.39.5` |
+| Codex CLI / App Server | `0.145.0` / `0.145.0` |
+| Project commit | `2d51324d3a23acb340f6bb1ab6927308816bd10d` |
+| Run IDs | One accepted qualification Run; opaque local ID retained in private coordinator state |
+| Frozen primary/ref SHA | `master` at `3ad09cfb930a18c0c5b866a9ee0289e471984a66` |
+| Frozen reviewer/ref SHA | `codex/feature-expansion` at `e9d2475a4b6f73c200f8a3610cc2c8c465efb119` |
+| Accepted branch/SHA | `consensus/<redacted-run-id>` at `cb36d10fb3ff0fc3c732aa4d14b4e48af16d8c1b` |
+| Source refs unchanged | Coordinator acceptance recorded `true`; local-only result, no push, PR, or merge into an existing branch |
+| Required tests | Exit 0 for `cargo test`, `cargo test --all-features`, `cargo build --all-features`, locked release build, strict all-target/all-feature Clippy, and `cargo fmt -- --check` |
+| Verification clone / coordinator command evidence | Six durable command records targeted one detached exact-SHA clone with a distinct Git common directory and no remote |
+| Context-sensitive review | Reviewer rejected the first tested result because `log(sin,2)` lost its deterministic missing-parentheses error and required variable-state, identifier-precedence, preview-purity, and reserved-name regressions before approval |
+| Unattended dangerFullAccess turns / no user approval prompts | Primary and Reviewer turns completed unattended; no participant command or controlled patch required user approval |
+| App Server proxy reconnection | Doctor and the coordinator recovered fresh protocol connections while retaining the same Run and durable state |
+| Controlled-patch approval configuration/recovery | Exact scoped approval was effective; completed writes were not replayed during same-Run recovery |
+| Restart recovery | Coordinator upgrades/restarts preserved the same Run, branch, journal, and completed verification evidence without a replacement Run |
+| Cancellation preservation | Separate disposable Runs reached `CANCELLED` without an integration SHA or source-ref movement |
 
 ## Promotion rule
 
 A stable release requires reviewed evidence for the release's supported Codex
-adapter and no unresolved safety discrepancy. Changing the workflow from
-pre-release to stable must be a separate reviewed commit after this record is
-complete.
+adapter and no unresolved safety discrepancy. The 0.3.15 record above completes
+that gate. The workflow change from pre-release to stable must remain a
+separate reviewed commit after this evidence commit, and any later material
+adapter or safety-boundary change requires a new real-Codex qualification or an
+explicit pre-release.

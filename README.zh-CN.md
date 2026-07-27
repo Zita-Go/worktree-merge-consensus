@@ -1,7 +1,7 @@
 # Worktree Merge Consensus
 
 [![CI](https://github.com/Zita-Go/worktree-merge-consensus/actions/workflows/ci.yml/badge.svg)](https://github.com/Zita-Go/worktree-merge-consensus/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/Zita-Go/worktree-merge-consensus?include_prereleases)](https://github.com/Zita-Go/worktree-merge-consensus/releases)
+[![Release](https://img.shields.io/github/v/release/Zita-Go/worktree-merge-consensus)](https://github.com/Zita-Go/worktree-merge-consensus/releases)
 [![License](https://img.shields.io/github/license/Zita-Go/worktree-merge-consensus)](LICENSE)
 ![Codex](https://img.shields.io/badge/Codex-%3E%3D0.144.1-6E56CF)
 
@@ -47,8 +47,8 @@ https://github.com/user-attachments/assets/d9c0341f-83ed-4d12-9be1-42479e4c5d45
 协调器保存隔离测试证据，并确认两个来源引用没有变化。
 
 > [!IMPORTANT]
-> 本项目使用实验性的 Codex App Server 协议，目前以预发布版本提供。参与任务采用无人值守
-> `dangerFullAccess` 运行。只能用于你信任的任务和仓库内容。
+> 本项目使用实验性的 Codex App Server 协议。0.3.15 已通过有记录的真实 Codex 验收，但参与
+> 任务仍以无人值守的 `dangerFullAccess` 运行。只能用于你信任的任务和仓库内容。
 
 ## 上下文如何参与集成
 
@@ -274,9 +274,9 @@ shell 可执行文件。不要运行 `command -v consensus_doctor`；终端诊�
 
 ## 项目状态
 
-在真实 Codex 验收记录包含可复现、已脱敏的证据之前，Release 会保持预发布状态。自动化测试
-使用进程级 fake App Server 和大量一次性 Git fixture，不能替代一次有记录的真实 Codex
-`ACCEPTED` Run。
+本版本（0.3.15）已完成[真实 Codex 验收记录](docs/real-codex-smoke-test.md)：两个已有任务达成共识，
+Reviewer 要求修正语义问题，6 条冻结命令在最终精确 SHA 上通过，两个来源引用保持不变且没有
+push。“稳定发布”描述的是本项目的发布门槛；上游 App Server 依赖仍属于实验性接口。
 
 这是一个社区项目，并非 OpenAI 官方产品。
 

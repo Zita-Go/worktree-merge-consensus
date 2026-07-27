@@ -1,7 +1,7 @@
 # Worktree Merge Consensus
 
 [![CI](https://github.com/Zita-Go/worktree-merge-consensus/actions/workflows/ci.yml/badge.svg)](https://github.com/Zita-Go/worktree-merge-consensus/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/Zita-Go/worktree-merge-consensus?include_prereleases)](https://github.com/Zita-Go/worktree-merge-consensus/releases)
+[![Release](https://img.shields.io/github/v/release/Zita-Go/worktree-merge-consensus)](https://github.com/Zita-Go/worktree-merge-consensus/releases)
 [![License](https://img.shields.io/github/license/Zita-Go/worktree-merge-consensus)](LICENSE)
 ![Codex](https://img.shields.io/badge/Codex-%3E%3D0.144.1-6E56CF)
 
@@ -51,9 +51,10 @@ repository.
 with isolated test evidence and unchanged source refs.
 
 > [!IMPORTANT]
-> This project uses the experimental Codex App Server protocol and currently
-> ships as a pre-release. Participant turns are unattended and use
-> `dangerFullAccess`. Use it only with tasks and repository contents you trust.
+> This project uses the experimental Codex App Server protocol. Release 0.3.15
+> passed a recorded real-Codex qualification, but participant turns remain
+> unattended and use `dangerFullAccess`. Use it only with tasks and repository
+> contents you trust.
 
 ## How context stays in the loop
 
@@ -304,10 +305,12 @@ Common installation diagnostics:
 
 ## Project status
 
-Releases remain pre-release until the real-Codex qualification record is
-completed with reproducible, redacted evidence. Automated tests use a
-process-level fake App Server and extensive disposable Git fixtures; they do not
-replace a recorded real-Codex acceptance Run.
+Release 0.3.15 completed the [real-Codex qualification
+record](docs/real-codex-smoke-test.md): two existing tasks reached consensus,
+the Reviewer required semantic corrections, six frozen commands passed on the
+exact final SHA, and both source refs remained unchanged with no push. Stable
+describes this project's release gate; the upstream App Server dependency is
+still experimental.
 
 This is a community project and is not an official OpenAI product.
 
