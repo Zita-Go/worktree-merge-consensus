@@ -120,6 +120,13 @@ different source-specific item IDs. Canonical content after removing only the
 ID and the embedded request hash must match exactly; any ambiguity remains
 terminal.
 
+Matching 0.3.15 artifacts additionally permit only the exact single-quoted
+Reviewer audit query `git grep -n -E 'PATTERN' TESTED_SHA -- src tests` during
+that historical final-verdict replay. The cwd must be the frozen Reviewer
+worktree and `TESTED_SHA` must be the current verified integration SHA.
+Unquoted alternation, a changed SHA, extra paths or arguments, shell suffixes,
+or any other command shape remains terminal.
+
 ## Controlled patch failures
 
 ### `PATCH_NOT_AUTHORIZED`

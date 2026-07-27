@@ -437,6 +437,25 @@ async fn legacy_reviewer_reasoning_lifecycle_blocker_replays_the_same_completed_
             RUN_ID,
             "reviewer",
             "turn-7",
+            "item/completed",
+            &json!({
+                "id": "reviewer-regex-grep-turn-7",
+                "type": "commandExecution",
+                "command": format!(
+                    "/bin/bash -lc \"git grep -n -E 'pi2|\\\\(2\\\\)x|x=x\\\\+1|preview\\\\(\\\"_|failed ordinary|missing\\\\)' {INTEGRATION_SHA} -- src tests\""
+                ),
+                "cwd": "/repo/reviewer",
+                "status": "failed",
+                "exitCode": 1,
+                "source": "agent"
+            }),
+        )
+        .unwrap();
+    store
+        .record_turn_item_event(
+            RUN_ID,
+            "reviewer",
+            "turn-7",
             "item/started",
             &json!({
                 "id": "stale-reasoning-turn-7",

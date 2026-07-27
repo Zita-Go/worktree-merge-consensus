@@ -137,6 +137,12 @@ history and durable item events contain identical request-bound user messages
 under different item IDs. Only the ID is ignored; canonical content and the
 request hash must match exactly, otherwise recovery remains fail-closed.
 
+Version 0.3.15 additionally recognizes only the exact single-quoted Reviewer
+audit query `git grep -n -E 'PATTERN' TESTED_SHA -- src tests` in that completed
+turn. It must run in the frozen Reviewer worktree and target the current
+verified integration SHA. Unquoted alternation, a changed SHA, extra paths or
+arguments, shell suffixes, and all other command shapes remain fail-closed.
+
 ## Historical read-only command migrations
 
 Version 0.2.14 added the exact read-only query

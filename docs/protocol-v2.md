@@ -357,6 +357,13 @@ are identical after removing their source-specific item IDs. The request hash
 must remain exact; differing content, identity, or malformed marker evidence
 is never normalized.
 
+Release 0.3.15 allows one additional command shape only for this historical
+Reviewer final-verdict replay: `git grep -n -E 'PATTERN' TESTED_SHA -- src
+tests`. The regular expression must be single-quoted, the cwd must be the
+frozen Reviewer worktree, and `TESTED_SHA` must equal the current verified
+integration SHA. Unquoted alternation, a different SHA, extra paths or
+arguments, shell suffixes, and all other near matches remain ineligible.
+
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the
 [legacy v1 protocol](protocol-v1.md).

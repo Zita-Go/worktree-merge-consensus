@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.15
+
+- Recognize the exact Reviewer audit query `git grep -n -E 'PATTERN'
+  TESTED_SHA -- src tests` when its regular expression is single-quoted, its
+  SHA is the current verified integration result, and it runs in the frozen
+  Reviewer worktree.
+- Keep unquoted alternation, changed SHAs, extra paths or arguments, shell
+  suffixes, wrong working directories, and every other command shape
+  fail-closed.
+- Add production-shaped policy and same-Run replay regressions for the quoted
+  alternation query observed during 0.3.14 qualification.
+
 ## 0.3.14
 
 - Normalize duplicate copies of the same request-bound `userMessage` when

@@ -466,6 +466,13 @@ leaves identical canonical JSON and both contain the same valid request hash.
 Different bodies, hashes, or malformed markers remain ambiguous and fail
 closed.
 
+Release 0.3.15 additionally permits only the exact single-quoted Reviewer
+audit query `git grep -n -E 'PATTERN' TESTED_SHA -- src tests` while replaying
+that historical final verdict. The command must run in the frozen Reviewer
+worktree and name the current verified integration SHA. Unquoted alternation,
+a changed SHA, extra paths or arguments, shell suffixes, or any other command
+shape still fails closed.
+
 `doctor` validates a fresh App Server protocol connection and asks the
 coordinator daemon to probe its own connection, but deliberately does not spend
 a model turn. If the managed App Server restarts after the coordinator daemon,

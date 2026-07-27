@@ -111,6 +111,11 @@ merge、stage 或 commit。marker 回复与旧协议 JSON 回复都会在状态�
 userMessage item ID 的情况。只忽略来源特定的 ID；规范内容与请求 hash 必须完全一致，
 否则恢复仍然失败关闭。
 
+0.3.15 还只允许该已完成 turn 中精确的单引号 Reviewer 审计查询
+`git grep -n -E 'PATTERN' TESTED_SHA -- src tests`。它必须在冻结的 Reviewer worktree
+中执行，且 `TESTED_SHA` 必须等于当前已验证的集成 SHA。未加引号的正则分支、不同 SHA、
+额外路径或参数、shell 后缀以及其他命令形态仍然失败关闭。
+
 ## 历史只读命令迁移
 
 0.2.14 增加精确只读查询 `git symbolic-ref --short HEAD`；0.3.1 增加

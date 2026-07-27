@@ -124,7 +124,46 @@ pub(crate) fn is_retry_safe_read_only_reviewer_command(
     cwd: &str,
     command: &str,
 ) -> bool {
+    if state.facts.reviewer_worktree.to_str() != Some(cwd) {
+        return false;
+    }
+    if normalize_app_server_command(command)
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|command| is_retry_safe_reviewer_regex_grep(state, command))
+    {
+        return true;
+    }
     is_retry_safe_read_only_command_at(state, &state.facts.reviewer_worktree, cwd, command)
+}
+
+fn is_retry_safe_reviewer_regex_grep(state: &RunState, command: &str) -> bool {
+    let Some(integration_sha) = state.integration_sha.as_deref() else {
+        return false;
+    };
+    let prefix = "git grep -n -E '";
+    let suffix = format!("' {integration_sha} -- src tests");
+    let Some(pattern) = command
+        .strip_prefix(prefix)
+        .and_then(|command| command.strip_suffix(&suffix))
+    else {
+        return false;
+    };
+    if pattern.is_empty()
+        || pattern.len() > 4_096
+        || !pattern.contains('|')
+        || pattern.contains(['\'', '\n', '\r', '\0'])
+    {
+        return false;
+    }
+    let Ok(tokens) = shell_words::split(command) else {
+        return false;
+    };
+    matches!(
+        tokens.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
+        ["git", "grep", "-n", "-E", parsed_pattern, parsed_sha, "--", "src", "tests"]
+            if *parsed_pattern == pattern && *parsed_sha == integration_sha
+    )
 }
 
 fn is_retry_safe_read_only_command_at(
@@ -746,7 +785,8 @@ mod tests {
 
     #[test]
     fn reviewer_replay_accepts_observed_read_only_git_queries_only_in_reviewer_worktree() {
-        let state = integration_state();
+        let mut state = integration_state();
+        state.integration_sha = Some("cccccccccccccccccccccccccccccccccccccccc".into());
         for command in [
             "/bin/bash -lc 'git show cccccccccccccccccccccccccccccccccccccccc:src/lib.rs'",
             "git grep -n -F needle cccccccccccccccccccccccccccccccccccccccc -- src tests",
@@ -764,6 +804,34 @@ mod tests {
                 command
             ));
         }
+        let regex_query = format!(
+            "/bin/bash -lc \"git grep -n -E 'pi2|\\\\(2\\\\)x|x=x\\\\+1|failed ordinary' {} -- src tests\"",
+            state.integration_sha.as_deref().unwrap()
+        );
+        assert!(is_retry_safe_read_only_reviewer_command(
+            &state,
+            "/repo/reviewer",
+            &regex_query
+        ));
+        for command in [
+            regex_query.replace("'pi2|", "pi2|"),
+            regex_query.replace(" -- src tests", " -- src tests docs"),
+            regex_query.replace(
+                state.integration_sha.as_deref().unwrap(),
+                "dddddddddddddddddddddddddddddddddddddddd",
+            ),
+            regex_query.replace("failed ordinary'", "failed ordinary' && git status"),
+        ] {
+            assert!(
+                !is_retry_safe_read_only_reviewer_command(&state, "/repo/reviewer", &command),
+                "{command} must fail closed"
+            );
+        }
+        assert!(!is_retry_safe_read_only_reviewer_command(
+            &state,
+            "/repo/primary",
+            &regex_query
+        ));
         for command in [
             "git checkout main",
             "git clean -fd",
