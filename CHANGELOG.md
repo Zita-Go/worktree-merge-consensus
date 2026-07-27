@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.14
+
+- Normalize duplicate copies of the same request-bound `userMessage` when
+  App Server history and durable item events assign different item IDs but
+  their canonical content is otherwise identical.
+- Keep request binding fail-closed: copies with different bodies or request
+  hashes, malformed markers, duplicate markers after normalization, and every
+  ambiguous history shape remain rejected.
+- Add production-shaped same-Run recovery coverage for the completed Reviewer
+  verdict observed during 0.3.13 qualification, without sending another model
+  turn or repeating tests or Git writes.
+
 ## 0.3.13
 
 - Treat a lone `reasoning` item left at `STARTED` as non-side-effectful only

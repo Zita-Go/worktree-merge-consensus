@@ -114,6 +114,12 @@ response without sending another task turn. It never repeats tests or Git
 writes. Let `consensus_resume` make this determination; do not edit SQLite or
 replay the verdict manually.
 
+Matching 0.3.14 artifacts also tolerate the same exact request-bound
+`userMessage` appearing in App Server history and durable item events under
+different source-specific item IDs. Canonical content after removing only the
+ID and the embedded request hash must match exactly; any ambiguity remains
+terminal.
+
 ## Controlled patch failures
 
 ### `PATCH_NOT_AUTHORIZED`

@@ -459,6 +459,13 @@ completed read-only Git trace in the Reviewer worktree. The existing completed
 response is replayed locally; no additional Reviewer turn, test command, or Git
 write is issued.
 
+Release 0.3.14 also recognizes that the durable item stream and canonical App
+Server history can assign different item IDs to the same request-bound
+`userMessage`. The copies are folded only when removing the source-specific ID
+leaves identical canonical JSON and both contain the same valid request hash.
+Different bodies, hashes, or malformed markers remain ambiguous and fail
+closed.
+
 `doctor` validates a fresh App Server protocol connection and asks the
 coordinator daemon to probe its own connection, but deliberately does not spend
 a model turn. If the managed App Server restarts after the coordinator daemon,

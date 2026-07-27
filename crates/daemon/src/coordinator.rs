@@ -5792,6 +5792,7 @@ fn merge_completed_turn_evidence(
     }
     let mut ordered = Vec::new();
     let mut item_hashes = HashMap::new();
+    let mut delivery_item_hashes = HashMap::new();
     let mut append = |item: &Value| -> Result<(), CoordinatorError> {
         let item_id = item
             .get("id")
@@ -5816,6 +5817,29 @@ fn merge_completed_turn_evidence(
             return Ok(());
         }
         item_hashes.insert(item_id.to_owned(), item_hash);
+        if let Some(request_hash) = user_message_delivery_request_hash(item) {
+            let mut normalized = item.clone();
+            let normalized_object = normalized.as_object_mut().ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "delivery userMessage is not an object",
+                )
+            })?;
+            normalized_object.remove("id");
+            let normalized_hash = canonical_json_hash(&normalized);
+            if let Some(existing_hash) = delivery_item_hashes.get(&request_hash) {
+                if existing_hash != &normalized_hash {
+                    return Err(CoordinatorError::operational(
+                        "HISTORY_UNAVAILABLE",
+                        format!(
+                            "delivery request {request_hash} has conflicting canonical userMessage copies"
+                        ),
+                    ));
+                }
+                return Ok(());
+            }
+            delivery_item_hashes.insert(request_hash, normalized_hash);
+        }
         ordered.push(item.clone());
         Ok(())
     };
@@ -6646,20 +6670,34 @@ fn turn_contains_request_hash(turn: &Value, request_hash: &str) -> bool {
 }
 
 fn turn_delivery_request_hash(turn: &Value) -> Option<String> {
-    let texts = turn
+    let delivery_hashes = turn
         .get("items")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter(|item| item.get("type").and_then(Value::as_str) == Some("userMessage"))
-        .flat_map(|item| {
-            item.get("content")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-        })
-        .filter_map(|input| input.get("text").and_then(Value::as_str))
+        .filter_map(user_message_delivery_request_hash)
         .collect::<Vec<_>>();
+    let heading_count = turn
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("userMessage"))
+        .flat_map(user_message_texts)
+        .map(|text| text.matches(DELIVERY_IDENTITY_HEADING).count())
+        .sum::<usize>();
+    if heading_count != 1 || delivery_hashes.len() != 1 {
+        return None;
+    }
+    delivery_hashes.into_iter().next()
+}
+
+fn user_message_delivery_request_hash(item: &Value) -> Option<String> {
+    if item.get("type").and_then(Value::as_str) != Some("userMessage") {
+        return None;
+    }
+    let texts = user_message_texts(item).collect::<Vec<_>>();
     if texts
         .iter()
         .map(|text| text.matches(DELIVERY_IDENTITY_HEADING).count())
@@ -6668,10 +6706,19 @@ fn turn_delivery_request_hash(turn: &Value) -> Option<String> {
     {
         return None;
     }
-    let text = texts
+    parse_delivery_request_hash(
+        texts
+            .into_iter()
+            .find(|text| text.contains(DELIVERY_IDENTITY_HEADING))?,
+    )
+}
+
+fn user_message_texts(item: &Value) -> impl Iterator<Item = &str> {
+    item.get("content")
+        .and_then(Value::as_array)
         .into_iter()
-        .find(|text| text.contains(DELIVERY_IDENTITY_HEADING))?;
-    parse_delivery_request_hash(text)
+        .flatten()
+        .filter_map(|input| input.get("text").and_then(Value::as_str))
 }
 
 fn parse_delivery_request_hash(text: &str) -> Option<String> {
@@ -8608,6 +8655,81 @@ mod retry_safety_tests {
             merge_completed_turn_evidence(&persisted, &event, vec![item]).expect("exact repeats");
 
         assert_eq!(merged["items"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn completed_turn_evidence_deduplicates_request_bound_user_messages_with_distinct_ids() {
+        let text = structured_delivery_marker("same-request");
+        let event_item = json!({
+            "id": "event-user",
+            "type": "userMessage",
+            "content": [{"type": "inputText", "text": text}]
+        });
+        let persisted_item = json!({
+            "id": "persisted-user",
+            "type": "userMessage",
+            "content": [{"type": "inputText", "text": structured_delivery_marker("same-request")}]
+        });
+        let persisted = json!({"id": "turn-1", "status": "completed", "items": [persisted_item]});
+        let event = json!({"id": "turn-1", "status": "completed", "items": []});
+
+        let merged = merge_completed_turn_evidence(&persisted, &event, vec![event_item])
+            .expect("the same request-bound message may have source-specific item ids");
+
+        assert_eq!(merged["items"].as_array().unwrap().len(), 1);
+        assert!(turn_contains_request_hash(&merged, "same-request"));
+    }
+
+    #[test]
+    fn completed_turn_evidence_rejects_conflicting_copies_of_one_delivery_request() {
+        let event_item = json!({
+            "id": "event-user",
+            "type": "userMessage",
+            "content": [{"type": "inputText", "text": structured_delivery_marker("same-request")}]
+        });
+        let persisted_item = json!({
+            "id": "persisted-user",
+            "type": "userMessage",
+            "content": [{"type": "inputText", "text": format!(
+                "Different coordinator prompt.\n\n{}",
+                structured_delivery_marker("same-request")
+            )}]
+        });
+        let persisted = json!({"id": "turn-1", "status": "completed", "items": [persisted_item]});
+        let event = json!({"id": "turn-1", "status": "completed", "items": []});
+
+        let error = merge_completed_turn_evidence(&persisted, &event, vec![event_item])
+            .expect_err("different message bodies must remain ambiguous");
+
+        assert_eq!(error.code(), "HISTORY_UNAVAILABLE");
+        assert!(
+            error
+                .to_string()
+                .contains("conflicting canonical userMessage copies")
+        );
+    }
+
+    #[test]
+    fn completed_turn_evidence_keeps_different_delivery_requests_ambiguous() {
+        let event_item = json!({
+            "id": "event-user",
+            "type": "userMessage",
+            "content": [{"type": "inputText", "text": structured_delivery_marker("event-request")}]
+        });
+        let persisted_item = json!({
+            "id": "persisted-user",
+            "type": "userMessage",
+            "content": [{"type": "inputText", "text": structured_delivery_marker("persisted-request")}]
+        });
+        let persisted = json!({"id": "turn-1", "status": "completed", "items": [persisted_item]});
+        let event = json!({"id": "turn-1", "status": "completed", "items": []});
+
+        let merged = merge_completed_turn_evidence(&persisted, &event, vec![event_item])
+            .expect("different request identities are retained for the binding check");
+
+        assert_eq!(merged["items"].as_array().unwrap().len(), 2);
+        assert!(!turn_contains_request_hash(&merged, "event-request"));
+        assert!(!turn_contains_request_hash(&merged, "persisted-request"));
     }
 
     #[test]

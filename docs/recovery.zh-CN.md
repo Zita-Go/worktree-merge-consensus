@@ -107,6 +107,10 @@ merge、stage 或 commit。
 随后直接消费这条已经完成的回复；不会再次发送 Reviewer turn，也不会重复验证、补丁、建分支、
 merge、stage 或 commit。marker 回复与旧协议 JSON 回复都会在状态推进前完成验证。
 
+0.3.14 还处理同一个已完成 turn 在 App Server 历史与持久化 item 事件中使用不同
+userMessage item ID 的情况。只忽略来源特定的 ID；规范内容与请求 hash 必须完全一致，
+否则恢复仍然失败关闭。
+
 ## 历史只读命令迁移
 
 0.2.14 增加精确只读查询 `git symbolic-ref --short HEAD`；0.3.1 增加

@@ -409,6 +409,29 @@ async fn legacy_reviewer_reasoning_lifecycle_blocker_replays_the_same_completed_
     assert_eq!(pending.turn_id.as_deref(), Some("turn-7"));
 
     app.complete_deferred_turns();
+    let detail = app.read_thread("reviewer").await.unwrap();
+    let mut streamed_user_message = detail
+        .turns
+        .iter()
+        .find(|turn| turn.get("id").and_then(Value::as_str) == Some("turn-7"))
+        .and_then(|turn| turn.get("items").and_then(Value::as_array))
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("type").and_then(Value::as_str) == Some("userMessage"))
+        })
+        .cloned()
+        .unwrap();
+    streamed_user_message["id"] = json!("event-user-turn-7");
+    store
+        .record_turn_item_event(
+            RUN_ID,
+            "reviewer",
+            "turn-7",
+            "item/completed",
+            &streamed_user_message,
+        )
+        .unwrap();
     store
         .record_turn_item_event(
             RUN_ID,

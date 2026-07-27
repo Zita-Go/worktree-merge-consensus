@@ -351,6 +351,12 @@ completed read-only Git trace. It then applies the already completed marker or
 protocol-JSON response without starting another task turn or repeating any
 test or Git operation.
 
+Release 0.3.14 deduplicates a request-bound `userMessage` copied from both the
+durable item stream and App Server history only when the two canonical items
+are identical after removing their source-specific item IDs. The request hash
+must remain exact; differing content, identity, or malformed marker evidence
+is never normalized.
+
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the
 [legacy v1 protocol](protocol-v1.md).

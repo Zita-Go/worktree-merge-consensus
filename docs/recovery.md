@@ -132,6 +132,11 @@ verification, patching, branch creation, merge, staging, or commit. Both the
 marker response and the legacy protocol JSON response are validated before the
 state is advanced.
 
+Version 0.3.14 additionally handles the same completed turn when App Server
+history and durable item events contain identical request-bound user messages
+under different item IDs. Only the ID is ignored; canonical content and the
+request hash must match exactly, otherwise recovery remains fail-closed.
+
 ## Historical read-only command migrations
 
 Version 0.2.14 added the exact read-only query
