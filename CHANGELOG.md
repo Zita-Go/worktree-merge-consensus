@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.13
+
+- Treat a lone `reasoning` item left at `STARTED` as non-side-effectful only
+  after the same App Server turn has a durable successful `turn/completed`
+  event. Commands, MCP calls, file changes, unknown types, other lifecycle
+  states, and unsuccessful turns remain fail-closed.
+- Recover the exact 0.3.12 Reviewer final-verdict blocker on the same Run by
+  revalidating the frozen refs, tested integration SHA, pending request,
+  canonical task history, and Reviewer read-only command trace, then replaying
+  the already completed response without sending another model turn.
+- Accept both marker and legacy protocol-JSON Reviewer responses during that
+  replay, while preserving the original local branch, exact six-command test
+  evidence, source refs, and no-push boundary.
+- Add production-shaped lifecycle, negative side-effect, read-only Git, live
+  completion, and persisted same-Run replay regressions.
+
 ## 0.3.12
 
 - Distinguish App Server `agentMessage` progress items with

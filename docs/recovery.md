@@ -47,6 +47,7 @@ Recovery never silently:
 | `EXECUTION_TOOL_UNAVAILABLE` | After restoring the task's tools, a first integration request may be retried only when no target branch or write exists. |
 | `CONTROLLED_PATCH_TOOL_UNAVAILABLE` | Use the exact version-gated path below; near-matches remain terminal. |
 | `FORBIDDEN_OPERATION` | Some historical exact read-only command misclassifications have narrow same-Run migrations. Inspect the version-specific section below. |
+| `INCOMPATIBLE_STATE` | Usually terminal. Version 0.3.13 recognizes only the exact stale-Reviewer-reasoning lifecycle case described below. |
 | `APPROVAL_CONFIGURATION_REQUIRED` | Plugin setup normally writes the one scoped key automatically. If managed policy blocks it, run `codex-consensus configure` as the same Codex account and `CODEX_HOME`, then retry the original operation. |
 | `WAITING_THREAD` | Finish or interrupt the unrelated active task turn, then resume. |
 | `SOURCE_DRIFT` | Inspect the source changes and start a new Run from newly confirmed commits. Do not resume with different source identity. |
@@ -111,6 +112,25 @@ read-only `INTEGRATION_READY` confirmation. Missing, malformed, or unknown
 message phases remain terminal for audit purposes. A patch or command that
 actually occurs after `final_answer`, a second patch, partial history, or any
 repository drift remains non-recoverable.
+
+### Historical Reviewer reasoning-lifecycle migration
+
+Version 0.3.13 can resume the same Run after the exact 0.3.12 final-verdict
+diagnostic `turn <id> completed before all item lifecycle events were
+persisted` only when the pending action is the bound Reviewer's
+`REQUEST_REVIEWER_RESULT_VERDICT`. A durable successful `turn/completed` event
+must exist, and every incomplete item must be exactly `type: reasoning` with
+state `STARTED`. An incomplete command, MCP call, file change, unknown item,
+other lifecycle state, or unsuccessful turn remains terminal.
+
+The coordinator revalidates the unchanged frozen refs, clean tested
+integration SHA, complete successful frozen-test evidence, request marker,
+Reviewer identity, canonical final response, and the completed read-only Git
+trace in the Reviewer's frozen worktree. It then consumes the already
+completed response; it does not send another Reviewer turn and does not repeat
+verification, patching, branch creation, merge, staging, or commit. Both the
+marker response and the legacy protocol JSON response are validated before the
+state is advanced.
 
 ## Historical read-only command migrations
 

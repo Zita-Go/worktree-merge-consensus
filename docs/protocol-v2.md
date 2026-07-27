@@ -338,6 +338,19 @@ ancestry, and frozen refs before archiving the response attempt and requesting
 one read-only confirmation. A genuine command or patch after the final answer
 remains terminal, and no write is repeated.
 
+Release 0.3.13 permits one evidence normalization only after a durable
+successful `turn/completed`: an earlier `reasoning` item that remains at
+`STARTED` is non-side-effectful and may be excluded from the canonical merged
+item list. The rule does not apply to commands, MCP calls, file changes,
+unknown types, other lifecycle states, or unsuccessful turns.
+
+For the exact historical Reviewer final-verdict blocker, explicit same-Run
+resume revalidates the pending request, frozen identities, tested integration
+SHA, complete successful tests, canonical response, and the Reviewer's
+completed read-only Git trace. It then applies the already completed marker or
+protocol-JSON response without starting another task turn or repeating any
+test or Git operation.
+
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the
 [legacy v1 protocol](protocol-v1.md).

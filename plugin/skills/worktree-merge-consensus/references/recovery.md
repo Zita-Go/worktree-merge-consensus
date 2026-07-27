@@ -98,6 +98,22 @@ archives only that response attempt and requests a read-only confirmation. A
 real post-final command or patch, missing or unknown phase, second patch,
 partial history, or drift remains terminal.
 
+### `INCOMPATIBLE_STATE` after the Reviewer final verdict
+
+Matching 0.3.13 artifacts may recover only the exact 0.3.12 diagnostic
+`turn <id> completed before all item lifecycle events were persisted` for the
+bound `REQUEST_REVIEWER_RESULT_VERDICT`. A successful durable turn completion
+must exist, and every incomplete lifecycle row must be exactly a `reasoning`
+item left at `STARTED`. Any incomplete command, MCP call, file change, unknown
+item, other lifecycle state, or unsuccessful turn remains terminal.
+
+After revalidating the frozen refs, clean tested SHA, complete successful test
+evidence, request identity, Reviewer identity, final response, and completed
+read-only Git trace in the Reviewer worktree, the daemon consumes the existing
+response without sending another task turn. It never repeats tests or Git
+writes. Let `consensus_resume` make this determination; do not edit SQLite or
+replay the verdict manually.
+
 ## Controlled patch failures
 
 ### `PATCH_NOT_AUTHORIZED`

@@ -42,6 +42,7 @@ ID、worktree 路径、来源引用与 SHA、授权目标分支和已有集成 S
 | `EXECUTION_TOOL_UNAVAILABLE` | 恢复任务工具后，只有目标分支和写入都不存在时才会重试首次集成请求。 |
 | `CONTROLLED_PATCH_TOOL_UNAVAILABLE` | 使用下文精确版本边界；任何近似状态仍是终态。 |
 | `FORBIDDEN_OPERATION` | 某些历史精确只读命令误判具有窄范围同 Run 迁移；见下文版本说明。 |
+| `INCOMPATIBLE_STATE` | 通常是终态。0.3.13 只识别下文精确的 Reviewer reasoning 生命周期遗留情况。 |
 | `APPROVAL_CONFIGURATION_REQUIRED` | 插件通常会自动写入唯一的作用域键；若被托管策略阻止，使用相同 Codex 账号和 `CODEX_HOME` 运行 `codex-consensus configure`，然后重试原操作。 |
 | `WAITING_THREAD` | 完成或中断无关的活动任务 turn，再恢复。 |
 | `SOURCE_DRIFT` | 检查来源变化，使用重新确认的提交新建 Run；不要用不同来源身份恢复。 |
@@ -91,6 +92,20 @@ merge、stage 或 commit。
 恢复只归档这次已完成回复，并请求一次只读 `INTEGRATION_READY` 确认。缺失、格式错误或未知的
 消息 phase 在审计中仍被视为终态。真正发生在 `final_answer` 之后的补丁或命令、第二次补丁、
 不完整历史或任何仓库漂移都不能恢复。
+
+### 历史 Reviewer reasoning 生命周期迁移
+
+0.3.13 只能在精确的 0.3.12 最终裁决错误
+`turn <id> completed before all item lifecycle events were persisted` 下恢复同一个 Run，且 pending
+动作必须是绑定 Reviewer 的 `REQUEST_REVIEWER_RESULT_VERDICT`。必须存在持久化且成功的
+`turn/completed` 事件，并且所有未完成 item 都必须精确为 `type: reasoning`、状态为
+`STARTED`。未完成的命令、MCP 调用、文件变更、未知类型、其他生命周期状态或未成功 turn
+仍然失败关闭。
+
+协调器会重新验证未变化的冻结引用、干净且已测试的集成 SHA、完整成功的冻结测试证据、请求
+标记、Reviewer 身份、规范最终回复，以及 Reviewer 冻结 worktree 中已完成的只读 Git 轨迹。
+随后直接消费这条已经完成的回复；不会再次发送 Reviewer turn，也不会重复验证、补丁、建分支、
+merge、stage 或 commit。marker 回复与旧协议 JSON 回复都会在状态推进前完成验证。
 
 ## 历史只读命令迁移
 

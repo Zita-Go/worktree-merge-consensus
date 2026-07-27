@@ -444,6 +444,21 @@ the bound participant identity. It archives only the completed response and
 asks for a read-only confirmation; no branch, merge, patch, stage, or commit is
 repeated.
 
+Release 0.3.13 recognizes one App Server lifecycle asymmetry observed during
+the bound Reviewer final verdict: a successful `turn/completed` event may be
+durable while one earlier `reasoning` item remains at `STARTED`. That exact
+non-side-effectful item is omitted from merged event evidence. Every incomplete
+command, MCP call, file change, unknown item, other lifecycle state, and
+unsuccessful turn still fails closed.
+
+Explicit same-Run recovery is limited to the matching 0.3.12
+`REQUEST_REVIEWER_RESULT_VERDICT` diagnostic and requires the unchanged frozen
+refs, clean tested integration SHA, complete successful test evidence, exact
+pending request and Reviewer identities, canonical final response, and a
+completed read-only Git trace in the Reviewer worktree. The existing completed
+response is replayed locally; no additional Reviewer turn, test command, or Git
+write is issued.
+
 `doctor` validates a fresh App Server protocol connection and asks the
 coordinator daemon to probe its own connection, but deliberately does not spend
 a model turn. If the managed App Server restarts after the coordinator daemon,
