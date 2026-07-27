@@ -2507,13 +2507,14 @@ where
                 format!("Reviewer lifecycle turn cannot be replayed: {blocker}"),
             ));
         }
-        parse_participant_response(
+        let mut replay_state = state.clone();
+        replay_state.retry_blocked_reviewer_reasoning_lifecycle_compatibility()?;
+        let message = self.normalize_model_response(
+            &replay_state,
+            action,
             final_agent_text(&turn)?.trim(),
-            allowed_participant_signals(NextAction::RequestReviewerResultVerdict),
-        )
-        .map_err(|error| {
-            CoordinatorError::operational("HISTORY_UNAVAILABLE", error.to_string())
-        })?;
+        )?;
+        replay_state.apply_message(message)?;
 
         Ok(RetryableCompletedTurn {
             message_hash: pending.message_hash,

@@ -193,7 +193,7 @@ fn stale_reviewer_reasoning_lifecycle_blocker_restores_exact_result_review() {
         operation: None,
         action: NextAction::RequestReviewerResultVerdict,
         role: Some(Role::Reviewer),
-        thread_id: Some("reviewer".into()),
+        thread_id: Some("reviewer-thread".into()),
         source_thread_id: None,
         effective_thread_id: None,
         participant_binding_generation: None,
