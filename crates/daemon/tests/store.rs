@@ -812,6 +812,113 @@ fn completed_app_server_item_events_survive_reopen_as_turn_evidence() {
 }
 
 #[test]
+fn successful_turn_evidence_ignores_only_stale_started_reasoning() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    store
+        .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+        .unwrap();
+    store
+        .record_pending_send(RUN_ID, "REVIEWER", "RESULT_REVIEW", 1, "request-hash")
+        .unwrap();
+    store
+        .record_turn_started(RUN_ID, "request-hash", "reviewer-thread", "turn-8")
+        .unwrap();
+    store
+        .record_turn_item_event(
+            RUN_ID,
+            "reviewer-thread",
+            "turn-8",
+            "item/started",
+            &json!({
+                "id": "reasoning-stale",
+                "type": "reasoning",
+                "summary": []
+            }),
+        )
+        .unwrap();
+    let final_answer = json!({
+        "id": "assistant-final",
+        "type": "agentMessage",
+        "phase": "final_answer",
+        "text": "<consensus-result>APPROVED</consensus-result>"
+    });
+    store
+        .record_turn_item_event(
+            RUN_ID,
+            "reviewer-thread",
+            "turn-8",
+            "item/completed",
+            &final_answer,
+        )
+        .unwrap();
+    store
+        .record_turn_completed_event(
+            RUN_ID,
+            "reviewer-thread",
+            "turn-8",
+            &json!({"id": "turn-8", "status": "completed", "items": []}),
+        )
+        .unwrap();
+
+    let evidence = store
+        .turn_event_evidence(RUN_ID, "reviewer-thread", "turn-8")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(evidence.completed_items, vec![final_answer]);
+    assert_eq!(
+        evidence.ignored_started_reasoning_item_ids,
+        vec!["reasoning-stale"]
+    );
+}
+
+#[test]
+fn successful_turn_evidence_rejects_every_other_incomplete_item_type() {
+    for item_type in [
+        "commandExecution",
+        "mcpToolCall",
+        "fileChange",
+        "futureSideEffect",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+        store
+            .insert_run(&fixture_run(RUN_ID, "/repo/.git"))
+            .unwrap();
+        store
+            .record_pending_send(RUN_ID, "REVIEWER", "RESULT_REVIEW", 1, "request-hash")
+            .unwrap();
+        store
+            .record_turn_started(RUN_ID, "request-hash", "reviewer-thread", "turn-8")
+            .unwrap();
+        store
+            .record_turn_item_event(
+                RUN_ID,
+                "reviewer-thread",
+                "turn-8",
+                "item/started",
+                &json!({"id": "incomplete-item", "type": item_type}),
+            )
+            .unwrap();
+        store
+            .record_turn_completed_event(
+                RUN_ID,
+                "reviewer-thread",
+                "turn-8",
+                &json!({"id": "turn-8", "status": "completed", "items": []}),
+            )
+            .unwrap();
+
+        let error = store
+            .turn_event_evidence(RUN_ID, "reviewer-thread", "turn-8")
+            .unwrap_err();
+
+        assert_eq!(error.code(), "INCOMPATIBLE_STATE", "type={item_type}");
+    }
+}
+
+#[test]
 fn one_successful_controlled_patch_is_persisted_per_request() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");

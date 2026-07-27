@@ -116,7 +116,24 @@ pub(crate) fn is_retry_safe_read_only_integration_command(
     cwd: &str,
     command: &str,
 ) -> bool {
-    if state.facts.primary_worktree.to_str() != Some(cwd) {
+    is_retry_safe_read_only_command_at(state, &state.facts.primary_worktree, cwd, command)
+}
+
+pub(crate) fn is_retry_safe_read_only_reviewer_command(
+    state: &RunState,
+    cwd: &str,
+    command: &str,
+) -> bool {
+    is_retry_safe_read_only_command_at(state, &state.facts.reviewer_worktree, cwd, command)
+}
+
+fn is_retry_safe_read_only_command_at(
+    state: &RunState,
+    expected_cwd: &Path,
+    cwd: &str,
+    command: &str,
+) -> bool {
+    if expected_cwd.to_str() != Some(cwd) {
         return false;
     }
     let Some(command) = normalize_app_server_command(command) else {
@@ -324,7 +341,8 @@ fn is_allowed_read_only_git_invocation(
     arguments: &[&str],
 ) -> bool {
     match subcommand {
-        "status" | "diff" | "show" | "log" | "rev-parse" | "merge-base" | "ls-files" => {
+        "status" | "diff" | "show" | "log" | "rev-parse" | "merge-base" | "ls-files"
+        | "grep" => {
             safe_read_only_git_arguments(arguments)
         }
         "branch" => safe_branch_arguments(state, arguments),
@@ -385,7 +403,8 @@ mod tests {
 
     use super::{
         ApprovalDecision, decide_command_approval, is_retry_safe_read_only_integration_command,
-        normalize_app_server_command, validate_test_command,
+        is_retry_safe_read_only_reviewer_command, normalize_app_server_command,
+        validate_test_command,
     };
 
     const PRIMARY_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -723,6 +742,39 @@ mod tests {
                 !is_retry_safe_read_only_integration_command(&state, "/repo/primary", command),
                 "{command} must not be recovery-safe"
             );
+        }
+    }
+
+    #[test]
+    fn reviewer_replay_accepts_observed_read_only_git_queries_only_in_reviewer_worktree() {
+        let state = integration_state();
+        for command in [
+            "/bin/bash -lc 'git show cccccccccccccccccccccccccccccccccccccccc:src/lib.rs'",
+            "git grep -n -F needle cccccccccccccccccccccccccccccccccccccccc -- src tests",
+            "git diff --stat aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa cccccccccccccccccccccccccccccccccccccccc",
+            "git rev-parse cccccccccccccccccccccccccccccccccccccccc^{commit}",
+        ] {
+            assert!(is_retry_safe_read_only_reviewer_command(
+                &state,
+                "/repo/reviewer",
+                command
+            ));
+            assert!(!is_retry_safe_read_only_reviewer_command(
+                &state,
+                "/repo/primary",
+                command
+            ));
+        }
+        for command in [
+            "git checkout main",
+            "git clean -fd",
+            "git show --output=result.txt HEAD",
+        ] {
+            assert!(!is_retry_safe_read_only_reviewer_command(
+                &state,
+                "/repo/reviewer",
+                command
+            ));
         }
     }
 

@@ -96,6 +96,7 @@ pub enum VerificationCommandClaim {
 pub struct TurnEventEvidence {
     pub completed_turn: Value,
     pub completed_items: Vec<Value>,
+    pub ignored_started_reasoning_item_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1414,19 +1415,35 @@ impl SqliteRunStore {
         let Some(completed_turn_json) = completed_turn_json else {
             return Ok(None);
         };
+        let completed_turn: Value = serde_json::from_str(&completed_turn_json)?;
+        let turn_completed_successfully =
+            completed_turn.get("status").and_then(Value::as_str) == Some("completed");
         let mut statement = connection.prepare(
-            "SELECT lifecycle_state, item_json
+            "SELECT item_id, item_type, lifecycle_state, item_json
              FROM turn_event_items
              WHERE run_id = ?1 AND thread_id = ?2 AND turn_id = ?3
              ORDER BY id ASC",
         )?;
         let rows = statement.query_map(params![run_id, thread_id, turn_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
         })?;
         let mut completed_items = Vec::new();
+        let mut ignored_started_reasoning_item_ids = Vec::new();
         for row in rows {
-            let (lifecycle_state, item_json) = row?;
+            let (item_id, item_type, lifecycle_state, item_json) = row?;
             if lifecycle_state != "COMPLETED" {
+                if turn_completed_successfully
+                    && lifecycle_state == "STARTED"
+                    && item_type == "reasoning"
+                {
+                    ignored_started_reasoning_item_ids.push(item_id);
+                    continue;
+                }
                 return Err(StoreError::IncompatibleState(format!(
                     "turn {turn_id} completed before all item lifecycle events were persisted"
                 )));
@@ -1434,8 +1451,9 @@ impl SqliteRunStore {
             completed_items.push(serde_json::from_str(&item_json)?);
         }
         Ok(Some(TurnEventEvidence {
-            completed_turn: serde_json::from_str(&completed_turn_json)?,
+            completed_turn,
             completed_items,
+            ignored_started_reasoning_item_ids,
         }))
     }
 
@@ -1856,6 +1874,180 @@ impl SqliteRunStore {
             observed_status,
         )?;
         update_run_row(&transaction, &run_id, resumed_state)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn reactivate_blocked_run_with_completed_turn_replay(
+        &self,
+        blocked_state: &RunState,
+        resumed_state: &RunState,
+        message_hash: &str,
+        thread_id: &str,
+        turn_id: &str,
+        observed_status: &str,
+    ) -> Result<(), StoreError> {
+        let mut expected_resumed = blocked_state.clone();
+        expected_resumed
+            .retry_blocked_reviewer_reasoning_lifecycle_compatibility()
+            .map_err(|error| StoreError::TerminalTurnNotRetryable(error.to_string()))?;
+        if expected_resumed != *resumed_state || observed_status != "completed" {
+            return Err(StoreError::TerminalTurnNotRetryable(
+                "completed-turn replay state or status is invalid".into(),
+            ));
+        }
+
+        let run_id = blocked_state.facts.run_id.to_string();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let current_json = transaction
+            .query_row(
+                "SELECT state_json FROM runs WHERE run_id = ?1",
+                [&run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::RunNotFound(run_id.clone()))?;
+        let current_state = deserialize_state(&current_json)?;
+        if current_state != *blocked_state {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "run {run_id} changed while preparing completed-turn replay"
+            )));
+        }
+
+        let pending = transaction
+            .query_row(
+                "SELECT id, role, phase, round, delivery_state, thread_id, turn_id,
+                        participant_binding_generation
+                 FROM turns
+                 WHERE run_id = ?1 AND message_hash = ?2
+                   AND delivery_state IN ('PENDING', 'SENT')
+                 ORDER BY id DESC LIMIT 1",
+                params![run_id, message_hash],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, u32>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<u32>>(7)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::TerminalTurnNotRetryable(format!(
+                    "run {run_id} has no exact pending completed turn to replay"
+                ))
+            })?;
+        let (
+            turn_record_id,
+            role,
+            phase,
+            round,
+            delivery_state,
+            recorded_thread_id,
+            recorded_turn_id,
+            binding_generation,
+        ) = pending;
+        if role != "REVIEWER"
+            || phase != "RESULT_REVIEW"
+            || round != resumed_state.round
+            || delivery_state != "SENT"
+            || recorded_thread_id.as_deref() != Some(thread_id)
+            || recorded_turn_id.as_deref() != Some(turn_id)
+            || binding_generation.is_some()
+        {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "run {run_id} pending turn is not the exact Reviewer verdict replay boundary"
+            )));
+        }
+        let completed_turn_json = transaction
+            .query_row(
+                "SELECT completed_turn_json
+                 FROM turn_event_completions
+                 WHERE turn_record_id = ?1 AND run_id = ?2
+                   AND thread_id = ?3 AND turn_id = ?4",
+                params![turn_record_id, run_id, thread_id, turn_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::TerminalTurnNotRetryable(format!(
+                    "turn {turn_id} has no durable completion event for replay"
+                ))
+            })?;
+        let completed_turn: Value = serde_json::from_str(&completed_turn_json)?;
+        if completed_turn.get("id").and_then(Value::as_str) != Some(turn_id)
+            || completed_turn.get("status").and_then(Value::as_str) != Some("completed")
+        {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "turn {turn_id} has no successful canonical completion for replay"
+            )));
+        }
+        let (stale_reasoning_count, unsafe_incomplete_count) = transaction.query_row(
+            "SELECT
+                COALESCE(SUM(CASE
+                    WHEN lifecycle_state = 'STARTED' AND item_type = 'reasoning'
+                    THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE
+                    WHEN lifecycle_state != 'COMPLETED'
+                     AND NOT (lifecycle_state = 'STARTED' AND item_type = 'reasoning')
+                    THEN 1 ELSE 0 END), 0)
+             FROM turn_event_items
+             WHERE turn_record_id = ?1 AND run_id = ?2
+               AND thread_id = ?3 AND turn_id = ?4",
+            params![turn_record_id, run_id, thread_id, turn_id],
+            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)),
+        )?;
+        if stale_reasoning_count == 0 || unsafe_incomplete_count != 0 {
+            return Err(StoreError::TerminalTurnNotRetryable(format!(
+                "turn {turn_id} is not the exact stale-reasoning lifecycle compatibility case"
+            )));
+        }
+
+        let common_dir = resumed_state.facts.git_common_dir.to_string_lossy();
+        match transaction.execute(
+            "INSERT INTO locks (repository_id, run_id, primary_worktree, acquired_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                common_dir.as_ref(),
+                run_id,
+                resumed_state
+                    .facts
+                    .primary_worktree
+                    .to_string_lossy()
+                    .as_ref(),
+                now_unix(),
+            ],
+        ) {
+            Ok(_) => {}
+            Err(error) if is_constraint(&error) => {
+                return Err(StoreError::ActiveRunExists(format!(
+                    "repository {} already has an active run",
+                    resumed_state.facts.git_common_dir.display()
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        update_run_row(&transaction, &run_id, resumed_state)?;
+        transaction.execute(
+            "INSERT INTO transitions (
+                run_id, from_phase, to_phase, status, reason_code,
+                response_hash, created_at
+             ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)",
+            params![
+                run_id,
+                enum_name(&blocked_state.phase)?,
+                enum_name(&resumed_state.phase)?,
+                enum_name(&resumed_state.status)?,
+                now_unix(),
+            ],
+        )?;
         transaction.commit()?;
         Ok(())
     }

@@ -350,6 +350,114 @@ async fn task_cwd_is_metadata_and_bound_worktrees_drive_turns() {
 }
 
 #[tokio::test]
+async fn completed_reviewer_verdict_tolerates_only_stale_started_reasoning_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(
+        FakeAppServer::new(conflict_free_replies())
+            .with_stale_started_reasoning_on_result_review(),
+    );
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+
+    let accepted = coordinator.drive(RUN_ID).await.unwrap();
+
+    assert_eq!(accepted.status, RunStatus::Accepted);
+    let evidence = store
+        .turn_event_evidence(RUN_ID, "reviewer", "turn-7")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        evidence.ignored_started_reasoning_item_ids,
+        vec!["stale-reasoning-turn-7"]
+    );
+    assert_eq!(app.request_count(), 7);
+}
+
+#[tokio::test]
+async fn legacy_reviewer_reasoning_lifecycle_blocker_replays_the_same_completed_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
+    let app = Arc::new(FakeAppServer::deferred(
+        conflict_free_replies(),
+        7,
+        DeferMode::Hold,
+    ));
+    let coordinator = Coordinator::new(
+        Arc::clone(&app),
+        store.clone(),
+        Arc::new(RecordingSafety::default()),
+        fast_options(),
+    );
+    coordinator
+        .start(fixture_run(), start_request())
+        .await
+        .unwrap();
+    let paused = coordinator.drive(RUN_ID).await.unwrap();
+    assert_eq!(paused.status, RunStatus::PausedUserAction);
+    assert_eq!(paused.phase, Phase::ResultReview);
+    assert_eq!(paused.next_action, NextAction::RequestReviewerResultVerdict);
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    assert_eq!(pending.thread_id.as_deref(), Some("reviewer"));
+    assert_eq!(pending.turn_id.as_deref(), Some("turn-7"));
+
+    app.complete_deferred_turns();
+    store
+        .record_turn_item_event(
+            RUN_ID,
+            "reviewer",
+            "turn-7",
+            "item/started",
+            &json!({
+                "id": "stale-reasoning-turn-7",
+                "type": "reasoning",
+                "summary": []
+            }),
+        )
+        .unwrap();
+    store
+        .record_turn_completed_event(
+            RUN_ID,
+            "reviewer",
+            "turn-7",
+            &json!({"id": "turn-7", "status": "completed", "items": []}),
+        )
+        .unwrap();
+    let mut blocked = paused;
+    blocked.record_error(RunDiagnostic {
+        code: "INCOMPATIBLE_STATE".into(),
+        detail: "INCOMPATIBLE_STATE: turn turn-7 completed before all item lifecycle events were persisted".into(),
+        operation: None,
+        action: NextAction::RequestReviewerResultVerdict,
+        role: Some(Role::Reviewer),
+        thread_id: Some("reviewer".into()),
+        source_thread_id: None,
+        effective_thread_id: None,
+        participant_binding_generation: None,
+        participant_binding_mode: None,
+        participant_server: None,
+    });
+    blocked.block("INCOMPATIBLE_STATE");
+    store.save_state(&blocked).unwrap();
+
+    let accepted = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(accepted.status, RunStatus::Accepted);
+    assert_eq!(accepted.facts.run_id.to_string(), RUN_ID);
+    assert_eq!(accepted.integration_sha.as_deref(), Some(INTEGRATION_SHA));
+    assert_eq!(app.request_count(), 7);
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 0);
+}
+
+#[tokio::test]
 async fn completed_patch_limit_blocker_is_verified_instead_of_terminating() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
@@ -6437,6 +6545,7 @@ struct FakeAppServer {
     verification_item_type: Option<&'static str>,
     marker_protocol: bool,
     event_only_turn_items: bool,
+    stale_started_reasoning_on_result_review: bool,
     start_error: Option<String>,
     lose_next_start_response: AtomicBool,
     participant_inventory: ParticipantInventory,
@@ -6546,6 +6655,7 @@ impl FakeAppServer {
             verification_item_type: None,
             marker_protocol: false,
             event_only_turn_items: false,
+            stale_started_reasoning_on_result_review: false,
             start_error: None,
             lose_next_start_response: AtomicBool::new(false),
             participant_inventory: ParticipantInventory::Available,
@@ -6596,6 +6706,11 @@ impl FakeAppServer {
 
     fn with_event_only_turn_items(mut self) -> Self {
         self.event_only_turn_items = true;
+        self
+    }
+
+    fn with_stale_started_reasoning_on_result_review(mut self) -> Self {
+        self.stale_started_reasoning_on_result_review = true;
         self
     }
 
@@ -7501,6 +7616,56 @@ impl AppServer for FakeAppServer {
                 }));
                 items.push(agent);
             }
+        }
+        if action == "REQUEST_REVIEWER_RESULT_VERDICT"
+            && self.stale_started_reasoning_on_result_review
+            && turn.get("status").and_then(Value::as_str) == Some("completed")
+        {
+            let reasoning = json!({
+                "id": format!("stale-reasoning-{turn_id}"),
+                "type": "reasoning",
+                "summary": []
+            });
+            let items = turn["items"].as_array_mut().unwrap();
+            let agent = items.pop().unwrap();
+            items.push(reasoning.clone());
+            items.push(agent);
+            let completed_turn = json!({
+                "id": turn_id,
+                "status": "completed",
+                "items": []
+            });
+            let mut events = self.events.lock().unwrap();
+            events.push_back(AppEvent {
+                id: None,
+                method: "item/started".into(),
+                params: json!({
+                    "threadId": thread_id,
+                    "turnId": turn_id,
+                    "item": reasoning,
+                }),
+            });
+            for item in items.iter().filter(|item| {
+                item.get("type").and_then(Value::as_str) != Some("reasoning")
+            }) {
+                events.push_back(AppEvent {
+                    id: None,
+                    method: "item/completed".into(),
+                    params: json!({
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "item": item,
+                    }),
+                });
+            }
+            events.push_back(AppEvent {
+                id: None,
+                method: "turn/completed".into(),
+                params: json!({
+                    "threadId": thread_id,
+                    "turn": completed_turn,
+                }),
+            });
         }
         if action == "REQUEST_PRIMARY_VERIFICATION"
             && self.event_only_turn_items

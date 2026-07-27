@@ -182,6 +182,40 @@ fn acceptance_requires_exactly_one_evidence_item_per_frozen_command() {
 }
 
 #[test]
+fn stale_reviewer_reasoning_lifecycle_blocker_restores_exact_result_review() {
+    let integration_sha = "cccccccccccccccccccccccccccccccccccccccc";
+    let mut state = fixture_result_state(integration_sha);
+    state.verification_worktree = Some(PathBuf::from("/state/verification/run"));
+    let original_tests = state.test_evidence.clone();
+    state.record_error(RunDiagnostic {
+        code: "INCOMPATIBLE_STATE".into(),
+        detail: "INCOMPATIBLE_STATE: turn reviewer-verdict completed before all item lifecycle events were persisted".into(),
+        operation: None,
+        action: NextAction::RequestReviewerResultVerdict,
+        role: Some(Role::Reviewer),
+        thread_id: Some("reviewer".into()),
+        source_thread_id: None,
+        effective_thread_id: None,
+        participant_binding_generation: None,
+        participant_binding_mode: None,
+        participant_server: None,
+    });
+    state.block("INCOMPATIBLE_STATE");
+
+    let action = state
+        .retry_blocked_reviewer_reasoning_lifecycle_compatibility()
+        .unwrap();
+
+    assert_eq!(action, NextAction::RequestReviewerResultVerdict);
+    assert_eq!(state.status, RunStatus::Running);
+    assert_eq!(state.phase, Phase::ResultReview);
+    assert_eq!(state.integration_sha.as_deref(), Some(integration_sha));
+    assert_eq!(state.test_evidence, original_tests);
+    assert!(state.reason_code.is_none());
+    assert!(state.last_error.is_none());
+}
+
+#[test]
 fn persisted_accepted_result_must_match_authoritative_state_and_publication_boundary() {
     let integration_sha = "cccccccccccccccccccccccccccccccccccccccc";
     let mut state = fixture_result_state(integration_sha);

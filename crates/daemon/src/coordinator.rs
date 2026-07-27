@@ -34,8 +34,8 @@ use tokio::sync::Mutex;
 
 use crate::policy::{
     ApprovalDecision, command_approval_denial, decide_command_approval,
-    is_retry_safe_read_only_integration_command, normalize_app_server_command,
-    validate_test_command,
+    is_retry_safe_read_only_integration_command, is_retry_safe_read_only_reviewer_command,
+    normalize_app_server_command, validate_test_command,
 };
 use crate::store::{
     AcceptedTurn, PARTICIPANT_CAPABILITY_GENERATION, SqliteRunStore, StoreError,
@@ -900,6 +900,8 @@ where
             integration_invalid_response_retry_action(&state)?;
         let retry_verification_without_execution_action =
             verification_without_execution_retry_action(&state)?;
+        let retry_reviewer_reasoning_lifecycle_action =
+            reviewer_reasoning_lifecycle_compatibility_retry_action(&state)?;
         let retry_verification_environment_action =
             verification_environment_unavailable_retry_action(&state)?;
         let retry_unsent_ephemeral_source_recreation_action =
@@ -928,6 +930,7 @@ where
             .or(retry_forbidden_operation_action)
             .or(retry_integration_invalid_response_action)
             .or(retry_verification_without_execution_action)
+            .or(retry_reviewer_reasoning_lifecycle_action)
             .or(retry_verification_environment_action)
             .or(retry_unsent_ephemeral_source_recreation_action)
             .or(retry_completed_response_action)
@@ -1209,6 +1212,30 @@ where
                         )?;
                 }
             }
+            return Ok(state);
+        }
+        if let Some(action) = retry_reviewer_reasoning_lifecycle_action {
+            let retry = self
+                .inspect_completed_reviewer_reasoning_lifecycle_replay(&state, action)
+                .await?;
+            let blocked_state = state.clone();
+            let restored_action =
+                state.retry_blocked_reviewer_reasoning_lifecycle_compatibility()?;
+            if restored_action != action {
+                return Err(CoordinatorError::operational(
+                    "INCOMPATIBLE_STATE",
+                    "restored Reviewer lifecycle action does not match its completed turn",
+                ));
+            }
+            self.store
+                .reactivate_blocked_run_with_completed_turn_replay(
+                    &blocked_state,
+                    &state,
+                    &retry.message_hash,
+                    &retry.thread_id,
+                    &retry.turn_id,
+                    &retry.observed_status,
+                )?;
             return Ok(state);
         }
         if let Some(action) = retry_verification_environment_action {
@@ -2372,6 +2399,122 @@ where
                 format!("completed pre-integration turn {turn_id} cannot be retried: {blocker}"),
             ));
         }
+        Ok(RetryableCompletedTurn {
+            message_hash: pending.message_hash,
+            thread_id: thread_id.to_owned(),
+            turn_id: turn_id.to_owned(),
+            observed_status: status.to_owned(),
+        })
+    }
+
+    async fn inspect_completed_reviewer_reasoning_lifecycle_replay(
+        &self,
+        state: &RunState,
+        action: NextAction,
+    ) -> Result<RetryableCompletedTurn, CoordinatorError> {
+        if action != NextAction::RequestReviewerResultVerdict
+            || state.integration_branch.is_none()
+            || state.integration_sha.is_none()
+            || state.current_integration_payload.is_none()
+            || state.verification_worktree.is_none()
+            || state.test_evidence.is_empty()
+            || state.accepted_result.is_some()
+        {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                "Reviewer lifecycle replay requires an unchanged, verified, unaccepted integration result",
+            ));
+        }
+        let run_id = state.facts.run_id.to_string();
+        let pending = self.store.pending_send(&run_id)?.ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "Reviewer lifecycle blocker has no persisted pending turn",
+            )
+        })?;
+        let (Some(thread_id), Some(turn_id)) =
+            (pending.thread_id.as_deref(), pending.turn_id.as_deref())
+        else {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "Reviewer lifecycle blocker has no exact persisted turn identity",
+            ));
+        };
+        if pending.role != role_name(Role::Reviewer)
+            || pending.phase != phase_name(Phase::ResultReview)
+            || pending.round != state.round
+            || thread_id != state.facts.reviewer_thread_id
+            || pending.participant_binding_generation.is_some()
+        {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "Reviewer lifecycle blocker does not match the deterministic final-verdict request",
+            ));
+        }
+        let expected_detail = format!(
+            "INCOMPATIBLE_STATE: turn {turn_id} completed before all item lifecycle events were persisted"
+        );
+        if state.last_error.as_ref().map(|diagnostic| diagnostic.detail.as_str())
+            != Some(expected_detail.as_str())
+        {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                "Reviewer lifecycle blocker does not name its exact pending turn",
+            ));
+        }
+        let evidence = self
+            .store
+            .turn_event_evidence(&run_id, thread_id, turn_id)?
+            .ok_or_else(|| {
+                CoordinatorError::operational(
+                    "HISTORY_UNAVAILABLE",
+                    "Reviewer lifecycle blocker has no durable completion event",
+                )
+            })?;
+        if evidence.ignored_started_reasoning_item_ids.is_empty() {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                "Reviewer lifecycle replay requires at least one exact stale reasoning item",
+            ));
+        }
+
+        self.validate_recorded_role_thread(state, Role::Reviewer, thread_id, None)?;
+        let turn = self
+            .recorded_completed_turn(
+                state,
+                Role::Reviewer,
+                thread_id,
+                turn_id,
+                None,
+                "persisted Reviewer lifecycle-compatibility turn",
+            )
+            .await?;
+        let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
+            CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "persisted Reviewer lifecycle-compatibility turn has no canonical status",
+            )
+        })?;
+        if status != "completed" || !turn_contains_request_hash(&turn, &pending.message_hash) {
+            return Err(CoordinatorError::operational(
+                "HISTORY_UNAVAILABLE",
+                "Reviewer lifecycle replay requires the exact completed request turn",
+            ));
+        }
+        if let Some(blocker) = completed_reviewer_lifecycle_replay_blocker(state, &turn) {
+            return Err(CoordinatorError::operational(
+                "MODEL_RESPONSE_RETRY_UNSAFE",
+                format!("Reviewer lifecycle turn cannot be replayed: {blocker}"),
+            ));
+        }
+        parse_participant_response(
+            final_agent_text(&turn)?.trim(),
+            allowed_participant_signals(NextAction::RequestReviewerResultVerdict),
+        )
+        .map_err(|error| {
+            CoordinatorError::operational("HISTORY_UNAVAILABLE", error.to_string())
+        })?;
+
         Ok(RetryableCompletedTurn {
             message_hash: pending.message_hash,
             thread_id: thread_id.to_owned(),
@@ -6685,6 +6828,73 @@ fn completed_read_only_turn_retry_blocker(turn: &Value) -> Option<String> {
     (!has_agent_message).then(|| "canonical turn has no agent response".into())
 }
 
+fn completed_reviewer_lifecycle_replay_blocker(
+    state: &RunState,
+    turn: &Value,
+) -> Option<String> {
+    let Some(items) = turn.get("items").and_then(Value::as_array) else {
+        return Some("canonical Reviewer items are unavailable".into());
+    };
+    if items.is_empty() {
+        return Some("canonical Reviewer items are empty".into());
+    }
+    let mut has_agent_message = false;
+    for item in items {
+        let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+            return Some("canonical Reviewer item has no type".into());
+        };
+        match item_type {
+            "userMessage" | "reasoning" => {}
+            "agentMessage" => has_agent_message = true,
+            "contextCompaction" => {
+                if let Some(blocker) = context_compaction_retry_blocker(item) {
+                    return Some(blocker);
+                }
+            }
+            "commandExecution" => {
+                let status = item.get("status").and_then(Value::as_str);
+                let exit_code = item.get("exitCode");
+                let terminal_shape_is_valid = match status {
+                    Some("completed") => exit_code.and_then(Value::as_i64).is_some(),
+                    Some("failed" | "declined") => {
+                        exit_code.is_none_or(|value| value.is_null() || value.as_i64().is_some())
+                    }
+                    _ => false,
+                };
+                if !terminal_shape_is_valid {
+                    return Some(
+                        "Reviewer command execution is not in a canonical terminal state".into(),
+                    );
+                }
+                let Some(command) = item.get("command").and_then(Value::as_str) else {
+                    return Some("Reviewer command execution omits its canonical command".into());
+                };
+                let Some(cwd) = item.get("cwd").and_then(Value::as_str) else {
+                    return Some("Reviewer command execution omits its canonical cwd".into());
+                };
+                if !has_agent_initiated_command_source(item)
+                    || !is_retry_safe_read_only_reviewer_command(state, cwd, command)
+                {
+                    return Some(
+                        "Reviewer command is not an approved retry-safe read-only query".into(),
+                    );
+                }
+            }
+            "mcpToolCall" => {
+                if let Some(blocker) = read_only_consensus_mcp_retry_blocker(item) {
+                    return Some(blocker);
+                }
+            }
+            _ => {
+                return Some(format!(
+                    "canonical Reviewer item type {item_type} may have side effects"
+                ));
+            }
+        }
+    }
+    (!has_agent_message).then(|| "canonical Reviewer turn has no final response".into())
+}
+
 fn verification_without_execution_retry_blocker(turn: &Value) -> Option<String> {
     let Some(items) = turn.get("items").and_then(Value::as_array) else {
         return Some("canonical verification items are unavailable".into());
@@ -6999,6 +7209,32 @@ fn verification_without_execution_retry_action(
         return Ok(None);
     }
     Ok(Some(NextAction::RequestPrimaryVerification))
+}
+
+fn reviewer_reasoning_lifecycle_compatibility_retry_action(
+    state: &RunState,
+) -> Result<Option<NextAction>, CoordinatorError> {
+    if state.reason_code.as_deref() != Some("INCOMPATIBLE_STATE") {
+        return Ok(None);
+    }
+    let Some(diagnostic) = state.last_error.as_ref() else {
+        return Ok(None);
+    };
+    if diagnostic.code != "INCOMPATIBLE_STATE"
+        || diagnostic.action != NextAction::RequestReviewerResultVerdict
+        || diagnostic.role != Some(Role::Reviewer)
+        || !diagnostic
+            .detail
+            .starts_with("INCOMPATIBLE_STATE: turn ")
+        || !diagnostic
+            .detail
+            .ends_with(" completed before all item lifecycle events were persisted")
+    {
+        return Ok(None);
+    }
+    let mut candidate = state.clone();
+    let action = candidate.retry_blocked_reviewer_reasoning_lifecycle_compatibility()?;
+    Ok(Some(action))
 }
 
 fn verification_environment_unavailable_retry_action(

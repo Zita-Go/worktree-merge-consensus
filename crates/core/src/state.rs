@@ -727,6 +727,72 @@ impl RunState {
         Ok(self.next_action)
     }
 
+    pub fn retry_blocked_reviewer_reasoning_lifecycle_compatibility(
+        &mut self,
+    ) -> Result<NextAction, StateError> {
+        if self.status != RunStatus::Blocked
+            || self.phase != Phase::Blocked
+            || self.next_action != NextAction::Stop
+            || self.reason_code.as_deref() != Some("INCOMPATIBLE_STATE")
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "only the terminal Reviewer reasoning-lifecycle compatibility blocker can be retried",
+            ));
+        }
+        let diagnostic = self.last_error.as_ref().ok_or_else(|| {
+            state_error(
+                "INCOMPATIBLE_STATE",
+                "Reviewer reasoning-lifecycle recovery requires its originating diagnostic",
+            )
+        })?;
+        if diagnostic.code != "INCOMPATIBLE_STATE"
+            || diagnostic.action != NextAction::RequestReviewerResultVerdict
+            || diagnostic.role != Some(Role::Reviewer)
+            || diagnostic.thread_id.as_deref() != Some(self.facts.reviewer_thread_id.as_str())
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "Reviewer reasoning-lifecycle recovery is limited to the bound final-verdict turn",
+            ));
+        }
+        if !diagnostic
+            .detail
+            .starts_with("INCOMPATIBLE_STATE: turn ")
+            || !diagnostic
+                .detail
+                .ends_with(" completed before all item lifecycle events were persisted")
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "Reviewer reasoning-lifecycle recovery diagnostic does not match the compatibility blocker",
+            ));
+        }
+        if !self.plan_approved
+            || self.integration_branch.is_none()
+            || self.integration_sha.is_none()
+            || self.current_integration_payload.is_none()
+            || self.verification_worktree.is_none()
+            || self.test_evidence.is_empty()
+            || self.accepted_result.is_some()
+            || self.result_approved_sha.is_some()
+        {
+            return Err(state_error(
+                "NOT_RETRYABLE",
+                "Reviewer reasoning-lifecycle recovery requires an unchanged, verified, unaccepted integration result",
+            ));
+        }
+        self.validate_test_evidence()?;
+
+        self.status = RunStatus::Running;
+        self.phase = Phase::ResultReview;
+        self.next_action = NextAction::RequestReviewerResultVerdict;
+        self.reason_code = None;
+        self.last_error = None;
+        self.validate_persisted()?;
+        Ok(self.next_action)
+    }
+
     pub fn recover_v025_verification_completion_collision(
         &mut self,
     ) -> Result<NextAction, StateError> {
