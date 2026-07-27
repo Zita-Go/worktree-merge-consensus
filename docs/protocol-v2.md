@@ -318,6 +318,26 @@ repeated. The serialized `no_progress_rounds` member is a policy threshold,
 not a live counter; material plan changes reset the effective fingerprint
 streak.
 
+Release 0.3.11 preserves the authoritative one-patch boundary when the Primary
+discovers a defect during its final read-only inspection. A precise legacy
+`BLOCKED:PATCH_LIMIT_REACHED` response is promoted to `INTEGRATION_READY` only
+when SQLite proves the current request already owns one successful patch. The
+coordinator then validates and tests the exact clean commit; a failing frozen
+check opens a separate request-bound correction round instead of repeating the
+completed patch.
+
+Release 0.3.12 distinguishes App Server progress messages from the terminal
+assistant response during side-effect ordering audits. An `agentMessage` with
+`phase: commentary` may precede commands or the one authorized patch, while
+`phase: final_answer`, a missing phase, or an unknown phase ends execution for
+audit purposes. This permits explicit same-Run recovery of the exact 0.3.11
+false-positive `FORBIDDEN_OPERATION` only when canonical history proves
+commentary, then the matching successful patch, then the final answer. The
+coordinator revalidates patch provenance, the clean authoritative target,
+ancestry, and frozen refs before archiving the response attempt and requesting
+one read-only confirmation. A genuine command or patch after the final answer
+remains terminal, and no write is repeated.
+
 Malformed, missing, duplicate, unknown, or action-incompatible markers fail
 closed with `INVALID_RESPONSE`. A v1 response remains governed by the
 [legacy v1 protocol](protocol-v1.md).

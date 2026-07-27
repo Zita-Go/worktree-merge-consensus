@@ -95,6 +95,23 @@ Primary attempt while the current attempt contains only result confirmation.
 Those histories are validated separately and must share the exact frozen Source
 lineage and request identity.
 
+### Historical commentary/final-answer audit migration
+
+Version 0.3.12 can resume the same Run after the exact 0.3.11
+`FORBIDDEN_OPERATION` detail
+`controlled patch call appears after the final agent response`. Eligibility is
+not inferred from that text alone. Canonical App Server history must prove an
+`agentMessage` with `phase: commentary` came before exactly one successful,
+request-bound controlled patch and that `phase: final_answer` came afterward.
+The successful patch record, clean authoritative target, source ancestry,
+frozen refs, request identity, and participant binding must all revalidate.
+
+Recovery archives only that completed response attempt and requests one
+read-only `INTEGRATION_READY` confirmation. Missing, malformed, or unknown
+message phases remain terminal for audit purposes. A patch or command that
+actually occurs after `final_answer`, a second patch, partial history, or any
+repository drift remains non-recoverable.
+
 ## Historical read-only command migrations
 
 Version 0.2.14 added the exact read-only query

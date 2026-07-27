@@ -1790,6 +1790,7 @@ fn completed_integration_command_audit_detail(detail: &str) -> bool {
         detail,
         "integration command is not canonically completed with exit code zero"
             | "integration command is outside the frozen execution policy"
+            | "controlled patch call appears after the final agent response"
             | "patch-success confirmation executed a non-read-only command: git symbolic-ref --short HEAD"
             | "patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git symbolic-ref --short HEAD'"
             | "patch-success confirmation executed a non-read-only command: git branch --show-current"

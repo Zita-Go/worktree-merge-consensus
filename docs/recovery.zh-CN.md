@@ -79,6 +79,19 @@ merge、stage 或 commit。
 真实生产布局可能把成功补丁保存在已归档 ephemeral Primary 尝试中，而当前尝试只包含结果确认。
 两份历史会分别验证，并且必须共享精确冻结 Source 谱系和请求身份。
 
+### 历史 commentary/final-answer 审计迁移
+
+0.3.12 可以恢复由 0.3.11 精确错误
+`controlled patch call appears after the final agent response` 阻塞的同一个 Run，但不会只根据
+错误文本判断资格。规范 App Server 历史必须证明：带 `phase: commentary` 的
+`agentMessage` 位于唯一一次成功且绑定请求的受控补丁之前，带 `phase: final_answer` 的最终回复
+位于补丁之后；同时成功补丁记录、干净的权威目标、来源祖先关系、冻结引用、请求身份和参与绑定
+必须全部重新通过验证。
+
+恢复只归档这次已完成回复，并请求一次只读 `INTEGRATION_READY` 确认。缺失、格式错误或未知的
+消息 phase 在审计中仍被视为终态。真正发生在 `final_answer` 之后的补丁或命令、第二次补丁、
+不完整历史或任何仓库漂移都不能恢复。
+
 ## 历史只读命令迁移
 
 0.2.14 增加精确只读查询 `git symbolic-ref --short HEAD`；0.3.1 增加

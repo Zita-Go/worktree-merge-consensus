@@ -426,6 +426,24 @@ provably unsent and the frozen Source-history fingerprint is identical. The
 replacement performs confirmation only. Near-match identities, uncertain
 dispatch, partial event history, or changed lineage remain fail-closed.
 
+Release 0.3.11 hands a clean committed result to coordinator-owned
+verification when the Primary reports the exact legacy
+`BLOCKED:PATCH_LIMIT_REACHED` marker after its single request-bound patch. The
+successful-patch record, target identity, ancestry, cleanliness, and frozen
+refs remain authoritative; a failing test creates a new correction request and
+never reuses the completed patch authorization.
+
+Release 0.3.12 treats only `agentMessage` items with `phase: commentary` as
+non-terminal progress during integration side-effect audits. `final_answer`,
+missing phases, malformed phases, and unknown phases end execution and keep
+later commands or patches forbidden. Explicit same-Run recovery recognizes the
+exact 0.3.11 false-positive diagnostic only after canonical history proves
+commentary-before-patch-before-final ordering, one matching successful patch,
+the clean authoritative target, source ancestry, unchanged frozen refs, and
+the bound participant identity. It archives only the completed response and
+asks for a read-only confirmation; no branch, merge, patch, stage, or commit is
+repeated.
+
 `doctor` validates a fresh App Server protocol connection and asks the
 coordinator daemon to probe its own connection, but deliberately does not spend
 a model turn. If the managed App Server restarts after the coordinator daemon,

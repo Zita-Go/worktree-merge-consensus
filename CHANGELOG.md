@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.12
+
+- Distinguish App Server `agentMessage` progress items with
+  `phase: commentary` from the terminal `phase: final_answer` during
+  integration and confirmation side-effect audits.
+- Recover the exact 0.3.11 false-positive `FORBIDDEN_OPERATION` on the same
+  Run only when canonical history proves commentary preceded one successful
+  request-bound patch and the final response followed it; revalidate the clean
+  target, ancestry, frozen refs, and patch provenance before requesting a
+  read-only confirmation.
+- Keep missing, malformed, and unknown message phases terminal, and continue
+  to reject every command or patch that genuinely occurs after the final
+  answer. Recovery never repeats branch creation, merge, patch, staging, or
+  commit.
+- Add state-machine, audit-ordering, and end-to-end same-Run recovery
+  regressions for the production commentary/patch/final-answer item shape.
+
 ## 0.3.11
 
 - Preserve the one-successful-patch safety boundary while allowing a clean,

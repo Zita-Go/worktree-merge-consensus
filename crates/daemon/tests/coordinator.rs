@@ -1654,6 +1654,65 @@ async fn completed_integration_forbidden_read_only_nonzero_resumes_the_same_run(
 }
 
 #[tokio::test]
+async fn commentary_before_completed_patch_resumes_the_same_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let (coordinator, app, store, safety) =
+        seed_invalid_integration_recovery(&path, PARTICIPANT_MCP_SERVER).await;
+    let pending = store.pending_send(RUN_ID).unwrap().unwrap();
+    let thread_id = pending.thread_id.clone().unwrap();
+    let turn_id = pending.turn_id.clone().unwrap();
+    app.insert_turn_item_after_user(
+        &thread_id,
+        &turn_id,
+        json!({
+            "id": "commentary-before-patch",
+            "type": "agentMessage",
+            "text": "Preparing the controlled patch.",
+            "phase": "commentary",
+        }),
+    );
+
+    let mut blocked = store.load_run(RUN_ID).unwrap().unwrap();
+    blocked.reason_code = Some("FORBIDDEN_OPERATION".into());
+    blocked.last_error = Some(RunDiagnostic {
+        code: "FORBIDDEN_OPERATION".into(),
+        detail: "controlled patch call appears after the final agent response".into(),
+        operation: None,
+        action: NextAction::RequestPrimaryIntegration,
+        role: Some(Role::Primary),
+        thread_id: Some(thread_id),
+        source_thread_id: None,
+        effective_thread_id: None,
+        participant_binding_generation: None,
+        participant_binding_mode: None,
+        participant_server: None,
+    });
+    store.save_state(&blocked).unwrap();
+    safety
+        .integration_branch_active
+        .store(true, Ordering::SeqCst);
+
+    let accepted = coordinator.resume(RUN_ID).await.unwrap();
+
+    assert_eq!(accepted.status, RunStatus::Accepted);
+    assert_eq!(accepted.integration_sha.as_deref(), Some(INTEGRATION_SHA));
+    assert_eq!(store.turn_attempt_count(RUN_ID).unwrap(), 1);
+    assert!(
+        store
+            .successful_patch_recorded(RUN_ID, &pending.message_hash)
+            .unwrap()
+    );
+    let retry_prompt = app
+        .prompts()
+        .into_iter()
+        .rfind(|prompt| prompt.contains("REQUEST_PRIMARY_INTEGRATION"))
+        .unwrap();
+    assert!(retry_prompt.contains("Coordinator recovery override"));
+    assert!(retry_prompt.contains("Do not call consensus_apply_patch"));
+}
+
+#[tokio::test]
 async fn completed_ephemeral_integration_with_unicode_commit_token_resumes_the_same_run() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");
@@ -6774,6 +6833,22 @@ impl FakeAppServer {
             .iter()
             .position(|item| item.get("type").and_then(Value::as_str) == Some("agentMessage"))
             .unwrap_or(items.len());
+        items.insert(index, item);
+    }
+
+    fn insert_turn_item_after_user(&self, thread_id: &str, turn_id: &str, item: Value) {
+        let mut threads = self.threads.lock().unwrap();
+        let turn = threads
+            .get_mut(thread_id)
+            .unwrap()
+            .iter_mut()
+            .find(|turn| turn.get("id").and_then(Value::as_str) == Some(turn_id))
+            .unwrap();
+        let items = turn["items"].as_array_mut().unwrap();
+        let index = items
+            .iter()
+            .position(|item| item.get("type").and_then(Value::as_str) == Some("userMessage"))
+            .map_or(0, |index| index + 1);
         items.insert(index, item);
     }
 

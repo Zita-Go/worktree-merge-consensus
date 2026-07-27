@@ -6062,7 +6062,7 @@ fn failed_patch_not_authorized_turn_blocker(
         };
         match item_type {
             "userMessage" | "reasoning" => {}
-            "agentMessage" => final_agent_seen = true,
+            "agentMessage" => final_agent_seen |= agent_message_ends_execution(item),
             "contextCompaction" => {
                 if let Some(blocker) = context_compaction_retry_blocker(item) {
                     return Some(blocker);
@@ -6173,7 +6173,7 @@ fn recoverable_integration_turn_blocker(
         };
         match item_type {
             "userMessage" | "reasoning" => {}
-            "agentMessage" => final_agent_seen = true,
+            "agentMessage" => final_agent_seen |= agent_message_ends_execution(item),
             "contextCompaction" => {
                 if let Some(blocker) = context_compaction_retry_blocker(item) {
                     return Some(blocker);
@@ -6280,7 +6280,7 @@ fn recoverable_integration_confirmation_turn_blocker(
         };
         match item_type {
             "userMessage" | "reasoning" => {}
-            "agentMessage" => final_agent_seen = true,
+            "agentMessage" => final_agent_seen |= agent_message_ends_execution(item),
             "contextCompaction" => {
                 if let Some(blocker) = context_compaction_retry_blocker(item) {
                     return Some(blocker);
@@ -6943,6 +6943,7 @@ fn completed_integration_forbidden_detail_is_retryable(state: &RunState, detail:
         detail,
         "integration command is not canonically completed with exit code zero"
             | "integration command is outside the frozen execution policy"
+            | "controlled patch call appears after the final agent response"
     ) {
         return true;
     }
@@ -7508,6 +7509,14 @@ fn final_agent_text(turn: &Value) -> Result<&str, CoordinatorError> {
         })
 }
 
+fn agent_message_ends_execution(item: &Value) -> bool {
+    // App Server persists progress updates as agentMessage items too. Only the
+    // explicitly non-terminal commentary phase may precede more execution.
+    // Missing, malformed, or unknown phases remain terminal for legacy
+    // compatibility and to keep the side-effect audit fail-closed.
+    item.get("phase").and_then(Value::as_str) != Some("commentary")
+}
+
 fn user_action_event(event: &AppEvent, thread_id: &str, turn_id: &str) -> bool {
     let method = event.method.as_str();
     let is_request = event.id.is_some()
@@ -7751,6 +7760,10 @@ mod retry_safety_tests {
     fn completed_confirmation_recovery_accepts_only_exact_current_branch_queries() {
         let mut state = integration_state();
         state.target_integration_branch = Some("consensus/test-run".into());
+        assert!(completed_integration_forbidden_detail_is_retryable(
+            &state,
+            "controlled patch call appears after the final agent response"
+        ));
         for command in [
             "git symbolic-ref --short HEAD",
             "/bin/bash -lc 'git symbolic-ref --short HEAD'",
@@ -7969,6 +7982,93 @@ mod retry_safety_tests {
             )
             .unwrap()
             .contains("SQLite success record")
+        );
+    }
+
+    #[test]
+    fn integration_recovery_distinguishes_commentary_from_the_final_answer() {
+        let state = integration_state();
+        let request_hash = "request-hash";
+        let successful_patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n";
+        let successful_hash = canonical_json_hash(&json!({"patch": successful_patch}));
+        let patch_call = json!({
+            "id": "patch",
+            "type": "mcpToolCall",
+            "pluginId": "worktree-merge-consensus@worktree-merge-consensus",
+            "server": PARTICIPANT_MCP_SERVER,
+            "tool": "consensus_apply_patch",
+            "arguments": {
+                "run_id": state.facts.run_id.to_string(),
+                "request_hash": request_hash,
+                "patch": successful_patch,
+            },
+            "status": "completed",
+            "appContext": null,
+        });
+        let commentary = json!({
+            "id": "commentary",
+            "type": "agentMessage",
+            "text": "Preparing the controlled patch.",
+            "phase": "commentary",
+        });
+        let final_answer = json!({
+            "id": "final",
+            "type": "agentMessage",
+            "text": "ready",
+            "phase": "final_answer",
+        });
+        let turn = json!({
+            "items": [
+                {"id": "user", "type": "userMessage"},
+                commentary,
+                patch_call,
+                final_answer,
+            ]
+        });
+
+        assert_eq!(
+            recoverable_integration_turn_blocker(
+                &state,
+                &turn,
+                request_hash,
+                &successful_hash,
+                false,
+            ),
+            None
+        );
+
+        let mut final_before_patch = turn.clone();
+        final_before_patch["items"]
+            .as_array_mut()
+            .unwrap()
+            .swap(2, 3);
+        assert_eq!(
+            recoverable_integration_turn_blocker(
+                &state,
+                &final_before_patch,
+                request_hash,
+                &successful_hash,
+                false,
+            )
+            .as_deref(),
+            Some("controlled patch call appears after the final agent response")
+        );
+
+        let mut legacy_phase_less = turn;
+        legacy_phase_less["items"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("phase");
+        assert_eq!(
+            recoverable_integration_turn_blocker(
+                &state,
+                &legacy_phase_less,
+                request_hash,
+                &successful_hash,
+                false,
+            )
+            .as_deref(),
+            Some("controlled patch call appears after the final agent response")
         );
     }
 

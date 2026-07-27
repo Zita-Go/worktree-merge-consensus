@@ -88,6 +88,16 @@ Known safe recovery queries remain narrowly scoped to the frozen Primary cwd
 and exact target identity. A near-match command, unknown item, non-agent source,
 wrong cwd, incomplete result, or possible write remains terminal.
 
+Matching 0.3.12 artifacts may also recover the exact 0.3.11 diagnostic
+`controlled patch call appears after the final agent response`. Resume is
+eligible only when canonical history proves a `phase: commentary` message came
+before one successful request-bound patch and `phase: final_answer` came after
+it, with matching patch provenance, a clean authoritative target, source
+ancestry, unchanged frozen refs, and the same participant binding. The daemon
+archives only that response attempt and requests a read-only confirmation. A
+real post-final command or patch, missing or unknown phase, second patch,
+partial history, or drift remains terminal.
+
 ## Controlled patch failures
 
 ### `PATCH_NOT_AUTHORIZED`

@@ -955,8 +955,9 @@ fn completed_integration_forbidden_audit_is_retryable_for_ephemeral_primary() {
 }
 
 #[test]
-fn exact_current_branch_confirmation_blockers_are_retryable_for_ephemeral_primary() {
+fn exact_completed_integration_forbidden_details_are_retryable_for_ephemeral_primary() {
     for detail in [
+        "controlled patch call appears after the final agent response",
         "patch-success confirmation executed a non-read-only command: git symbolic-ref --short HEAD",
         "patch-success confirmation executed a non-read-only command: /bin/bash -lc 'git symbolic-ref --short HEAD'",
         "patch-success confirmation executed a non-read-only command: git branch --show-current",
