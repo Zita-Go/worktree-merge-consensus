@@ -756,9 +756,7 @@ impl RunState {
                 "Reviewer reasoning-lifecycle recovery is limited to the bound final-verdict turn",
             ));
         }
-        if !diagnostic
-            .detail
-            .starts_with("INCOMPATIBLE_STATE: turn ")
+        if !diagnostic.detail.starts_with("INCOMPATIBLE_STATE: turn ")
             || !diagnostic
                 .detail
                 .ends_with(" completed before all item lifecycle events were persisted")

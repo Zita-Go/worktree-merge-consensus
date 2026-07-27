@@ -354,8 +354,7 @@ async fn completed_reviewer_verdict_tolerates_only_stale_started_reasoning_evide
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteRunStore::open(temp.path().join("state.db")).unwrap();
     let app = Arc::new(
-        FakeAppServer::new(conflict_free_replies())
-            .with_stale_started_reasoning_on_result_review(),
+        FakeAppServer::new(conflict_free_replies()).with_stale_started_reasoning_on_result_review(),
     );
     let coordinator = Coordinator::new(
         Arc::clone(&app),
@@ -7645,9 +7644,10 @@ impl AppServer for FakeAppServer {
                     "item": reasoning,
                 }),
             });
-            for item in items.iter().filter(|item| {
-                item.get("type").and_then(Value::as_str) != Some("reasoning")
-            }) {
+            for item in items
+                .iter()
+                .filter(|item| item.get("type").and_then(Value::as_str) != Some("reasoning"))
+            {
                 events.push_back(AppEvent {
                     id: None,
                     method: "item/completed".into(),

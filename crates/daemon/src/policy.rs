@@ -341,8 +341,7 @@ fn is_allowed_read_only_git_invocation(
     arguments: &[&str],
 ) -> bool {
     match subcommand {
-        "status" | "diff" | "show" | "log" | "rev-parse" | "merge-base" | "ls-files"
-        | "grep" => {
+        "status" | "diff" | "show" | "log" | "rev-parse" | "merge-base" | "ls-files" | "grep" => {
             safe_read_only_git_arguments(arguments)
         }
         "branch" => safe_branch_arguments(state, arguments),

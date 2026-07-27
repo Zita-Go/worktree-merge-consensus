@@ -2454,7 +2454,10 @@ where
         let expected_detail = format!(
             "INCOMPATIBLE_STATE: turn {turn_id} completed before all item lifecycle events were persisted"
         );
-        if state.last_error.as_ref().map(|diagnostic| diagnostic.detail.as_str())
+        if state
+            .last_error
+            .as_ref()
+            .map(|diagnostic| diagnostic.detail.as_str())
             != Some(expected_detail.as_str())
         {
             return Err(CoordinatorError::operational(
@@ -2509,11 +2512,8 @@ where
         }
         let mut replay_state = state.clone();
         replay_state.retry_blocked_reviewer_reasoning_lifecycle_compatibility()?;
-        let message = self.normalize_model_response(
-            &replay_state,
-            action,
-            final_agent_text(&turn)?.trim(),
-        )?;
+        let message =
+            self.normalize_model_response(&replay_state, action, final_agent_text(&turn)?.trim())?;
         replay_state.apply_message(message)?;
 
         Ok(RetryableCompletedTurn {
@@ -6829,10 +6829,7 @@ fn completed_read_only_turn_retry_blocker(turn: &Value) -> Option<String> {
     (!has_agent_message).then(|| "canonical turn has no agent response".into())
 }
 
-fn completed_reviewer_lifecycle_replay_blocker(
-    state: &RunState,
-    turn: &Value,
-) -> Option<String> {
+fn completed_reviewer_lifecycle_replay_blocker(state: &RunState, turn: &Value) -> Option<String> {
     let Some(items) = turn.get("items").and_then(Value::as_array) else {
         return Some("canonical Reviewer items are unavailable".into());
     };
@@ -7224,9 +7221,7 @@ fn reviewer_reasoning_lifecycle_compatibility_retry_action(
     if diagnostic.code != "INCOMPATIBLE_STATE"
         || diagnostic.action != NextAction::RequestReviewerResultVerdict
         || diagnostic.role != Some(Role::Reviewer)
-        || !diagnostic
-            .detail
-            .starts_with("INCOMPATIBLE_STATE: turn ")
+        || !diagnostic.detail.starts_with("INCOMPATIBLE_STATE: turn ")
         || !diagnostic
             .detail
             .ends_with(" completed before all item lifecycle events were persisted")
